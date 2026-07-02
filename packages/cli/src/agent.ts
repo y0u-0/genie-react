@@ -321,7 +321,7 @@ export function summarizeErrorState(result: unknown): string | null {
     const state =
       entry.isFallbackShowing === true ? 'fallback SHOWING' : 'suspended (fallback hidden)'
     lines.push(
-      `  ${String(entry.boundaryName)} #${num(entry.boundaryId)} ${state}` + sourceSuffix(entry),
+      `  ${String(entry.boundaryName)} #${num(entry.boundaryId)} ${state}${sourceSuffix(entry)}`,
     )
   }
   if (typeof result.blankTreeHint === 'string' && result.blankTreeHint.length > 0) {
