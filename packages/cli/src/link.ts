@@ -2,24 +2,16 @@ import { existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// The unpublished "local link" install path: symlinks a checkout into node_modules so `@genie-react/*` resolve normally.
+// The unpublished "local link" install path: symlinks a checkout into node_modules so `genie-react` and this CLI resolve normally.
 
 const LINKABLE = [
-  'core',
-  'client',
-  'bridge',
-  'react-collector',
-  'tanstack-collector',
-  'vite',
-  'memory',
-  'devtools-plugin',
-  'react',
-  'cli',
+  { dir: 'genie-react', name: 'genie-react' },
+  { dir: 'cli', name: '@genie-react/cli' },
 ] as const
 
 export interface LinkOptions {
   cwd?: string
-  /** Path to the genie-react-agent checkout. Defaults to the repo this CLI was built from. */
+  /** Path to the genie-react checkout. Defaults to the repo this CLI was built from. */
   genieRoot?: string
 }
 
@@ -30,29 +22,27 @@ export function runLink(opts: LinkOptions = {}): number {
   const cwd = opts.cwd ?? process.cwd()
   const genieRoot = opts.genieRoot ?? detectGenieRoot()
   if (!genieRoot) {
-    err('could not locate a genie checkout — pass its path: genie link <path-to-genie-react-agent>')
+    err('could not locate a genie checkout — pass its path: genie link <path-to-genie-react>')
     return 1
   }
   const packagesDir = join(genieRoot, 'packages')
   if (!existsSync(packagesDir)) {
-    err(`no packages/ under ${genieRoot} — is that the genie-react-agent repo?`)
+    err(`no packages/ under ${genieRoot} — is that the genie-react repo?`)
     return 1
   }
-
-  const scope = join(cwd, 'node_modules', '@genie-react')
-  mkdirSync(scope, { recursive: true })
 
   let linked = 0
   let missingDist = false
   for (const pkg of LINKABLE) {
-    const target = join(packagesDir, pkg)
+    const target = join(packagesDir, pkg.dir)
     if (!existsSync(join(target, 'package.json'))) continue
     if (!existsSync(join(target, 'dist'))) missingDist = true
-    const linkPath = join(scope, pkg)
+    const linkPath = join(cwd, 'node_modules', pkg.name)
+    mkdirSync(dirname(linkPath), { recursive: true })
     rmSync(linkPath, { recursive: true, force: true })
     symlinkSync(target, linkPath, 'dir')
     linked++
-    out(`✓  @genie-react/${pkg} -> ${target}`)
+    out(`✓  ${pkg.name} -> ${target}`)
   }
 
   if (linked === 0) {

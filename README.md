@@ -11,15 +11,15 @@ One command drives everything: `genie call <tool> '<json>'`.
 Dev-only. Never ships to production.
 
 ```bash
-pnpm add -D @genie-react/react @genie-react/vite   # the packages you import
-npx @genie-react/cli init                          # add the Vite plugin
-pnpm dev                                           # start your app
+pnpm add -D genie-react     # everything app-side: collectors, <Genie />, Vite plugin, hub
+npx @genie-react/cli init   # wire the Vite plugin (and <Genie /> where needed)
+pnpm dev                    # start your app
 ```
 
 Add one line near your app root:
 
 ```tsx
-import { Genie } from '@genie-react/react'
+import { Genie } from 'genie-react'
 
 {import.meta.env.DEV && <Genie />}
 ```
@@ -97,15 +97,7 @@ Dev-only and local: the Vite plugin is inert in production builds, the browser c
 
 ## Packages
 
-- `@genie-react/core` — types, tool contracts, wire protocol, serializer
-- `@genie-react/react-collector` — React tree, inspect, render tracking, profiling (bippy + react-scan)
-- `@genie-react/tanstack-collector` — Query + Router reads and actions
-- `@genie-react/devtools-plugin` — TanStack DevTools event-bus passthrough
-- `@genie-react/memory` — browser JS heap readings
-- `@genie-react/react` — the one-line `<Genie />` component
-- `@genie-react/client` — orchestrates collectors, runs tool calls
-- `@genie-react/bridge` — the hub: WS server, request router
-- `@genie-react/vite` — mounts the hub on Vite, injects the client
+- `genie-react` — everything app-side, one package with subpath exports: the `<Genie />` component (`genie-react`), the Vite plugin (`genie-react/vite`), the injected client + collectors (`genie-react/client`, `genie-react/hook`), the WS hub (`genie-react/hub`), and the wire protocol (`genie-react/protocol`)
 - `@genie-react/cli` — the agent interface: `init` / `doctor` / `link`, `status` / `tools` / `call`
 
 MIT © Genie React Agent contributors

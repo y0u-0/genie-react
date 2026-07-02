@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from '@genie-react/core'
+import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from 'genie-react/protocol'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { resolveBridgeUrl } from './discovery'
 

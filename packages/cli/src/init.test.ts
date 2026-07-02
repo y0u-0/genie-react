@@ -162,7 +162,7 @@ describe('runInit — plain React + Vite', () => {
     expect(lines.join('\n')).not.toContain('no root route found')
   })
 
-  it('does not list @genie-react/react in next steps for a plain React app', async () => {
+  it('lists the single genie-react package in next steps for a plain React app', async () => {
     const dir = await project({
       'package.json': pkg({ react: '^19' }),
       'index.html': '<div id="root"></div>',
@@ -171,7 +171,7 @@ describe('runInit — plain React + Vite', () => {
     const { logger, lines } = capture()
     runInit({ cwd: dir, dryRun: true, logger })
     const text = lines.join('\n')
-    expect(text).toContain('pnpm add -D @genie-react/vite @genie-react/cli')
+    expect(text).toContain('pnpm add -D genie-react @genie-react/cli')
     expect(text).not.toContain('render Genie near your app root')
   })
 })
@@ -190,7 +190,7 @@ describe('runInit — TanStack Router SPA', () => {
     expect(result.rootRoute.action).toBe('edit')
     if (result.rootRoute.action !== 'edit') throw new Error('expected edit')
     expect(result.rootRoute.contents).toContain('<><Outlet />{import.meta.env.DEV && <Genie />}</>')
-    expect(result.rootRoute.contents).toContain("import { Genie } from '@genie-react/react'")
+    expect(result.rootRoute.contents).toContain("import { Genie } from 'genie-react'")
     expect(result.ok).toBe(true)
   })
 
@@ -277,8 +277,8 @@ describe('runInit — idempotency and dry-run', () => {
   })
 })
 
-describe('runDoctor — shape-aware package checks', () => {
-  it('does not require @genie-react/react for a plain React + Vite app', async () => {
+describe('runDoctor — package checks', () => {
+  it('checks the single genie-react package for a plain React + Vite app', async () => {
     const dir = await project({
       'package.json': pkg({ react: '^19' }),
       'index.html': '<div id="root"></div>',
@@ -288,11 +288,10 @@ describe('runDoctor — shape-aware package checks', () => {
 
     expect(result.framework).toBe('react-vite')
     const labels = result.checks.map((c) => c.label)
-    expect(labels).toContain('@genie-react/vite resolvable in node_modules')
-    expect(labels).not.toContain('@genie-react/react resolvable in node_modules')
+    expect(labels).toContain('genie-react resolvable in node_modules')
   })
 
-  it('requires both packages for a TanStack Start app', async () => {
+  it('checks the same package set for a TanStack Start app', async () => {
     const dir = await project({
       'package.json': pkg({ '@tanstack/react-start': 'latest' }),
       'vite.config.ts': VITE_CONFIG,
@@ -302,7 +301,6 @@ describe('runDoctor — shape-aware package checks', () => {
 
     expect(result.framework).toBe('tanstack-start')
     const labels = result.checks.map((c) => c.label)
-    expect(labels).toContain('@genie-react/vite resolvable in node_modules')
-    expect(labels).toContain('@genie-react/react resolvable in node_modules')
+    expect(labels).toContain('genie-react resolvable in node_modules')
   })
 })

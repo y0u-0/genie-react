@@ -14,14 +14,14 @@ description: Drive live DevTools on a RUNNING React + TanStack app from the shel
 Dev-only — never ships to production. Wire it into the app you want to inspect:
 
 ```bash
-pnpm add -D @genie-react/react @genie-react/vite   # 1. the packages you import
-npx @genie-react/cli init                          # 2. add the genie() plugin to the Vite config
+pnpm add -D genie-react     # 1. everything app-side in one package
+npx @genie-react/cli init   # 2. add the genie() plugin to the Vite config
 ```
 
 Then one line near the app root, and start the dev server:
 
 ```tsx
-import { Genie } from '@genie-react/react'
+import { Genie } from 'genie-react'
 // in your root layout:
 {import.meta.env.DEV && <Genie />}
 ```

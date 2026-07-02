@@ -8,5 +8,5 @@ export default defineConfig({
   treeshake: true,
   fixedExtension: false,
   platform: 'node',
-  external: [/^@genie-react\//],
+  external: [/^genie-react/],
 })

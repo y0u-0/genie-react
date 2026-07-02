@@ -1,0 +1,209 @@
+import { QueryClient } from '@tanstack/react-query'
+import { describe, expect, it } from 'vitest'
+import type { CollectorContext, GenieCollector } from '../../client'
+import { queryCollector } from './query'
+
+const ctx: CollectorContext = {
+  pushSnapshot() {},
+  pushEvent() {},
+  refreshTools() {},
+}
+
+function call<T = unknown>(collector: GenieCollector, name: string, args: unknown): Promise<T> | T {
+  const tool = collector.tools?.find((t) => t.contract.name === name)
+  if (!tool) throw new Error(`tool not found: ${name}`)
+  return tool.handler(args as never, ctx) as Promise<T> | T
+}
+
+describe('queryCollector', () => {
+  it('query_list reports every cache entry with status and counts', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['todos'], [{ id: 1 }])
+    client.setQueryData(['users'], [{ id: 2 }])
+    const collector = queryCollector(client)
+
+    const result = (await call(collector, 'query_list', { staleOnly: false, limit: 100 })) as {
+      queries: Array<{ queryHash: string; queryKey: unknown; status: string; fetchStatus: string }>
+      total: number
+    }
+
+    expect(result.total).toBe(2)
+    expect(result.queries).toHaveLength(2)
+    const todos = result.queries.find((q) => JSON.stringify(q.queryKey) === '["todos"]')
+    expect(todos?.status).toBe('success')
+    expect(todos?.fetchStatus).toBe('idle')
+    expect(typeof todos?.queryHash).toBe('string')
+  })
+
+  it('query_get returns depth-bounded data for a queryHash', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['profile'], { name: 'Ada', roles: ['admin'] })
+    const collector = queryCollector(client)
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+
+    const result = (await call(collector, 'query_get', { queryHash, depth: 3 })) as {
+      queryHash: string
+      status: string
+      data: unknown
+    }
+
+    expect(result.queryHash).toBe(queryHash)
+    expect(result.status).toBe('success')
+    expect(result.data).toEqual({ name: 'Ada', roles: ['admin'] })
+  })
+
+  it('query_get throws for an unknown queryHash', () => {
+    const collector = queryCollector(new QueryClient())
+    expect(() => call(collector, 'query_get', { queryHash: 'missing', depth: 3 })).toThrow(
+      /not found/,
+    )
+  })
+
+  it('query_get resolves a query by queryKey, not only queryHash', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['profile'], { name: 'Ada' })
+    const collector = queryCollector(client)
+
+    const result = (await call(collector, 'query_get', { queryKey: ['profile'], depth: 3 })) as {
+      queryKey: unknown
+      data: unknown
+    }
+
+    expect(result.queryKey).toEqual(['profile'])
+    expect(result.data).toEqual({ name: 'Ada' })
+  })
+
+  it('query_get_data resolves a query by queryHash, not only queryKey', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['profile'], { name: 'Ada' })
+    const collector = queryCollector(client)
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+
+    const result = (await call(collector, 'query_get_data', { queryHash, depth: 3 })) as {
+      found: boolean
+      data: unknown
+    }
+
+    expect(result.found).toBe(true)
+    expect(result.data).toEqual({ name: 'Ada' })
+  })
+
+  it('query_get / query_get_data require at least one identifier', () => {
+    const collector = queryCollector(new QueryClient())
+    for (const name of ['query_get', 'query_get_data'] as const) {
+      const input = collector.tools?.find((t) => t.contract.name === name)?.contract.input
+      expect(input?.safeParse({}).success).toBe(false)
+      expect(input?.safeParse({ queryKey: ['x'] }).success).toBe(true)
+      expect(input?.safeParse({ queryHash: '["x"]' }).success).toBe(true)
+    }
+  })
+
+  it('query_invalidate reports how many cache entries it matched', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['todos'], [])
+    client.setQueryData(['todos', 'done'], [])
+    client.setQueryData(['users'], [])
+    const collector = queryCollector(client)
+
+    const prefix = (await call(collector, 'query_invalidate', {
+      queryKey: ['todos'],
+      exact: false,
+    })) as { ok: boolean; matched: number }
+    expect(prefix).toEqual({ ok: true, matched: 2 })
+
+    const exact = (await call(collector, 'query_invalidate', {
+      queryKey: ['todos'],
+      exact: true,
+    })) as { ok: boolean; matched: number }
+    expect(exact).toEqual({ ok: true, matched: 1 })
+  })
+
+  it('query_set_data writes data that round-trips through query_get', async () => {
+    const client = new QueryClient()
+    const collector = queryCollector(client)
+
+    const written = await call(collector, 'query_set_data', {
+      queryKey: ['settings'],
+      data: { theme: 'dark', count: 3 },
+    })
+    expect(written).toEqual({ ok: true })
+
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+    const read = (await call(collector, 'query_get', { queryHash, depth: 3 })) as { data: unknown }
+    expect(read.data).toEqual({ theme: 'dark', count: 3 })
+  })
+
+  it('query_list_mutations is empty for a fresh client', async () => {
+    const collector = queryCollector(new QueryClient())
+    const result = (await call(collector, 'query_list_mutations', {})) as { mutations: unknown[] }
+    expect(result.mutations).toEqual([])
+  })
+
+  it('query_list churn flags orphaned cache families', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['metrics', 'alpha'], 1)
+    client.setQueryData(['metrics', 'beta'], 2)
+    client.setQueryData(['metrics', 'gamma'], 3)
+    client.setQueryData(['settings'], { theme: 'dark' })
+    const collector = queryCollector(client)
+
+    const result = (await call(collector, 'query_list', { staleOnly: false, limit: 100 })) as {
+      total: number
+      churn: {
+        orphaned: number
+        families: Array<{ keyPrefix: string; count: number; orphaned: number }>
+      }
+    }
+
+    expect(result.churn.orphaned).toBeGreaterThanOrEqual(3)
+    const metrics = result.churn.families.find((f) => f.keyPrefix === JSON.stringify(['metrics']))
+    expect(metrics).toBeDefined()
+    expect(metrics?.count).toBe(3)
+    expect(metrics?.orphaned).toBe(3)
+    expect(result.churn.families.some((f) => f.keyPrefix === JSON.stringify('settings'))).toBe(
+      false,
+    )
+  })
+
+  it('query_list churn ignores families below the threshold', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['solo', 'one'], 1)
+    const collector = queryCollector(client)
+
+    const result = (await call(collector, 'query_list', { staleOnly: false, limit: 100 })) as {
+      churn: { orphaned: number; families: unknown[] }
+    }
+
+    expect(result.churn.orphaned).toBe(1)
+    expect(result.churn.families).toEqual([])
+  })
+
+  it('query_get exposes fetchCount and recentFetches', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['profile'], { name: 'Ada' })
+    const collector = queryCollector(client)
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+
+    const result = (await call(collector, 'query_get', { queryHash, depth: 3 })) as {
+      fetchCount: number
+      recentFetches: number
+    }
+
+    expect(typeof result.fetchCount).toBe('number')
+    expect(typeof result.recentFetches).toBe('number')
+    expect(result.fetchCount).toBe(1)
+    expect(result.recentFetches).toBe(0)
+  })
+
+  it('query_list per-entry summary carries recentFetches', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['profile'], { name: 'Ada' })
+    const collector = queryCollector(client)
+
+    const result = (await call(collector, 'query_list', { staleOnly: false, limit: 100 })) as {
+      queries: Array<{ recentFetches: number }>
+    }
+
+    expect(result.queries[0]?.recentFetches).toBe(0)
+  })
+})

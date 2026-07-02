@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { dirname, join, parse } from 'node:path'
-import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from '@genie-react/core'
+import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from 'genie-react/protocol'
 import { isRecord } from './guards'
 
 export interface BridgeDiscovery {

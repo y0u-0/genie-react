@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
-import { GENIE_DISCOVERY_FILE } from '@genie-react/core'
+import { GENIE_DISCOVERY_FILE } from 'genie-react/protocol'
 import { type BridgeDiscovery, parseBridgeDiscovery } from './discovery'
 import { isRecord } from './guards'
 
@@ -22,11 +22,11 @@ const VITE_CONFIG_FILES = [
   'vite.config.cjs',
 ] as const
 
-const VITE_PLUGIN_PACKAGE = '@genie-react/vite'
-const REACT_PACKAGE = '@genie-react/react'
+const GENIE_PACKAGE = 'genie-react'
+const VITE_PLUGIN_SPECIFIER = 'genie-react/vite'
 const CLI_PACKAGE = '@genie-react/cli'
-const VITE_IMPORT_LINE = `import { genie } from '${VITE_PLUGIN_PACKAGE}'`
-const GENIE_IMPORT_LINE = `import { Genie } from '${REACT_PACKAGE}'`
+const VITE_IMPORT_LINE = `import { genie } from '${VITE_PLUGIN_SPECIFIER}'`
+const GENIE_IMPORT_LINE = `import { Genie } from '${GENIE_PACKAGE}'`
 const GENIE_RENDER_SNIPPET = '{import.meta.env.DEV && <Genie />}'
 
 const ROOT_ROUTE_FILES = [
@@ -128,14 +128,14 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
   const vitePath = detectViteConfig(cwd)
   if (!vitePath) {
     checks.push({
-      label: 'Vite config references @genie-react/vite',
+      label: `Vite config references ${VITE_PLUGIN_SPECIFIER}`,
       ok: false,
       critical: true,
       detail: 'no vite config found',
     })
   } else {
     checks.push({
-      label: 'Vite config references @genie-react/vite',
+      label: `Vite config references ${VITE_PLUGIN_SPECIFIER}`,
       ok: referencesVitePlugin(readFileSafe(vitePath)),
       critical: true,
       detail: relative(cwd, vitePath),
@@ -183,14 +183,13 @@ export function detectFramework(cwd: string): Framework {
   return 'unknown'
 }
 
-function requiredPackages(framework: Framework): string[] {
-  const base =
-    framework === 'react-vite' ? [VITE_PLUGIN_PACKAGE] : [REACT_PACKAGE, VITE_PLUGIN_PACKAGE]
-  return [...base, CLI_PACKAGE]
+// The plugin, collectors, and <Genie /> ship in the one genie-react package, so the install set no longer varies by framework.
+function requiredPackages(_framework: Framework): string[] {
+  return [GENIE_PACKAGE, CLI_PACKAGE]
 }
 
-function doctorPackages(framework: Framework): readonly string[] {
-  return framework === 'react-vite' ? [VITE_PLUGIN_PACKAGE] : [VITE_PLUGIN_PACKAGE, REACT_PACKAGE]
+function doctorPackages(_framework: Framework): readonly string[] {
+  return [GENIE_PACKAGE]
 }
 
 function readPackageDeps(cwd: string): Set<string> {
@@ -324,7 +323,8 @@ function planRootRouteEdit(cwd: string, framework: Framework): RootRouteOutcome 
 }
 
 function editRootRoute(code: string, framework: Framework): ViteEditResult {
-  const importsGenie = /['"]@genie-react\/react['"]/.test(code)
+  // Exact-match the root specifier so `genie-react/vite` in the same file doesn't count.
+  const importsGenie = /['"]genie-react['"]/.test(code)
   const rendersGenie = /<Genie\b/.test(code)
   if (importsGenie && rendersGenie) return { kind: 'already' }
 
@@ -384,7 +384,7 @@ function applyViteOutcome(outcome: ViteConfigOutcome, ctx: ApplyContext): void {
       printViteManual(log)
       return
     case 'already':
-      log.info(`${OK} ${rel(ctx, outcome.path)} already wires ${VITE_PLUGIN_PACKAGE}`)
+      log.info(`${OK} ${rel(ctx, outcome.path)} already wires ${VITE_PLUGIN_SPECIFIER}`)
       return
     case 'manual':
       log.info(`${WARN} could not edit ${rel(ctx, outcome.path)}: ${outcome.reason}`)
@@ -461,7 +461,7 @@ function printViteManual(log: Logger): void {
 }
 
 function referencesVitePlugin(code: string): boolean {
-  return /['"]@genie-react\/vite['"]/.test(code)
+  return /['"]genie-react\/vite['"]/.test(code)
 }
 
 function isCommonJs(code: string): boolean {

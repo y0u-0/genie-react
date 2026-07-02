@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
-import { errorMessage } from '@genie-react/core'
+import { errorMessage } from 'genie-react/protocol'
 import { runCall, runStatus, runTools } from './agent'
 import { isRecord } from './guards'
 import { runDoctor, runInit } from './index'

@@ -3,7 +3,7 @@ import {
   devtoolsStatusContract,
   devtoolsWaitContract,
   errorMessage,
-} from '@genie-react/core'
+} from 'genie-react/protocol'
 import { GenieAgentLink } from './agent-link'
 import { resolveBridgeUrl } from './discovery'
 import { isRecord } from './guards'

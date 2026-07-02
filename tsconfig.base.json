@@ -6,16 +6,13 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "paths": {
-      "@genie-react/core": ["./packages/core/src/index.ts"],
-      "@genie-react/bridge": ["./packages/bridge/src/index.ts"],
-      "@genie-react/client": ["./packages/client/src/index.ts"],
-      "@genie-react/vite": ["./packages/vite/src/index.ts"],
-      "@genie-react/react-collector": ["./packages/react-collector/src/index.ts"],
-      "@genie-react/tanstack-collector": ["./packages/tanstack-collector/src/index.ts"],
-      "@genie-react/devtools-plugin": ["./packages/devtools-plugin/src/index.ts"],
-      "@genie-react/memory": ["./packages/memory/src/index.ts"],
-      "@genie-react/cli": ["./packages/cli/src/index.ts"],
-      "@genie-react/react": ["./packages/react/src/index.ts"]
+      "genie-react": ["./packages/genie-react/src/react/index.ts"],
+      "genie-react/hook": ["./packages/genie-react/src/collectors/react/hook.ts"],
+      "genie-react/client": ["./packages/genie-react/src/client-entry.ts"],
+      "genie-react/vite": ["./packages/genie-react/src/vite/index.ts"],
+      "genie-react/hub": ["./packages/genie-react/src/hub/index.ts"],
+      "genie-react/protocol": ["./packages/genie-react/src/protocol/index.ts"],
+      "@genie-react/cli": ["./packages/cli/src/index.ts"]
     },
     "moduleDetection": "force",
     "verbatimModuleSyntax": true,

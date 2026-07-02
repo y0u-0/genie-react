@@ -8,7 +8,7 @@ import {
   newId,
   type ToolInput,
   type ToolOutput,
-} from '@genie-react/core'
+} from 'genie-react/protocol'
 import { WebSocket } from 'ws'
 
 export interface GenieAgentLinkOptions {

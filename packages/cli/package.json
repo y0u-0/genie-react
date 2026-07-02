@@ -42,11 +42,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@genie-react/core": "workspace:*",
+    "genie-react": "workspace:*",
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@genie-react/bridge": "workspace:*",
     "@types/ws": "^8.18.1"
   },
   "publishConfig": {

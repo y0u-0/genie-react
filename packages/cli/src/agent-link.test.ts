@@ -1,5 +1,5 @@
-import { createStandaloneBridge, type StandaloneBridgeHandle } from '@genie-react/bridge'
-import { decodeFrame, encodeMessage } from '@genie-react/core'
+import { createStandaloneBridge, type StandaloneBridgeHandle } from 'genie-react/hub'
+import { decodeFrame, encodeMessage } from 'genie-react/protocol'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import { GenieAgentLink, type GenieAgentLinkOptions } from './agent-link'

@@ -1,4 +1,4 @@
-import type { BridgeStatusMessage } from '@genie-react/core'
+import type { BridgeStatusMessage } from 'genie-react/protocol'
 import { describe, expect, it } from 'vitest'
 import {
   formatToolsListing,

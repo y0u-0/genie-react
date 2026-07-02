@@ -1,1 +1,0 @@
-export { memoryCollector } from './collector'
