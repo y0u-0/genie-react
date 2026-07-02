@@ -4,6 +4,7 @@ import { cleanup, render } from '@testing-library/react'
 import { createElement, StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GENIE_GLOBAL_KEY } from '../protocol'
+import type { GenieProps } from './genie'
 
 type TaggedCollector = { __collector: string }
 type ClientConfig = { appName?: string; collectors: TaggedCollector[] }
@@ -20,9 +21,8 @@ async function loadGenie(router: unknown) {
   }))
   vi.doMock('../collectors/react', () => ({ reactCollector: tag('react') }))
   vi.doMock('../collectors/memory', () => ({ memoryCollector: tag('memory') }))
-  vi.doMock('../collectors/devtools-passthrough', () => ({
-    pluginPassthroughCollector: tag('plugin'),
-  }))
+  const pluginPassthroughCollector = vi.fn(() => ({ __collector: 'plugin' }))
+  vi.doMock('../collectors/devtools-passthrough', () => ({ pluginPassthroughCollector }))
   vi.doMock('../collectors/tanstack', () => ({
     routerCollector: (r: unknown) => ({ __collector: 'router', router: r }),
     queryCollector: (q: unknown) => ({ __collector: 'query', query: q }),
@@ -30,7 +30,7 @@ async function loadGenie(router: unknown) {
   vi.doMock('@tanstack/react-router', () => ({ useRouter: () => router }))
 
   const { Genie } = await import('./genie')
-  return { Genie, createGenieClient, startSpy }
+  return { Genie, createGenieClient, startSpy, pluginPassthroughCollector }
 }
 
 const names = (collectors: TaggedCollector[]) => collectors.map((c) => c.__collector)
@@ -122,6 +122,18 @@ describe('<Genie /> under a TanStack Router', () => {
       'router',
     ])
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('<Genie /> declared plugins', () => {
+  it('forwards the plugins prop to the passthrough collector', async () => {
+    const { Genie, pluginPassthroughCollector } = await loadGenie(undefined)
+
+    render(createElement<GenieProps>(Genie, { plugins: ['cart-devtools', 'metrics-devtools'] }))
+
+    expect(pluginPassthroughCollector).toHaveBeenCalledWith({
+      plugins: ['cart-devtools', 'metrics-devtools'],
+    })
   })
 })
 

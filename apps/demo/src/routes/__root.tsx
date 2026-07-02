@@ -44,7 +44,12 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       </head>
       <body>
         {children}
-        {import.meta.env.DEV && <Genie appName="Genie Demo" />}
+        {import.meta.env.DEV && (
+          <Genie
+            appName="Genie Demo"
+            plugins={["cart-devtools", "metrics-devtools"]}
+          />
+        )}
         <TanStackDevtools
           config={{
             position: "bottom-right",

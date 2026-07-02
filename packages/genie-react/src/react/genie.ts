@@ -13,6 +13,8 @@ let started = false
 export interface GenieProps {
   /** App name reported to the agent (defaults to the document title). */
   appName?: string
+  /** DevTools plugin ids to surface in plugin_list before they emit any traffic. */
+  plugins?: readonly string[]
 }
 
 // useRouter's type omits `undefined`, but the Vite-plugin peer stub and the no-provider case return it; this is the single widening for that boundary.
@@ -40,14 +42,17 @@ function getRouterQueryClient(router: ReturnType<typeof useRouter>): QueryClient
 }
 
 /** One-line Genie integration: render once near the root, dev-only; auto-wires router/query collectors and joins the Vite-injected client or starts its own. */
-export function Genie({ appName }: GenieProps = {}): null {
+export function Genie({ appName, plugins }: GenieProps = {}): null {
   const router = useOptionalRouter()
 
   useEffect(() => {
     if (started || typeof window === 'undefined') return
     started = true
 
-    const collectors: GenieCollector[] = [memoryCollector(), pluginPassthroughCollector()]
+    const collectors: GenieCollector[] = [
+      memoryCollector(),
+      pluginPassthroughCollector({ plugins }),
+    ]
     if (router) {
       collectors.push(routerCollector(router))
       const queryClient = getRouterQueryClient(router)
@@ -63,7 +68,7 @@ export function Genie({ appName }: GenieProps = {}): null {
         collectors: [sessionCollector(), reactCollector(), ...collectors],
       }).start()
     }
-  }, [router, appName])
+  }, [router, appName, plugins])
 
   return null
 }

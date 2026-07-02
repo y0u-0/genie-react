@@ -26,7 +26,7 @@ export const pluginListContract = defineAgentToolContract({
   name: 'plugin_list',
   title: 'List DevTools plugins',
   description:
-    'List every TanStack DevTools plugin (built-in and third-party) that has emitted traffic on the client event bus, with how many recent events each has buffered. Discovery is traffic-based: a plugin only appears after its first event, so interact with the app first if a plugin you expect is missing. Use a pluginId with plugin_get_events.',
+    'List every TanStack DevTools plugin (built-in and third-party) that has emitted traffic on the client event bus, with how many recent events each has buffered. Discovery is traffic-based — a plugin only appears after its first event — except ids declared via <Genie plugins>, which are listed immediately with eventCount 0 until traffic arrives. Use a pluginId with plugin_get_events.',
   group: 'plugin',
   input: z.object({}),
   output: z.object({
@@ -77,8 +77,16 @@ export const pluginEmitContract = defineAgentToolContract({
   annotations: { openWorldHint: true },
 })
 
-export function pluginPassthroughCollector(): GenieCollector {
+export interface PluginPassthroughOptions {
+  /** Plugin ids to list before any traffic arrives, so silent plugins are still discoverable. */
+  plugins?: readonly string[]
+}
+
+export function pluginPassthroughCollector(options: PluginPassthroughOptions = {}): GenieCollector {
   const buffers = new Map<string, PluginBuffer>()
+  for (const pluginId of options.plugins ?? []) {
+    buffers.set(pluginId, { pluginId, events: [] })
+  }
 
   const record = (event: DevtoolsBusEvent): void => {
     const pluginId = pluginIdFromEvent(event)

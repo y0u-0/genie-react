@@ -1,4 +1,12 @@
-import { Component, Suspense, createContext, useContext, useRef, useState } from "react"
+import {
+  Component,
+  Suspense,
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react"
 import type { ReactNode } from "react"
 import { createFileRoute } from "@tanstack/react-router"
 import { cartDevtoolsClient } from "../lib/cart-devtools"
@@ -59,6 +67,10 @@ function SuspenseContent() {
 function CartWidget() {
   const [items, setItems] = useState<Array<CartItem>>([])
   const nextIdRef = useRef(1)
+
+  useEffect(() => {
+    cartDevtoolsClient.emit("cart-updated", { items: [], total: 0 })
+  }, [])
 
   const syncCart = (next: Array<CartItem>) => {
     setItems(next)
