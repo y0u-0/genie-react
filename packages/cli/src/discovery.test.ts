@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from 'genie-react/protocol'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { isPidAlive, resolveBridgeUrl } from './discovery'
+import { isPidAlive, resolveBridge, resolveBridgeUrl } from './discovery'
 
 const ENV_KEYS = ['GENIE_BRIDGE_URL', 'GENIE_BRIDGE_PORT'] as const
 
@@ -94,6 +94,21 @@ describe('resolveBridgeUrl', () => {
   it('trusts a discovery file that carries no pid at all', async () => {
     await writeDiscovery(JSON.stringify({ url: 'ws://127.0.0.1:4321/__genie/ws', port: 4321 }))
     expect(await resolveBridgeUrl(cwd)).toBe('ws://127.0.0.1:4321/__genie/ws')
+  })
+
+  it('labels the env override, the discovery file, and the default guess by source', async () => {
+    process.env.GENIE_BRIDGE_URL = 'ws://override.example/socket'
+    expect((await resolveBridge(cwd)).source).toBe('env')
+    delete process.env.GENIE_BRIDGE_URL
+
+    await writeDiscovery(JSON.stringify({ url: 'ws://127.0.0.1:4321/__genie/ws', port: 4321 }))
+    expect(await resolveBridge(cwd)).toEqual({
+      url: 'ws://127.0.0.1:4321/__genie/ws',
+      source: 'file',
+    })
+
+    await rm(join(cwd, GENIE_DISCOVERY_FILE), { force: true })
+    expect((await resolveBridge(cwd)).source).toBe('fallback')
   })
 })
 

@@ -176,7 +176,12 @@ export class GenieClient {
   private async handleRequest(id: string, toolName: string, args: unknown): Promise<void> {
     const tool = this.tools.get(toolName)
     if (!tool) {
-      this.send({ kind: 'app/response', id, ok: false, error: `Unknown tool "${toolName}"` })
+      this.send({ kind: 'app/response', id, ok: false, error: this.unknownToolError(toolName) })
+      return
+    }
+    const rejectedKeys = unknownArgKeysError(toolName, tool.contract.input, args)
+    if (rejectedKeys) {
+      this.send({ kind: 'app/response', id, ok: false, error: rejectedKeys })
       return
     }
     try {
@@ -185,8 +190,15 @@ export class GenieClient {
       warnOnOutputDrift(tool.contract, result)
       this.send({ kind: 'app/response', id, ok: true, result })
     } catch (error) {
-      this.send({ kind: 'app/response', id, ok: false, error: errorMessage(error) })
+      this.send({ kind: 'app/response', id, ok: false, error: invocationError(toolName, error) })
     }
+  }
+
+  private unknownToolError(toolName: string): string {
+    const domains = this.capabilities().sort().join(', ') || 'none'
+    const hint =
+      DOMAIN_GATING_HINTS[toolName.split('_')[0] ?? ''] ?? 'run `genie tools` for the live catalog'
+    return `Unknown tool "${toolName}" — this app advertises: ${domains}. Note: ${hint}.`
   }
 
   private send(message: unknown): void {
@@ -203,6 +215,40 @@ export class GenieClient {
 
 export function createGenieClient(options: GenieClientOptions): GenieClient {
   return new GenieClient(options)
+}
+
+// Progressive discovery means these domains are absent-by-design on apps without the matching TanStack instance; say so instead of a bare "unknown".
+const DOMAIN_GATING_HINTS: Record<string, string> = {
+  query:
+    'query tools appear only when a QueryClient is discovered (render <Genie /> or register queryCollector(queryClient))',
+  mutation:
+    'mutation tools appear only when a QueryClient is discovered (render <Genie /> or register queryCollector(queryClient))',
+  router:
+    'router tools appear only when a TanStack Router is discovered (render <Genie /> or register routerCollector(router))',
+}
+
+/** Zod objects strip unrecognized keys silently — an agent typo like `maxDepth` for `depth` would otherwise no-op; reject it loudly instead. */
+function unknownArgKeysError(
+  toolName: string,
+  input: AgentToolContract['input'],
+  args: unknown,
+): string | null {
+  if (!(input instanceof z.ZodObject) || typeof args !== 'object' || args === null) return null
+  const known = Object.keys(input.shape)
+  const unknown = Object.keys(args).filter((key) => !known.includes(key))
+  if (unknown.length === 0) return null
+  const rejected = unknown.map((key) => `"${key}"`).join(', ')
+  return `Unknown argument${unknown.length === 1 ? '' : 's'} ${rejected} for "${toolName}" — valid keys: ${known.join(', ') || '(none)'}`
+}
+
+function invocationError(toolName: string, error: unknown): string {
+  if (error instanceof z.ZodError) {
+    const issues = error.issues
+      .map((issue) => `${issue.path.join('.') || 'args'}: ${issue.message}`)
+      .join('; ')
+    return `Invalid arguments for "${toolName}": ${issues}`
+  }
+  return errorMessage(error)
 }
 
 // Dev-only output-side twin of the input validation; warns instead of throwing so schema lag never breaks a running app.

@@ -466,7 +466,7 @@ describe('runLiveDoctor', () => {
       expect(byLabel('standalone hub answering')?.ok).toBe(true)
       expect(byLabel('hub serves the browser client')?.ok).toBe(true)
       expect(byLabel('bridge accepts agent connections')?.ok).toBe(true)
-      const session = byLabel('an app session is connected')
+      const session = byLabel('no app session connected yet')
       expect(session?.ok).toBe(false)
       expect(session?.critical).toBe(false)
     } finally {

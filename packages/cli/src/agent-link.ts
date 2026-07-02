@@ -1,3 +1,4 @@
+import './ws-env'
 import {
   type AgentBoundMessage,
   type AgentToolContract,

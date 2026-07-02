@@ -5,7 +5,7 @@ import {
   errorMessage,
 } from 'genie-react/protocol'
 import { GenieAgentLink } from './agent-link'
-import { resolveBridgeUrl } from './discovery'
+import { resolveBridge } from './discovery'
 import { isRecord } from './guards'
 
 // The CLI's tool-calling surface: connects to the bridge as the `agent` role — straight from a shell, no separate server.
@@ -33,7 +33,17 @@ const out = (message: string): void => void process.stdout.write(`${message}\n`)
 const err = (message: string): void => void process.stderr.write(`${message}\n`)
 
 async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url: string }> {
-  const url = opts.url ?? (await resolveBridgeUrl(opts.cwd ?? process.cwd()))
+  const cwd = opts.cwd ?? process.cwd()
+  let url = opts.url
+  if (!url) {
+    const bridge = await resolveBridge(cwd)
+    url = bridge.url
+    if (bridge.source === 'fallback') {
+      err(
+        `genie: no .genie/bridge.json found from ${cwd} upward — trying ${url}. Start your dev server (Vite: genie() plugin) or \`genie hub\`, or set GENIE_BRIDGE_URL.`,
+      )
+    }
+  }
   const link = new GenieAgentLink({
     url,
     connectTimeoutMs: 8_000,

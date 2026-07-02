@@ -1,3 +1,4 @@
+import './ws-env'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
@@ -416,7 +417,10 @@ export class GenieBridge {
     }
     const timer = setTimeout(() => {
       this.pending.delete(id)
-      settle({ ok: false, error: `Tool "${tool}" timed out after ${this.requestTimeoutMs}ms` })
+      settle({
+        ok: false,
+        error: `Tool "${tool}" timed out after ${this.requestTimeoutMs}ms — the app tab may be reloading or its main thread busy; retry, or wait for it with devtools_wait`,
+      })
     }, this.requestTimeoutMs)
     this.pending.set(id, { settle, timer, sessionId: session.sessionId })
     this.send(session.socket, { kind: 'bridge/request', id, tool, args })

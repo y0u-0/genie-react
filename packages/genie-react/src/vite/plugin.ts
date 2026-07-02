@@ -2,7 +2,13 @@ import type { AddressInfo } from 'node:net'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { type Plugin, type Rollup, searchForWorkspaceRoot, type ViteDevServer } from 'vite'
-import { GenieBridge, removeDiscoveryFile, writeDiscoveryFile } from '../hub'
+import {
+  GenieBridge,
+  removeDiscoveryFile,
+  type StartHubResult,
+  startGenieHub,
+  writeDiscoveryFile,
+} from '../hub'
 import { GENIE_GLOBAL_KEY, GENIE_WS_PATH } from '../protocol'
 
 export interface GenieViteOptions {
@@ -21,6 +27,16 @@ const HOOK_MODULE = 'genie-react/hook'
 const CLIENT_MODULE = 'genie-react/client'
 const MISSING_HOOK_WARNING =
   '[genie] genie-react/hook could not be resolved — render tracking/profiling are disabled. Make genie-react a direct dependency of your app, or pass react:false to silence this.'
+
+/** The Cloudflare plugin proxies dev through workerd, which claims WebSocket upgrades and drops genie's (close 1006) — detection reroutes the bridge to a standalone hub on its own port. */
+export function hasCloudflarePlugin(plugins: readonly { name: string }[]): boolean {
+  return plugins.some(
+    (plugin) =>
+      plugin.name === 'vite-plugin-cloudflare' ||
+      plugin.name.startsWith('vite-plugin-cloudflare:') ||
+      plugin.name.startsWith('@cloudflare/vite-plugin'),
+  )
+}
 
 /** Matches the TanStack Start client entry, where the hook import must be hoisted above React. */
 function isClientEntry(id: string): boolean {
@@ -48,12 +64,25 @@ const OPTIONAL_PEER_STUBS: ReadonlyMap<string, { id: string; code: string }> = n
 // Vite resolves an absent *optional* peer to this synthetic throwing placeholder (not null), so it must count as "not installed".
 const VITE_OPTIONAL_PEER_PREFIX = '__vite-optional-peer-dep:'
 
+// `genie-react > dep` form: these are genie-react's own deps, so a bare name can't resolve from the app root under pnpm; bare `react` covers apps without @vitejs/plugin-react, which would otherwise discover it late through the excluded chunks.
+const NESTED_OPTIMIZED_DEPS = [
+  'genie-react > bippy',
+  'genie-react > bippy/source',
+  'genie-react > superjson',
+  'genie-react > zod',
+  'genie-react > @jridgewell/sourcemap-codec',
+  'react',
+]
+
 /** Dev-only plugin: mounts the hub on Vite's own HTTP server (no extra port), injects the client first in `<head>`, and writes a discovery file for the genie CLI. */
 export function genie(options: GenieViteOptions = {}): Plugin[] {
   const enabled = options.enabled ?? true
   const react = options.react ?? true
   let bridge: GenieBridge | null = null
   let warnedMissingHook = false
+  let cloudflare = false
+  let hub: StartHubResult | null = null
+  let hubWsUrl: string | null = null
 
   async function resolveHook(ctx: Rollup.PluginContext): Promise<boolean> {
     if ((await ctx.resolve(HOOK_MODULE)) != null) return true
@@ -79,6 +108,11 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
         resolve: {
           dedupe: ['react', 'react-dom', '@tanstack/react-router', '@tanstack/react-query'],
         },
+        // esbuild pre-bundling bypasses the peer stubs (black-screening TanStack-less apps), so genie-react must stay excluded; pre-listing its nested deps keeps the first post-install boot from a mid-run re-optimize (stale 504s).
+        optimizeDeps: {
+          exclude: ['genie-react'],
+          include: [...NESTED_OPTIMIZED_DEPS],
+        },
         server: { fs: { allow: [searchForWorkspaceRoot(root), genieRoot] } },
       }
     },
@@ -87,10 +121,14 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
       return id === VIRTUAL_ID ? RESOLVED_VIRTUAL_ID : null
     },
 
+    configResolved(config) {
+      cloudflare = hasCloudflarePlugin(config.plugins)
+    },
+
     async load(id) {
       if (id !== RESOLVED_VIRTUAL_ID) return null
       const reactAvailable = react && (await resolveHook(this))
-      return generateClientModule(options, reactAvailable)
+      return generateClientModule(options, reactAvailable, hubWsUrl)
     },
 
     async transform(code, id) {
@@ -101,15 +139,33 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
       return { code: `import ${JSON.stringify(HOOK_MODULE)};\n${code}`, map: null }
     },
 
-    configureServer(server) {
+    async configureServer(server) {
       if (!enabled) return
+      const httpServer = server.httpServer
+      if (!httpServer) return
+
+      if (cloudflare) {
+        const result = await startGenieHub({ rootDir: server.config.root })
+        hub = result
+        hubWsUrl = result.url
+        server.config.logger.info(
+          `[genie] @cloudflare/vite-plugin detected — its workerd proxy drops this port's WebSocket upgrades, so the bridge runs on a standalone hub at ${result.url}`,
+        )
+        httpServer.once('close', () => {
+          const current = hub
+          hub = null
+          hubWsUrl = null
+          if (current?.status !== 'started') return
+          void current.handle.close()
+          void removeDiscoveryFile(server.config.root)
+        })
+        return
+      }
+
       bridge = new GenieBridge({
         requestTimeoutMs: options.requestTimeoutMs,
         logger: (level, message) => server.config.logger.info(`[genie:${level}] ${message}`),
       })
-      const httpServer = server.httpServer
-      if (!httpServer) return
-
       httpServer.on('upgrade', (request, socket, head) => {
         bridge?.handleUpgrade(request, socket, head)
       })
@@ -157,8 +213,14 @@ function optionalPeersPlugin(): Plugin {
   }
 }
 
-function generateClientModule(options: GenieViteOptions, reactAvailable: boolean): string {
+function generateClientModule(
+  options: GenieViteOptions,
+  reactAvailable: boolean,
+  wsUrl: string | null,
+): string {
   const appName = options.appName ? JSON.stringify(options.appName) : 'undefined'
+  // An explicit url points the client at the standalone hub (Cloudflare mode); undefined keeps the same-origin default.
+  const url = wsUrl ? JSON.stringify(wsUrl) : 'undefined'
   const lines: string[] = []
   // Hook import first so the DevTools commit hook installs before React registers its renderer.
   if (reactAvailable) lines.push(`import ${JSON.stringify(HOOK_MODULE)}`)
@@ -171,7 +233,7 @@ function generateClientModule(options: GenieViteOptions, reactAvailable: boolean
     : '[sessionCollector()]'
   lines.push(
     `if (typeof window !== 'undefined' && !window[${JSON.stringify(GENIE_GLOBAL_KEY)}]) {`,
-    `  createGenieClient({ appName: ${appName}, collectors: ${collectors} }).start()`,
+    `  createGenieClient({ appName: ${appName}, url: ${url}, collectors: ${collectors} }).start()`,
     '}',
     '',
   )

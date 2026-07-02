@@ -8,12 +8,7 @@ import {
   GENIE_INFO_PATH,
 } from 'genie-react/protocol'
 import { GenieAgentLink } from './agent-link'
-import {
-  type BridgeDiscovery,
-  isPidAlive,
-  parseBridgeDiscovery,
-  resolveBridgeUrl,
-} from './discovery'
+import { type BridgeDiscovery, isPidAlive, parseBridgeDiscovery, resolveBridge } from './discovery'
 import { isRecord } from './guards'
 
 export interface Logger {
@@ -145,7 +140,8 @@ export function runInit(options: InitOptions = {}): InitResult {
   // No Vite, no Next: the hub + script-tag path IS the setup, so don't fail or print Vite-only guidance.
   if (framework === 'unknown' && viteConfig.action === 'missing') {
     printUniversalSetup(log)
-    printUniversalNextSteps(log)
+    ensureGenieIgnored(ctx)
+    printUniversalNextSteps(log, packageManagerHints(cwd))
     return {
       ok: true,
       dryRun,
@@ -157,7 +153,13 @@ export function runInit(options: InitOptions = {}): InitResult {
 
   applyViteOutcome(viteConfig, ctx)
   applyRootRouteOutcome(rootRoute, ctx)
-  printNextSteps(log, framework, rootRoute)
+  if (readPackageDeps(cwd).has('@cloudflare/vite-plugin')) {
+    log.info(
+      `${OK} @cloudflare/vite-plugin detected — genie() will run its bridge on a standalone hub (workerd owns this port's WebSocket upgrades)`,
+    )
+  }
+  ensureGenieIgnored(ctx)
+  printNextSteps(log, framework, rootRoute, packageManagerHints(cwd))
   if (!dryRun && !options.yes) {
     log.info(
       "\nTip: run 'npx @genie-react/cli doctor' to verify, or 'npx @genie-react/cli init --dry-run' to preview changes.",
@@ -271,7 +273,7 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
   const staticResult = runDoctor(options)
   const checks: DoctorCheck[] = []
 
-  const url = await resolveBridgeUrl(cwd)
+  const { url, source } = await resolveBridge(cwd)
   const origin = httpOriginOf(url)
   if (!origin) {
     checks.push({ label: 'bridge url is well-formed', ok: false, critical: true, detail: url })
@@ -282,7 +284,10 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
         label: `dev server / hub listening at ${origin}`,
         ok: false,
         critical: true,
-        detail: 'nothing answered — start your dev server or genie hub',
+        detail:
+          source === 'fallback'
+            ? `nothing answered at the default guess — no ${GENIE_DISCOVERY_FILE} found from ${cwd} upward; start your dev server or genie hub`
+            : 'nothing answered — start your dev server or genie hub',
       })
     } else if (hub.kind === 'standalone') {
       checks.push({
@@ -317,7 +322,7 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
       })
       if (session) {
         checks.push({
-          label: 'an app session is connected',
+          label: session.connected ? 'an app session is connected' : 'no app session connected yet',
           ok: session.connected,
           critical: false,
           detail: session.connected
@@ -328,7 +333,7 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
               ]
                 .filter(Boolean)
                 .join(' · ')
-            : 'open the app in a browser',
+            : 'open the app in a browser to connect one',
         })
         if (session.roundTripMs !== null) {
           checks.push({
@@ -698,21 +703,26 @@ function applyRootRouteOutcome(outcome: RootRouteOutcome, ctx: ApplyContext): vo
   }
 }
 
-function printNextSteps(log: Logger, framework: Framework, rootRoute: RootRouteOutcome): void {
+function printNextSteps(
+  log: Logger,
+  framework: Framework,
+  rootRoute: RootRouteOutcome,
+  pm: PackageManagerHints,
+): void {
   // 'skip' (plain React + Vite) still wants the render step: only <Genie /> surfaces the memory + plugin tools there.
   const componentHandled = rootRoute.action === 'edit' || rootRoute.action === 'already'
   let step = 1
   log.info('\nNext steps:')
   log.info(`  ${step++}. install Genie (if you have not yet):`)
   log.info('       npx @genie-react/cli link <path-to-genie>   # local checkout (no publish), or:')
-  log.info(`       pnpm add -D ${requiredPackages(framework).join(' ')}`)
+  log.info(`       ${pm.add} ${requiredPackages(framework).join(' ')}`)
   if (!componentHandled) {
     log.info(`  ${step++}. render Genie near your app root (dev only):`)
     log.info(`       ${GENIE_IMPORT_LINE}`)
     log.info(`       ${GENIE_RENDER_SNIPPET}`)
   }
   log.info(`  ${step++}. start your dev server:`)
-  log.info('       pnpm dev')
+  log.info(`       ${pm.dev}`)
   log.info(`  ${step++}. drive the live tools from your shell:`)
   log.info('       npx @genie-react/cli status')
   log.info('       npx @genie-react/cli tools')
@@ -726,7 +736,8 @@ function runNextInit(ctx: ApplyContext, options: InitOptions): InitResult {
 
   applyNextLayoutOutcome(layout, ctx)
   applyInstrumentationOutcome(instrumentation, ctx)
-  printNextStepsForNext(log)
+  ensureGenieIgnored(ctx)
+  printNextStepsForNext(log, packageManagerHints(cwd))
   if (!dryRun && !options.yes) {
     log.info("\nTip: run 'npx @genie-react/cli doctor' to verify the wiring.")
   }
@@ -862,15 +873,15 @@ function applyInstrumentationOutcome(outcome: RootRouteOutcome, ctx: ApplyContex
   }
 }
 
-function printNextStepsForNext(log: Logger): void {
+function printNextStepsForNext(log: Logger, pm: PackageManagerHints): void {
   let step = 1
   log.info('\nNext steps:')
   log.info(`  ${step++}. install Genie (if you have not yet):`)
-  log.info(`       pnpm add -D ${GENIE_PACKAGE} ${CLI_PACKAGE}`)
+  log.info(`       ${pm.add} ${GENIE_PACKAGE} ${CLI_PACKAGE}`)
   log.info(
     `  ${step++}. start your dev server (instrumentation.ts starts the genie hub automatically):`,
   )
-  log.info('       pnpm dev')
+  log.info(`       ${pm.dev}`)
   log.info(`       # without instrumentation.ts, run the hub yourself: npx ${CLI_PACKAGE} hub`)
   log.info(`  ${step++}. drive the live tools from your shell:`)
   log.info(`       npx ${CLI_PACKAGE} status`)
@@ -886,11 +897,11 @@ function printUniversalSetup(log: Logger): void {
   log.info('     (the hub prints this tag with its actual port if 4390 was busy)')
 }
 
-function printUniversalNextSteps(log: Logger): void {
+function printUniversalNextSteps(log: Logger, pm: PackageManagerHints): void {
   let step = 1
   log.info('\nNext steps:')
   log.info(`  ${step++}. install Genie (if you have not yet):`)
-  log.info(`       pnpm add -D ${GENIE_PACKAGE} ${CLI_PACKAGE}`)
+  log.info(`       ${pm.add} ${GENIE_PACKAGE} ${CLI_PACKAGE}`)
   log.info(`  ${step++}. start the hub and your dev server, open the app in a browser`)
   log.info(`  ${step++}. drive the live tools from your shell:`)
   log.info(`       npx ${CLI_PACKAGE} status`)
@@ -928,6 +939,65 @@ function findPackageDir(cwd: string, name: string): string | null {
     if (existsSync(candidate)) return candidate
     const parent = dirname(dir)
     if (parent === dir) return null
+    dir = parent
+  }
+}
+
+/** `.genie/` holds the ephemeral bridge discovery file; keep it out of `git status` noise. */
+function ensureGenieIgnored(ctx: ApplyContext): void {
+  const { cwd, dryRun, log } = ctx
+  if (!inGitRepo(cwd)) return
+  const path = join(cwd, '.gitignore')
+  const current = readFileSafe(path)
+  if (/^\.genie\/?\s*$/m.test(current)) return
+  if (dryRun) {
+    log.info(`${OK} would add .genie/ to .gitignore`)
+    return
+  }
+  const base = current === '' || current.endsWith('\n') ? current : `${current}\n`
+  writeFileSync(path, `${base}.genie/\n`)
+  log.info(`${OK} added .genie/ to .gitignore`)
+}
+
+// Walks up because monorepo apps keep `.git` at the repo root; worktrees/submodules use a `.git` file, which existsSync also covers.
+function inGitRepo(cwd: string): boolean {
+  let dir = cwd
+  while (true) {
+    if (existsSync(join(dir, '.git'))) return true
+    const parent = dirname(dir)
+    if (parent === dir) return false
+    dir = parent
+  }
+}
+
+interface PackageManagerHints {
+  add: string
+  dev: string
+}
+
+function packageManagerHints(cwd: string): PackageManagerHints {
+  switch (detectPackageManager(cwd)) {
+    case 'yarn':
+      return { add: 'yarn add -D', dev: 'yarn dev' }
+    case 'bun':
+      return { add: 'bun add -d', dev: 'bun dev' }
+    case 'npm':
+      return { add: 'npm install -D', dev: 'npm run dev' }
+    case 'pnpm':
+      return { add: 'pnpm add -D', dev: 'pnpm dev' }
+  }
+}
+
+// Lockfile walk-up so a monorepo app dir reports the repo's real package manager; pnpm stays the no-lockfile default the docs use.
+function detectPackageManager(cwd: string): 'pnpm' | 'yarn' | 'bun' | 'npm' {
+  let dir = cwd
+  while (true) {
+    if (existsSync(join(dir, 'pnpm-lock.yaml'))) return 'pnpm'
+    if (existsSync(join(dir, 'yarn.lock'))) return 'yarn'
+    if (existsSync(join(dir, 'bun.lock')) || existsSync(join(dir, 'bun.lockb'))) return 'bun'
+    if (existsSync(join(dir, 'package-lock.json'))) return 'npm'
+    const parent = dirname(dir)
+    if (parent === dir) return 'pnpm'
     dir = parent
   }
 }

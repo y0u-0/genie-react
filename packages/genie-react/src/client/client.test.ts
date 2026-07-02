@@ -95,7 +95,7 @@ describe('GenieClient', () => {
     expect(response.result).toEqual({ echoed: 'hi' })
   })
 
-  it('rejects an unknown tool', async () => {
+  it('rejects an unknown tool and names the advertised domains', async () => {
     const { socket, client } = setup()
     client.start()
     socket.open()
@@ -105,9 +105,22 @@ describe('GenieClient', () => {
     const response = socket.decoded().find((m) => m.kind === 'app/response' && m.id === 'r2')
     expect(response.ok).toBe(false)
     expect(response.error).toContain('Unknown tool')
+    expect(response.error).toContain('echo')
   })
 
-  it('reports validation errors for bad arguments', async () => {
+  it('explains that query tools are gated on a discovered QueryClient', async () => {
+    const { socket, client } = setup()
+    client.start()
+    socket.open()
+    socket.receive({ kind: 'bridge/request', id: 'r5', tool: 'query_list', args: {} })
+    await flush()
+
+    const response = socket.decoded().find((m) => m.kind === 'app/response' && m.id === 'r5')
+    expect(response.ok).toBe(false)
+    expect(response.error).toContain('QueryClient')
+  })
+
+  it('reports validation errors for bad arguments with the failing key', async () => {
     const { socket, client } = setup()
     client.start()
     socket.open()
@@ -116,5 +129,25 @@ describe('GenieClient', () => {
 
     const response = socket.decoded().find((m) => m.kind === 'app/response' && m.id === 'r3')
     expect(response.ok).toBe(false)
+    expect(response.error).toContain('Invalid arguments for "echo"')
+    expect(response.error).toContain('message')
+  })
+
+  it('rejects unrecognized argument keys instead of silently stripping them', async () => {
+    const { socket, client } = setup()
+    client.start()
+    socket.open()
+    socket.receive({
+      kind: 'bridge/request',
+      id: 'r4',
+      tool: 'echo',
+      args: { message: 'hi', maxDepth: 2 },
+    })
+    await flush()
+
+    const response = socket.decoded().find((m) => m.kind === 'app/response' && m.id === 'r4')
+    expect(response.ok).toBe(false)
+    expect(response.error).toContain('Unknown argument "maxDepth"')
+    expect(response.error).toContain('valid keys: message')
   })
 })
