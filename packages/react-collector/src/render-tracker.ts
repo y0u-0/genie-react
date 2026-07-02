@@ -61,11 +61,7 @@ const records = new Map<number, RenderRecord>()
 let commits = 0
 let installed = false
 
-/**
- * Installs commit-time instrumentation so we can record why each component re-rendered. Must run
- * with the React DevTools hook already present (installed before React) — otherwise React never
- * registers a renderer and no commits are delivered. Idempotent.
- */
+/** Installs commit-time instrumentation (idempotent); the DevTools hook must already be present before React loads, or no commits are delivered. */
 export function startRenderTracking(): boolean {
   if (installed) return true
   try {
@@ -236,13 +232,11 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
       ]
     : propChanges
   record.changes = changes
-  // A new `children` element or a changed consumed context is a legitimate reason to re-render, so
-  // only count a render as unnecessary when none of props/state/children/context changed.
+  // A render is unnecessary only when none of props/state/children/context changed — new children or context are legitimate reasons.
   if (changes.length === 0 && !childrenDidChange && !contextChanged(fiber)) {
     record.unnecessary += 1
   }
-  // A render driven solely by unstable-reference props (no state/children change) would have been
-  // skipped under React.memo + stable refs — the most common real-world wasted render.
+  // A render driven solely by unstable-reference props (no state/children change) would be skipped under React.memo + stable refs — the most common wasted render.
   if (
     propChanges.length > 0 &&
     propChanges.every((change) => change.unstable) &&
@@ -284,8 +278,7 @@ function isUnstable(a: unknown, b: unknown): boolean {
 }
 
 export function stateChanged(fiber: Fiber): boolean {
-  // Class components store state directly on memoizedState as a fresh object per setState (no hook
-  // linked-list), so compare it by reference rather than walking a chain that isn't there.
+  // Class components store state directly on memoizedState (a fresh object per setState, no hook list) — compare by reference, not by walking a chain that isn't there.
   if (fiber.tag === ClassComponentTag) {
     return !Object.is(fiber.memoizedState, fiber.alternate?.memoizedState ?? null)
   }

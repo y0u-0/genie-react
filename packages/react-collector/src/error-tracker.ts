@@ -9,9 +9,7 @@ import {
 } from 'bippy'
 import { classifyFiber, type ResolvedSource } from './source'
 
-// React's DidCapture fiber flag (set on an error boundary only during the catch commit, then cleared)
-// and the Suspense fiber tag. Both are transient per-commit signals, so they are recorded at commit
-// time from the hook traversal rather than scanned on demand.
+// React's DidCapture flag is set on a boundary only during the catch commit, then cleared — transient, like fallback state, so both are recorded at commit time rather than scanned on demand.
 const DID_CAPTURE = 0b1000_0000
 const ERROR_LOG_LIMIT = 50
 
@@ -43,8 +41,7 @@ export function clearErrorState(): void {
   errorLog.length = 0
 }
 
-/** Called per fiber from the commit traversal. Captures error boundaries that caught this commit and
- * Suspense boundaries currently showing a fallback (both transient, so they are recorded, not polled). */
+/** Per-fiber commit hook: captures boundaries that caught this commit and Suspense boundaries showing a fallback (both transient, so recorded, not polled). */
 export function recordErrorState(fiber: Fiber): void {
   const flags = fiber.flags
   if ((flags & DID_CAPTURE) !== 0) {
@@ -62,11 +59,7 @@ export function recordErrorState(fiber: Fiber): void {
   }
 }
 
-/**
- * A Suspense boundary shows its fallback exactly when React parks a non-null `memoizedState` on it.
- * bippy over-claims `Fiber.memoizedState` as non-null, so this seam concentrates the one nullable-but-
- * typed-non-null read behind a documented name.
- */
+// The fallback shows exactly when React parks a non-null memoizedState; bippy types it non-null, so the one nullable read is isolated here.
 function suspenseShowsFallback(fiber: Fiber): boolean {
   return fiber.tag === SuspenseComponentTag && fiber.memoizedState != null
 }
@@ -80,12 +73,7 @@ function isMounted(fiber: Fiber): boolean {
   return false
 }
 
-/**
- * Patches console.error to capture the structured boundary-error React logs in dev (the
- * `'%o\n\n%s\n\n%s\n', Error, '…occurred in the <X> component.', '…error boundary you provided, Y.'`
- * shape), enriching the structural DidCapture signal with the message + the throwing component name.
- * Installed before React loads (from hook.ts). Best-effort: the original is always still called.
- */
+/** Patches console.error to capture React's dev boundary-error logs (message + throwing component name) alongside DidCapture; installed from hook.ts before React loads, and always calls the original. */
 export function installErrorCapture(): void {
   if (captureInstalled || typeof console === 'undefined') return
   captureInstalled = true
@@ -155,15 +143,13 @@ export async function getErrorState(query: {
       ? classifyFiber(fiber)
       : Promise.resolve({ source: null, isLibrary: false } as const)
 
-  // Reconcile against the live tree: a recorded boundary may have unmounted since (no commit fires).
-  // Only when roots are registered (in a real app); skipped with none so a rootless context keeps state.
+  // Evict recorded boundaries that have unmounted since (no commit fires); skipped when no roots are registered so a rootless context keeps its state.
   if (_fiberRoots.size > 0) {
     for (const [id, entry] of caught) if (!isMounted(entry.fiber)) caught.delete(id)
     for (const [id, entry] of suspended) if (!isMounted(entry.fiber)) suspended.delete(id)
   }
 
-  // Correlate each caught boundary to its console-logged error by name, consuming each log once so
-  // two same-named boundaries don't both grab the same (or an unrelated) entry.
+  // Match each caught boundary to its console-logged error by name, consuming each log once so same-named boundaries can't grab the same (or an unrelated) entry.
   const consumed = new Set<number>()
   const matched = [...caught.values()].slice(0, limit).map((entry) => {
     const boundaryName = nameOf(entry.fiber)

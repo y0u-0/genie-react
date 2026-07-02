@@ -9,8 +9,7 @@ import {
   stateChanged,
 } from './render-tracker'
 
-// Source resolution is async + source-map-bound; in tests the fake fibers have no _debugStack, so
-// stub it to "no source" — every fiber then classifies as app (isLibrary:false) and survives appOnly.
+// Fake fibers have no _debugStack: stub source lookup to null so every fiber classifies as app (isLibrary:false) and survives appOnly.
 vi.mock('bippy/source', () => ({
   getSource: async () => null,
   isSourceFile: (file: string) => !file.includes('/node_modules/'),
@@ -47,8 +46,7 @@ function componentFiber(opts: {
 
 const render = (fiber: Fiber, phase: RenderPhase) => recordRender(fiber, phase)
 
-// bippy assigns the very first fiber the falsy id `0`, which it then reassigns on the next lookup
-// (an unstable id). Burn it once up front so every fiber created in a test gets a stable, truthy id.
+// bippy gives the very first fiber the falsy id 0 and reassigns it on the next lookup; burn it up front so every test fiber gets a stable, truthy id.
 beforeAll(() => {
   recordRender(componentFiber({ name: '__warmup__', props: {} }), 'mount')
 })

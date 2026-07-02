@@ -17,16 +17,12 @@ import {
   SimpleMemoComponentTag,
   setFiberId,
 } from 'bippy'
-import type { NodeId } from './contracts'
+import { MAX_HOOKS, type NodeId } from './contracts'
 import { classifyFiber, type ResolvedSource, sourceLabel } from './source'
 
 export type { NodeId }
 
-/**
- * Mints the single {@link NodeId} brand: the sole surviving brand cast, isolated at the true bippy
- * `getFiberId` seam. `getFiberId` returns a plain `number`; branding is nominal and erases at runtime,
- * so the value passes through unchanged.
- */
+// The sole NodeId brand cast, isolated at the bippy getFiberId seam; the nominal brand erases at runtime.
 const asNodeId = (n: number): NodeId => n as NodeId
 
 export interface TreeNode {
@@ -56,17 +52,11 @@ export interface InspectResult {
   hooks: unknown[]
 }
 
-/**
- * Persistent id → fiber registry. React double-buffers fibers (each has a `current` and an
- * `alternate` that swap every commit), so an id captured in one tool call can point at the orphaned
- * buffer by the next. We mirror the id onto both buffers and resolve through `getLatestFiber`, which
- * follows the alternate link to whichever buffer is currently mounted — keeping ids stable across
- * re-renders. Capped so a long-lived dev session can't pin unmounted fibers forever.
- */
+// Id → fiber registry. React double-buffers fibers (current/alternate swap each commit), so the id is mirrored onto both buffers and resolved via getLatestFiber to whichever is mounted; capped so a long session can't pin unmounted fibers forever.
 const REGISTRY_LIMIT = 5_000
 const fiberRegistry = new Map<NodeId, Fiber>()
 
-function registerFiber(fiber: Fiber): NodeId {
+export function registerFiber(fiber: Fiber): NodeId {
   const id = asNodeId(getFiberId(fiber))
   if (fiber.alternate) setFiberId(fiber.alternate, id)
   if (fiberRegistry.size >= REGISTRY_LIMIT && !fiberRegistry.has(id)) fiberRegistry.clear()
@@ -107,7 +97,7 @@ function isMounted(fiber: Fiber, root: Fiber): boolean {
   return false
 }
 
-function nameOf(fiber: Fiber): string {
+export function nameOf(fiber: Fiber): string {
   if (isHostFiber(fiber)) return typeof fiber.type === 'string' ? fiber.type : 'host'
   return getDisplayName(fiber.type) ?? getDisplayName(fiber.elementType) ?? 'Anonymous'
 }
@@ -198,11 +188,7 @@ export async function buildTree(
   }
 }
 
-/**
- * Classifies each node, labels anonymous nodes by their source (`cmdk.js:1998`), and folds every
- * library subtree into its top node — so a Base UI / cmdk / devtools internal shows as one node, not
- * a wall of repeated "Anonymous".
- */
+// Classifies each node, labels anonymous nodes by source (`cmdk.js:1998`), and folds each library subtree into its top node instead of a wall of "Anonymous".
 async function foldLibrarySubtrees(
   entries: { node: TreeNode; fiber: Fiber }[],
 ): Promise<TreeNode[]> {
@@ -219,9 +205,7 @@ async function foldLibrarySubtrees(
     }
   })
 
-  // Fold only contiguous library internals: drop a library node whose nearest kept parent is also a
-  // library, so a library subtree collapses to its top node — while app components composed under a
-  // library provider (and a library component used directly in app code) are kept.
+  // Drop a library node whose nearest kept parent is also library: subtrees collapse to their top node while app components composed under library providers are kept.
   const byId = new Map(entries.map((entry) => [entry.node.id, entry.node]))
   const isLibraryInternal = (node: TreeNode): boolean => {
     if (!node.isLibrary) return false
@@ -300,6 +284,17 @@ function describeHook(index: number, memoizedState: unknown, depth: number): unk
   return { index, value: dehydrate(memoizedState, { depth }) }
 }
 
+/** The fiber's hook list (its memoizedState chain), capped at {@link MAX_HOOKS}. */
+export function hookChain(fiber: Fiber): MemoizedState[] {
+  const hooks: MemoizedState[] = []
+  let hook: MemoizedState | null = fiber.memoizedState
+  while (hook && hooks.length < MAX_HOOKS) {
+    hooks.push(hook)
+    hook = hook.next
+  }
+  return hooks
+}
+
 export function inspectFiber(
   fiber: Fiber,
   options: { path?: Array<string | number>; depth: number },
@@ -307,19 +302,15 @@ export function inspectFiber(
   const kind = fiberKind(fiber)
   const props = dehydrate(fiber.memoizedProps, { depth: options.depth, path: options.path })
   let state: unknown
-  const hooks: unknown[] = []
+  let hooks: unknown[] = []
 
   if (kind === 'class') {
     const instance = fiber.stateNode as { state?: unknown } | null
     state = dehydrate(instance?.state ?? fiber.memoizedState, { depth: options.depth })
   } else if (kind === 'function' || kind === 'memo' || kind === 'forwardRef') {
-    let hook: MemoizedState | null = fiber.memoizedState
-    let index = 0
-    while (hook && index < 100) {
-      hooks.push(describeHook(index, hook.memoizedState, options.depth))
-      hook = hook.next
-      index += 1
-    }
+    hooks = hookChain(fiber).map((hook, index) =>
+      describeHook(index, hook.memoizedState, options.depth),
+    )
   }
 
   return { id: asNodeId(getFiberId(fiber)), name: nameOf(fiber), kind, props, state, hooks }
@@ -349,11 +340,7 @@ export interface DomForResult {
 const isElement = (node: unknown): node is Element =>
   typeof node === 'object' && node !== null && (node as { nodeType?: number }).nodeType === 1
 
-/**
- * Maps a component to the DOM element(s) it renders — its nearest host fibers, whose `stateNode` is
- * the live DOM node. This is the link from a genie component id to a selector a browser tool can act
- * on. Text/comment host nodes are skipped; only elements are returned.
- */
+/** Maps a component to the DOM element(s) it renders — its nearest host fibers' `stateNode` — skipping text/comment host nodes. */
 export function domForFiber(fiber: Fiber, options: { limit: number }): DomForResult {
   const elements: HostElementInfo[] = []
   let total = 0
@@ -395,9 +382,7 @@ export function describeHostElement(el: Element): HostElementInfo {
 const truncateText = (text: string): string =>
   text.length > MAX_ELEMENT_TEXT ? `${text.slice(0, MAX_ELEMENT_TEXT)}…` : text
 
-// Prefer stable, unique-ish anchors, then fall back to tag + simple classes. Utility-framework
-// classes (`hover:bg-x`, `md:flex`) are not valid bare selectors, so only tokens safe to drop after a
-// `.` are used — richer identity (role / testId / text) rides alongside for semantic locators.
+// Utility-framework classes (`hover:bg-x`, `md:flex`) are not valid bare selectors, so only simple tokens follow the dot; role/testId/text ride alongside for semantic locators.
 const SIMPLE_CLASS = /^[a-zA-Z_][\w-]*$/
 
 function hostSelector(
@@ -425,20 +410,31 @@ export interface ContextResult {
   contexts: ContextInfo[]
 }
 
-/**
- * Reads the React Contexts a component consumes and their current values. Walks the fiber's
- * `dependencies.firstContext` list directly rather than bippy's `traverseContexts`, which diffs the
- * fiber against its alternate and so reads nothing on first mount (no alternate exists yet).
- */
-export function contextsForFiber(fiber: Fiber, options: { depth: number }): ContextResult {
-  const contexts: ContextInfo[] = []
+export interface ContextDependencyInfo {
+  context: unknown
+  name: string
+  value: unknown
+}
+
+/** The raw consumed contexts, walking `dependencies.firstContext` directly — bippy's `traverseContexts` diffs against the alternate and reads nothing on first mount. */
+export function contextDependencies(fiber: Fiber): ContextDependencyInfo[] {
+  const dependencies: ContextDependencyInfo[] = []
   let node: ContextDependency<unknown> | null = fiber.dependencies?.firstContext ?? null
   while (node && typeof node === 'object' && 'memoizedValue' in node) {
-    contexts.push({
+    dependencies.push({
+      context: node.context,
       name: node.context?.displayName || 'Context',
-      value: dehydrate(node.memoizedValue, { depth: options.depth }),
+      value: node.memoizedValue,
     })
     node = node.next ?? null
   }
+  return dependencies
+}
+
+export function contextsForFiber(fiber: Fiber, options: { depth: number }): ContextResult {
+  const contexts = contextDependencies(fiber).map(({ name, value }) => ({
+    name,
+    value: dehydrate(value, { depth: options.depth }),
+  }))
   return { id: asNodeId(getFiberId(fiber)), name: nameOf(fiber), contexts }
 }

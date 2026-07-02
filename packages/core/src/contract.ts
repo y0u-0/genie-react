@@ -1,20 +1,6 @@
 import type { z } from 'zod'
 
-/**
- * Global extension point for third-party collectors, extended via declaration merging. Augment it to
- * teach {@link defineAgentToolContract} about your plugin's tool groups without forking core:
- *
- * ```ts
- * declare module '@genie-react/core' {
- *   interface Register {
- *     toolGroups: 'sentry.issues' | 'sentry.performance'
- *   }
- * }
- * ```
- *
- * Mirrors TanStack Query/Router's `Register` interface: one `declare module` retroactively widens the
- * types the whole surface reads, at zero runtime cost.
- */
+/** Extension point (TanStack-style `Register`): augment via declaration merging (`toolGroups: '…'`) to add plugin tool groups. */
 // biome-ignore lint/suspicious/noEmptyInterface: intentional extension point for declaration merging
 export interface Register {}
 
@@ -31,19 +17,12 @@ export type BuiltInToolGroup =
   | 'memory'
   | 'action'
 
-/**
- * The group a tool belongs to. Built-in groups keep literal-type autocomplete; plugins contribute
- * their own by augmenting {@link Register}. The fallback is `never` rather than `string`, so the
- * surface stays closed by default — an unregistered group is a type error, not silently accepted.
- */
+/** Built-in groups plus `Register`-contributed ones; the fallback is `never`, so an unregistered group is a type error. */
 export type ToolGroup =
   | BuiltInToolGroup
   | (Register extends { toolGroups: infer G extends string } ? G : never)
 
-/**
- * Agent tool hints, advertised alongside each tool so the agent can reason about it before
- * calling (read-only vs. mutating, idempotent, etc.).
- */
+/** Hints advertised alongside each tool so the agent can reason about it (read-only vs. mutating, idempotent) before calling. */
 export interface AgentToolAnnotations {
   readOnlyHint?: boolean
   destructiveHint?: boolean
@@ -51,10 +30,7 @@ export interface AgentToolAnnotations {
   openWorldHint?: boolean
 }
 
-/**
- * The single source of truth for one agent tool. One declaration drives the advertised JSON Schema
- * (zod v4 is Standard Schema), the TypeScript arg/result types, and the wire descriptor — no drift.
- */
+/** Single source of truth per tool: one declaration drives the advertised JSON Schema, the TS types, and the wire descriptor. */
 export interface AgentToolContract<
   Input extends z.ZodType = z.ZodType,
   Output extends z.ZodType = z.ZodType,
@@ -74,21 +50,13 @@ export function defineAgentToolContract<Input extends z.ZodType, Output extends 
   return contract
 }
 
-/**
- * The argument shape a contract accepts on the wire — `z.input`, so fields with a Zod `.default()`
- * are optional (the app applies defaults when it parses). Paired with {@link ToolOutput}, this lets a
- * consumer holding a contract get an end-to-end typed round-trip without importing zod directly.
- */
+/** Wire argument shape — `z.input`, so fields with a Zod `.default()` stay optional (the app applies defaults on parse). */
 export type ToolInput<C extends AgentToolContract> = z.input<C['input']>
 
 /** The result shape a contract produces — `z.output` of its output schema. */
 export type ToolOutput<C extends AgentToolContract> = z.output<C['output']>
 
-/**
- * Describes a collector that contributes live data and/or agent tools. Built-in collectors
- * (react, query, router) and third-party plugins implement this so the surface is extensible
- * without forking.
- */
+/** A collector contributing live data and/or agent tools; third-party plugins implement this too, so no forking. */
 export interface CollectorMeta {
   id: string
   title: string

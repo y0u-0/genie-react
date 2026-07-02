@@ -144,6 +144,144 @@ describe('GenieBridge', () => {
     expect(result.error).toContain('No app connected')
   })
 
+  it('routes across multiple sessions and falls back when the current one closes', async () => {
+    const { ws: agent, inbox } = await open(`${url}?role=agent`)
+
+    const openApp = async (sessionId: string, tag: string) => {
+      const app = await connect(`${url}?role=app`)
+      app.on('message', (data) => {
+        const message = decodeFrame(data.toString()) as Frame
+        if (message.kind === 'bridge/request' && message.tool === 'whoami') {
+          send(app, { kind: 'app/response', id: message.id, ok: true, result: { from: tag } })
+        }
+      })
+      send(app, {
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId,
+        app: { name: tag },
+        capabilities: ['react'],
+        tools: [{ name: 'whoami', title: 'Who am I', description: 'session tag', group: 'meta' }],
+      })
+      return app
+    }
+
+    await openApp('tab-a', 'A')
+    const appB = await openApp('tab-b', 'B')
+    await inbox.wait((m) => m.kind === 'bridge/status' && m.sessions?.length === 2)
+
+    const statusId = newId()
+    send(agent, { kind: 'agent/invoke', id: statusId, tool: 'devtools_status', args: {} })
+    const status = await inbox.wait(isResult(statusId))
+    expect(status.result.sessions).toHaveLength(2)
+    expect(status.result.sessions.find((s: Frame) => s.sessionId === 'tab-b').current).toBe(true)
+    expect(status.result.sessionId).toBe('tab-b')
+
+    const defaultId = newId()
+    send(agent, { kind: 'agent/invoke', id: defaultId, tool: 'whoami', args: {} })
+    expect((await inbox.wait(isResult(defaultId))).result.from).toBe('B')
+
+    const targetedId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: targetedId,
+      tool: 'whoami',
+      args: {},
+      sessionId: 'tab-a',
+    })
+    expect((await inbox.wait(isResult(targetedId))).result.from).toBe('A')
+
+    const unknownId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: unknownId,
+      tool: 'whoami',
+      args: {},
+      sessionId: 'tab-zzz',
+    })
+    const unknown = await inbox.wait(isResult(unknownId))
+    expect(unknown.ok).toBe(false)
+    expect(unknown.error).toContain('Unknown session "tab-zzz"')
+    expect(unknown.error).toContain('tab-a')
+
+    const targetedStatusId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: targetedStatusId,
+      tool: 'devtools_status',
+      args: {},
+      sessionId: 'tab-a',
+    })
+    const targetedStatus = await inbox.wait(isResult(targetedStatusId))
+    expect(targetedStatus.result.sessionId).toBe('tab-a')
+    expect(targetedStatus.result.app.name).toBe('A')
+    expect(targetedStatus.result.sessions).toHaveLength(2)
+
+    const unknownStatusId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: unknownStatusId,
+      tool: 'devtools_status',
+      args: {},
+      sessionId: 'tab-zzz',
+    })
+    const unknownStatus = await inbox.wait(isResult(unknownStatusId))
+    expect(unknownStatus.ok).toBe(false)
+    expect(unknownStatus.error).toContain('Unknown session "tab-zzz"')
+
+    appB.close()
+    // Poll via request/response — a broadcast matcher could match the pre-tab-b status from history.
+    let statusAfter: Frame
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const pollId = newId()
+      send(agent, { kind: 'agent/invoke', id: pollId, tool: 'devtools_status', args: {} })
+      statusAfter = (await inbox.wait(isResult(pollId))).result
+      if (statusAfter.sessionId === 'tab-a' && statusAfter.sessions.length === 1) break
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(statusAfter.sessionId).toBe('tab-a')
+    expect(statusAfter.sessions).toHaveLength(1)
+
+    const fallbackId = newId()
+    send(agent, { kind: 'agent/invoke', id: fallbackId, tool: 'whoami', args: {} })
+    expect((await inbox.wait(isResult(fallbackId))).result.from).toBe('A')
+  })
+
+  it('re-hello on a new socket fails in-flight requests and refreshes session recency', async () => {
+    const { ws: agent, inbox } = await open(`${url}?role=agent`)
+
+    const appHello = (name: string) => ({
+      kind: 'app/hello',
+      protocol: 1,
+      sessionId: 's-r',
+      app: { name },
+      capabilities: ['react'],
+      tools: [{ name: 'slow', title: 'Slow', description: 'never responds', group: 'meta' }],
+    })
+
+    const firstSocket = await connect(`${url}?role=app`)
+    send(firstSocket, appHello('first'))
+    await inbox.wait((m) => m.kind === 'bridge/status' && m.connected === true)
+
+    const slowId = newId()
+    send(agent, { kind: 'agent/invoke', id: slowId, tool: 'slow', args: {} })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    const secondSocket = await connect(`${url}?role=app`)
+    send(secondSocket, appHello('second'))
+
+    const failed = await inbox.wait(isResult(slowId))
+    expect(failed.ok).toBe(false)
+    expect(failed.error).toContain('reconnected')
+
+    const statusId = newId()
+    send(agent, { kind: 'agent/invoke', id: statusId, tool: 'devtools_status', args: {} })
+    const status = await inbox.wait(isResult(statusId))
+    expect(status.result.sessions).toHaveLength(1)
+    expect(status.result.app.name).toBe('second')
+    expect(status.result.sessions[0].current).toBe(true)
+  })
+
   it('times out a forwarded tool when the app never responds', async () => {
     const fastHandle = createStandaloneBridge({ requestTimeoutMs: 150 })
     const fastUrl = (await fastHandle.listen()).url

@@ -16,9 +16,7 @@ import {
   sourceLabel,
 } from './source'
 
-// React's hook effect tag bits (ReactHookEffectTags) — stable across React 16.8+, 18, and 19. bippy
-// does not re-export them. `HasEffect` is set during render when the effect will run this commit; the
-// kind bit (Passive/Layout/Insertion) is fixed per effect.
+// React's ReactHookEffectTags, stable across 16.8+/18/19 (bippy doesn't re-export them): HasEffect = will run this commit; the kind bit is fixed per effect.
 const HOOK_HAS_EFFECT = 0b0001
 const HOOK_INSERTION = 0b0010
 const HOOK_LAYOUT = 0b0100
@@ -26,8 +24,7 @@ const HOOK_PASSIVE = 0b1000
 
 const EFFECT_WALK_LIMIT = 1000
 
-// Fibers that own a hook effect list. MemoComponentTag wraps an inner function fiber, which carries
-// the effects as one of these tags, so it does not need to be listed.
+// Fibers that own a hook effect list; MemoComponentTag wraps an inner fiber that carries the effects as one of these tags, so it's not listed.
 const EFFECT_TAGS = new Set<number>([FunctionComponentTag, ForwardRefTag, SimpleMemoComponentTag])
 
 export type EffectKind = 'effect' | 'layout' | 'insertion'
@@ -58,11 +55,7 @@ export function clearEffects(): void {
   records.clear()
 }
 
-/**
- * Records, at commit time, which of a component's effects are scheduled to run this commit (the
- * `HasEffect` bit, the same check React's own commit phase uses) and which dependency drove it. Call
- * from the commit-hook traversal alongside render tracking. Function components only.
- */
+/** Records at commit time which effects will run this commit (the same `HasEffect` bit React's commit phase checks) and which dependency drove them. */
 export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
   if (!EFFECT_TAGS.has(fiber.tag)) return
 
@@ -110,9 +103,7 @@ export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
       stat.depCount = depCount
     }
 
-    // The cleanup returned by the previous run, so this turns true once the effect has run at least
-    // once and returned one. React 18.3+/19 store it at `effect.inst.destroy`; older React used
-    // `effect.destroy`.
+    // Turns true once a previous run returned a cleanup — React 18.3+/19 store it at `effect.inst.destroy`, older React at `effect.destroy`.
     if (hasCleanupFn(effect)) stat.hasCleanup = true
 
     if (phase === 'update') {
@@ -173,13 +164,7 @@ export async function getEffectAudit(query: EffectAuditQuery): Promise<EffectAud
       const name = record.name === 'Anonymous' ? (sourceLabel(source) ?? record.name) : record.name
       const stats = record.stats.filter(Boolean)
       const effectSources = await resolveEffectSources(record.fiber)
-      // The inspector reports the call-site of every USER effect (useEffect/useLayoutEffect/…). Internal
-      // hooks (useSyncExternalStore, useActionState) also push effects onto the commit list but the
-      // inspector does not surface them as effect call-sites. So:
-      //  • lengths match            → 1:1 map; each effect carries its own call-site + app/library flag.
-      //  • inspected, no APP effect  → the component wrote none of these effects (zero leaves, or every
-      //                                leaf is library): the whole commit list is library/internal noise.
-      //  • otherwise (inspection failed, or app + internal effects interleave) → cannot attribute safely.
+      // Internal hooks (useSyncExternalStore, useActionState) push commit-list effects the inspector never reports: map 1:1 only when lengths match; inspected with no app effect ⇒ the whole list is library/internal noise; otherwise attribution is unsafe.
       const aligned = effectSources !== null && effectSources.length === stats.length
       const noAppEffect =
         effectSources !== null &&

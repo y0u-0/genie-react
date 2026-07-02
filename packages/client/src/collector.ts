@@ -13,20 +13,13 @@ export interface CollectorTool<I extends z.ZodType = z.ZodType, O extends z.ZodT
   handler: (args: z.infer<I>, ctx: CollectorContext) => z.infer<O> | Promise<z.infer<O>>
 }
 
-/**
- * Type-erased tool as stored by the registry. Every concrete {@link CollectorTool} assigns to this
- * (the `never` arg makes the handler contravariantly compatible), so collectors keep full typing at
- * their definition site while the client treats all tools uniformly.
- */
+/** Type-erased tool as stored by the registry; the `never` arg keeps every concrete {@link CollectorTool} contravariantly assignable. */
 export interface ErasedCollectorTool {
   contract: AgentToolContract
   handler: (args: never, ctx: CollectorContext) => unknown
 }
 
-/**
- * A unit of agent capability. Built-in collectors (session, react, query, router) and third-party
- * plugins implement this; the client aggregates their tools and app info. This is the extension seam.
- */
+/** The extension seam: built-in and third-party collectors implement this; the client aggregates their tools and app info. */
 export interface GenieCollector {
   meta: CollectorMeta
   capabilities?: string[]

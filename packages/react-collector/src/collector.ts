@@ -1,18 +1,23 @@
 import { defineCollector, defineCollectorTool, type GenieCollector } from '@genie-react/client'
-import { getRDTHook, overrideProps } from 'bippy'
+import { type Fiber, getRDTHook } from 'bippy'
+import type { NodeId } from './contracts'
 import {
   reactClearRendersContract,
   reactDomForComponentContract,
   reactEffectAuditContract,
   reactErrorStateContract,
   reactFindComponentsContract,
+  reactForceErrorBoundaryContract,
   reactGetRendersContract,
   reactGetTreeContract,
   reactInspectComponentContract,
   reactInspectContextContract,
+  reactOverrideContextContract,
+  reactOverrideHookStateContract,
   reactOverridePropsContract,
   reactProfileReportContract,
   reactProfileStartContract,
+  reactToggleSuspenseFallbackContract,
 } from './contracts'
 import { getEffectAudit } from './effect-tracker'
 import { getErrorState } from './error-tracker'
@@ -24,7 +29,16 @@ import {
   findFiberById,
   findRootFiber,
   inspectFiber,
+  nameOf,
+  registerFiber,
 } from './fiber'
+import {
+  applyContextOverride,
+  applyErrorOverride,
+  applyHookStateOverride,
+  applySuspenseOverride,
+  overrideFiberProps,
+} from './overrides'
 import {
   clearRenders,
   getCommitCount,
@@ -34,10 +48,7 @@ import {
   startRenderTracking,
 } from './render-tracker'
 
-/**
- * React collector: component tree, search, inspection, live prop overrides, and — once commit
- * instrumentation is active (see `@genie-react/react-collector/hook`) — why-did-render + profiling.
- */
+/** React collector: tree, search, inspection, live overrides; why-did-render + profiling need commit instrumentation from `@genie-react/react-collector/hook`. */
 export function reactCollector(): GenieCollector {
   return defineCollector({
     meta: { id: 'react', title: 'React', description: 'Tree, inspect, renders, profiling' },
@@ -79,11 +90,52 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactOverridePropsContract,
         handler: ({ id, props }) => {
-          const root = findRootFiber()
-          const fiber = root ? findFiberById(root, id) : null
-          if (!fiber) throw new Error(`Component ${id} not found.`)
-          overrideProps(fiber, props)
+          overrideFiberProps(requireFiber(id), props)
           return { ok: true }
+        },
+      }),
+      defineCollectorTool({
+        contract: reactOverrideHookStateContract,
+        handler: ({ id, hookIndex, path, value }) => {
+          const fiber = requireFiber(id)
+          applyHookStateOverride(fiber, hookIndex, path, value)
+          return { ok: true, name: nameOf(fiber), hookIndex }
+        },
+      }),
+      defineCollectorTool({
+        contract: reactOverrideContextContract,
+        handler: ({ id, context, value }) => {
+          const match = applyContextOverride(requireFiber(id), context, value)
+          return {
+            ok: true,
+            providerId: registerFiber(match.provider),
+            contextName: match.contextName,
+          }
+        },
+      }),
+      defineCollectorTool({
+        contract: reactToggleSuspenseFallbackContract,
+        handler: ({ id, showFallback }) => {
+          const { boundary, active } = applySuspenseOverride(requireFiber(id), showFallback)
+          return {
+            ok: true,
+            boundaryId: registerFiber(boundary),
+            showingFallback: showFallback,
+            activeOverrides: active,
+          }
+        },
+      }),
+      defineCollectorTool({
+        contract: reactForceErrorBoundaryContract,
+        handler: ({ id, forceError }) => {
+          const { boundary, active } = applyErrorOverride(requireFiber(id), forceError)
+          return {
+            ok: true,
+            boundaryId: registerFiber(boundary),
+            boundaryName: nameOf(boundary),
+            erroring: forceError,
+            activeOverrides: active,
+          }
         },
       }),
       defineCollectorTool({
@@ -186,6 +238,13 @@ export function reactCollector(): GenieCollector {
       }),
     ],
   })
+}
+
+function requireFiber(id: NodeId): Fiber {
+  const root = findRootFiber()
+  const fiber = root ? findFiberById(root, id) : null
+  if (!fiber) throw new Error(`Component ${id} not found (it may have unmounted).`)
+  return fiber
 }
 
 function detectReactVersion(): string | undefined {

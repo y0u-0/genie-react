@@ -18,11 +18,7 @@ function isRouteEntry(value: unknown): value is RouteEntry {
   )
 }
 
-/**
- * `AnyRouter.routesById` is an `any`-typed internal; this is the single runtime-checked boundary
- * that narrows its values to the RouteEntry shape the route-listing tool reads, dropping anything
- * without a string `id`.
- */
+// The single runtime boundary narrowing the `any`-typed routesById internal; entries without a string id are dropped.
 function asRouteEntries(routesById: unknown): RouteEntry[] {
   if (typeof routesById !== 'object' || routesById === null) return []
   const values: unknown[] = Object.values(routesById)

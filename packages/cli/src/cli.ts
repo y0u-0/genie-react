@@ -24,6 +24,7 @@ Tool commands (dev server must be running with the genie() plugin):
 Options:
   --url <ws-url>   override the bridge URL (default: from .genie/bridge.json)
   --wait <ms>      how long to wait for the app to connect (default 15000)
+  --session <id>   target one app session when several tabs are connected (status lists them)
   --json           print raw JSON instead of the compact summary
   --dry-run        (init) print intended changes without writing files
   --yes, -y        assume yes for any prompts
@@ -53,6 +54,7 @@ async function main(): Promise<number> {
       yes: { type: 'boolean', short: 'y' },
       url: { type: 'string' },
       wait: { type: 'string' },
+      session: { type: 'string' },
       json: { type: 'boolean' },
     },
   })
@@ -72,6 +74,7 @@ async function main(): Promise<number> {
     url: values.url,
     waitMs: values.wait ? Number(values.wait) : undefined,
     json: values.json,
+    session: values.session,
   }
 
   switch (command) {

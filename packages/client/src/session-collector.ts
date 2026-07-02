@@ -1,10 +1,7 @@
 import type { AppInfo } from '@genie-react/core'
 import { defineCollector, type GenieCollector } from './collector'
 
-/**
- * Always-on collector that reports basic app + React runtime info. Carries no tools — the bridge
- * answers `devtools_status` from the hello payload it contributes.
- */
+/** Always-on collector reporting app + React info; no tools — the bridge answers `devtools_status` from its hello payload. */
 export function sessionCollector(): GenieCollector {
   return defineCollector({
     meta: { id: 'session', title: 'Session', description: 'App and React runtime info' },
@@ -33,10 +30,7 @@ function detectReactVersion(): string | undefined {
   return undefined
 }
 
-/**
- * React DevTools injects this global hook from the extension/backend; it is untyped from our side, so
- * the one cast to the minimal shape we read is isolated to this accessor.
- */
+// The DevTools-injected hook is untyped from our side; the one cast to the shape we read is isolated here.
 function getReactDevtoolsHook(): DevtoolsHook | undefined {
   return (globalThis as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: DevtoolsHook })
     .__REACT_DEVTOOLS_GLOBAL_HOOK__

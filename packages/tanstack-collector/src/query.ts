@@ -15,11 +15,7 @@ type QueryCacheRef = ReturnType<QueryClient['getQueryCache']>
 
 type QueryIdentifier = { queryHash?: string; queryKey?: unknown[] }
 
-/**
- * The two interchangeable ways query_list addresses a single cache entry: every row it returns
- * carries both a `queryHash` and a `queryKey`, so the single-entry read tools accept either rather
- * than forcing the caller to remember which tool wants which.
- */
+// Every query_list row carries both a queryHash and a queryKey, so single-entry tools accept either identifier.
 const queryIdentifierFields = {
   queryHash: z.string().optional().describe('Exact queryHash from query_list.'),
   queryKey: z
@@ -413,8 +409,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
     const startedFetching =
       query.state.fetchStatus === 'fetching' && entry.lastFetchStatus !== 'fetching'
     const dataAdvanced = query.state.dataUpdatedAt > entry.lastDataUpdatedAt
-    // Count each fetch once: prefer the fetch-start transition, and fall back to a data bump only
-    // for a fetch whose start we never observed (began and settled between coalesced events).
+    // Count a fetch once: prefer the start transition; a data bump only counts when the start was never observed.
     let fetched = false
     if (startedFetching) {
       fetched = true
@@ -497,8 +492,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
     const observed = query?.observers.find(
       (observer) => typeof observer.options.queryFn === 'function',
     )
-    // Observer options carry the observer's own generic queryFn type; the `typeof === 'function'`
-    // check above proves it is a QueryFunction, so this narrows it to the cache-level signature.
+    // The typeof check above proves a QueryFunction; the cast just drops the observer's own generic type.
     if (observed) return observed.options.queryFn as QueryFunction
     const fallback = queryClient.getQueryDefaults(queryKey).queryFn
     return typeof fallback === 'function' ? fallback : undefined

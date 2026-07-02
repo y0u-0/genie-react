@@ -15,22 +15,12 @@ export interface GenieProps {
   appName?: string
 }
 
-/**
- * `@tanstack/react-router` is an optional peer: when it is not installed the genie() Vite plugin
- * resolves it to a no-op stub, and even when installed `useRouter({ warn: false })` returns
- * `undefined` outside a `<RouterProvider>`. The hook's declared return type omits `undefined`, so
- * this is the single documented widening for that peer-stub / no-provider boundary — isolated here
- * so the component body never re-asserts the router's presence.
- */
+// useRouter's type omits `undefined`, but the Vite-plugin peer stub and the no-provider case return it; this is the single widening for that boundary.
 function useOptionalRouter(): ReturnType<typeof useRouter> | undefined {
   return useRouter({ warn: false }) as ReturnType<typeof useRouter> | undefined
 }
 
-/**
- * Duck-types a TanStack `QueryClient` by its stable cache accessor, so a foreign value sitting on
- * the router context can't masquerade as one. Kept minimal (one method) so it never rejects a real
- * client across query-core minor versions.
- */
+// One-method duck-type: strict enough to reject foreign context values, loose enough to survive query-core minors.
 function isQueryClient(value: unknown): value is QueryClient {
   return (
     typeof value === 'object' &&
@@ -49,17 +39,7 @@ function getRouterQueryClient(router: ReturnType<typeof useRouter>): QueryClient
   return isQueryClient(context.queryClient) ? context.queryClient : undefined
 }
 
-/**
- * One-line Genie integration for any React + Vite app. Auto-wires the memory and DevTools
- * passthrough collectors, and — when rendered inside a TanStack Router — the Router and (when a
- * QueryClient is in the router context) Query collectors. Render it once near your root, dev-only:
- *
- * ```tsx
- * {import.meta.env.DEV && <Genie />}
- * ```
- *
- * It registers onto the Vite-plugin-injected client when one is already running, or starts its own.
- */
+/** One-line Genie integration: render once near the root, dev-only; auto-wires router/query collectors and joins the Vite-injected client or starts its own. */
 export function Genie({ appName }: GenieProps = {}): null {
   const router = useOptionalRouter()
 

@@ -11,11 +11,7 @@ export interface GenieViteOptions {
   appName?: string
   /** Set to `false` to disable Genie even in dev (e.g. via an env flag). Defaults to `true`. */
   enabled?: boolean
-  /**
-   * Auto-register the React collector (component tree, why-did-render, profiler) in the injected
-   * client, and install its commit hook before React loads. Defaults to `true` — plain `genie()`
-   * gives the full React surface with zero app code. Set to `false` for session info only.
-   */
+  /** Auto-register the React collector and its pre-React commit hook (default `true`); `false` gives session info only. */
   react?: boolean
   /** Override the bridge's per-request timeout in ms (default 20000). */
   requestTimeoutMs?: number
@@ -25,12 +21,7 @@ const HOOK_MODULE = '@genie-react/react-collector/hook'
 const MISSING_HOOK_WARNING =
   '[genie] @genie-react/react-collector not found — render tracking/profiling are disabled. Install it (recommended), or pass react:false to silence this.'
 
-/**
- * The runtime modules the injected client imports by bare specifier. They ship as dependencies of
- * `@genie-react/vite`, so resolving them from this plugin's own location and aliasing the bare
- * specifiers to the resolved files lets the host app install just `@genie-react/vite` (+ the
- * `<Genie />` package) — the collectors resolve regardless of the package manager's hoisting layout.
- */
+// Bare specifiers the injected client imports; aliased from this plugin's own location so they resolve regardless of the host's hoisting layout.
 const RUNTIME_MODULES = [
   HOOK_MODULE,
   '@genie-react/react-collector',
@@ -60,22 +51,14 @@ function isClientEntry(id: string): boolean {
 const VIRTUAL_ID = 'virtual:genie-client'
 const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_ID}`
 
-// `@tanstack/react-router` is an optional peer of `@genie-react/react`'s <Genie />. When it is not
-// installed, resolve the bare specifier to a no-op stub so neither the dev server nor `vite build`
-// fails on the import in a plain React app.
+// Optional peer of <Genie />: resolved to a no-op stub when absent so neither dev nor `vite build` fails on the import.
 const OPTIONAL_ROUTER_SPECIFIER = '@tanstack/react-router'
 const ROUTER_STUB_ID = '\0virtual:genie-optional-router'
 const ROUTER_STUB_CODE = 'export const useRouter = () => undefined\n'
-// Vite resolves an unresolved *optional* peer to a synthetic placeholder (not null) whose module
-// body only throws. Because we declare @tanstack/react-router as an optional peer, an absent install
-// surfaces as this id rather than a failed resolve, so it must count as "not installed".
+// Vite resolves an absent *optional* peer to this synthetic throwing placeholder (not null), so it must count as "not installed".
 const VITE_OPTIONAL_PEER_PREFIX = '__vite-optional-peer-dep:'
 
-/**
- * Dev-only Vite plugin. Mounts the Genie hub on Vite's own HTTP server (no extra port), injects the
- * in-browser client as the first module in `<head>`, and writes a discovery file so the genie CLI
- * can find the bridge.
- */
+/** Dev-only plugin: mounts the hub on Vite's own HTTP server (no extra port), injects the client first in `<head>`, and writes a discovery file for the genie CLI. */
 export function genie(options: GenieViteOptions = {}): Plugin[] {
   const enabled = options.enabled ?? true
   const react = options.react ?? true
@@ -98,14 +81,11 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
 
     config(userConfig) {
       if (!enabled) return undefined
-      // Let Vite serve Genie's own files when linked from a checkout outside the app root (e.g.
-      // `genie link`). Setting fs.allow disables Vite's workspace-root default, so include it too.
+      // fs.allow serves a linked checkout (`genie link`); setting it drops Vite's workspace-root default, so re-include that.
       const genieRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
       const root = userConfig.root ? resolve(userConfig.root) : process.cwd()
       return {
-        // Dedupe React (+ TanStack) to a single copy. Without this, a checkout linked via `genie link`
-        // resolves <Genie />'s react/react-router from the monorepo rather than the app, giving two
-        // React instances and an "invalid hook call". A no-op for a normal install with one copy.
+        // Dedupe to one React copy: a `genie link` checkout otherwise gets two Reacts and an "invalid hook call".
         resolve: {
           alias: runtimeAliases(),
           dedupe: ['react', 'react-dom', '@tanstack/react-router', '@tanstack/react-query'],
@@ -155,9 +135,7 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
 
     transformIndexHtml() {
       if (!enabled) return undefined
-      // Point at the virtual module's dev URL rather than a bare `import "virtual:…"`: Vite does not
-      // rewrite a bare specifier inside an injected inline module script, so the browser would fail
-      // to resolve it. `/@id/\0…` is the URL Vite already serves the (resolved) virtual module from.
+      // Vite doesn't rewrite bare specifiers in injected inline scripts; use the /@id/ URL it already serves the virtual module from.
       return [
         {
           tag: 'script',
@@ -171,13 +149,7 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
   return [plugin, optionalRouterPlugin()]
 }
 
-/**
- * Resolves `@tanstack/react-router` to a no-op `useRouter` stub when it is not installed, so a plain
- * React app can render <Genie /> without the import breaking dev or `vite build`. A real install is
- * always used untouched. This is a separate plugin with no `apply` field on purpose: the main genie
- * plugin is `apply: 'serve'` and so is inactive during `vite build`, but the stub must run at build
- * time too — otherwise a production build fails on the unresolved specifier.
- */
+// No `apply` on purpose: unlike the serve-only genie plugin, the router stub must also run during `vite build`.
 function optionalRouterPlugin(): Plugin {
   return {
     name: 'genie:optional-router',
@@ -197,8 +169,7 @@ function optionalRouterPlugin(): Plugin {
 function generateClientModule(options: GenieViteOptions, reactAvailable: boolean): string {
   const appName = options.appName ? JSON.stringify(options.appName) : 'undefined'
   const lines: string[] = []
-  // First import: install the React DevTools commit hook before React loads. This module is
-  // head-prepended ahead of the app entry, so the hook is in place when React registers its renderer.
+  // Hook import first so the DevTools commit hook installs before React registers its renderer.
   if (reactAvailable) lines.push(`import ${JSON.stringify(HOOK_MODULE)}`)
   lines.push("import { createGenieClient, sessionCollector } from '@genie-react/client'")
   if (reactAvailable) lines.push("import { reactCollector } from '@genie-react/react-collector'")

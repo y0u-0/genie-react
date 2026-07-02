@@ -68,13 +68,14 @@ npx skills add y0u-0/genie-react
 - navigate, preload, and invalidate routes
 - invalidate / refetch / reset / remove / setData / cancel / fetch / ensure queries
 - re-run a mutation
-- override a component's props to test a UI state
+- override a component's props, hook state, or a context value
+- force a Suspense fallback or an error boundary — hold loading / error UI open to inspect it, no code edits
 
-46 tools total. `read` is safe to call freely; `action` mutates the running app.
+50 tools total. `read` is safe to call freely; `action` mutates the running app.
 
 ## Tools
 
-**React** — `react_get_tree`, `react_find_components` (tree); `react_inspect_component` (props / state / hooks), `react_inspect_context` (consumed contexts + values), `react_dom_for_component` (DOM element(s) + selectors); `react_get_renders`, `react_clear_renders` (why-did-render), `react_effect_audit` (which effects fired), `react_error_state` (errors / suspended); `react_profile_start`, `react_profile_report` (profiler) — read. `react_override_props` — action.
+**React** — `react_get_tree`, `react_find_components` (tree); `react_inspect_component` (props / state / hooks), `react_inspect_context` (consumed contexts + values), `react_dom_for_component` (DOM element(s) + selectors); `react_get_renders`, `react_clear_renders` (why-did-render), `react_effect_audit` (which effects fired), `react_error_state` (errors / suspended); `react_profile_start`, `react_profile_report` (profiler) — read. `react_override_props`, `react_override_hook_state`, `react_override_context` (drive props / hook state / context), `react_toggle_suspense_fallback`, `react_force_error_boundary` (hold loading / error UI open) — action.
 
 **Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_fetch`, `query_ensure`, `mutation_rerun`.
 
@@ -89,6 +90,8 @@ npx skills add y0u-0/genie-react
 ## How it works
 
 Collectors in the browser (React, Query, Router, plugins, memory) run tool calls against the real fibers and caches, and talk over a WebSocket to a small hub on your Vite dev server. The `genie` CLI connects to that hub, runs tools, and prints JSON.
+
+Several tabs can be connected at once: calls hit the most recent, `genie status` lists every session, and `--session <id>` targets a specific tab — so parallel agents can each drive their own.
 
 Dev-only and local: the Vite plugin is inert in production builds, the browser client only starts under `import.meta.env.DEV`, and the hub listens on `localhost` only.
 

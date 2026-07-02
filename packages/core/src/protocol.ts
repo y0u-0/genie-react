@@ -6,10 +6,7 @@ type CryptoLike = {
   getRandomValues?: <T extends Uint8Array>(array: T) => T
 }
 
-/**
- * A v4 UUID. Prefers `crypto.randomUUID` but falls back gracefully when it is absent — notably in
- * non-secure contexts like `http://<LAN-IP>` device testing — since these ids are not security-sensitive.
- */
+/** v4 UUID; falls back when `crypto.randomUUID` is absent (non-secure contexts) — these ids are not security-sensitive. */
 export const newId = (): string => {
   const cryptoLike = (globalThis as { crypto?: CryptoLike }).crypto
   if (typeof cryptoLike?.randomUUID === 'function') return cryptoLike.randomUUID()
@@ -51,6 +48,17 @@ export const appInfoSchema = z.object({
   tanstack: z.record(z.string(), z.string()).optional(),
 })
 export type AppInfo = z.infer<typeof appInfoSchema>
+
+/** One connected app session (a browser tab); the bridge routes to the most recent unless `agent/invoke.sessionId` targets one. */
+export const sessionSummarySchema = z.object({
+  sessionId: z.string(),
+  app: appInfoSchema,
+  domains: z.array(z.string()),
+  toolCount: z.number(),
+  connectedAt: z.number(),
+  current: z.boolean(),
+})
+export type SessionSummary = z.infer<typeof sessionSummarySchema>
 
 // ── App (browser) → Bridge ──────────────────────────────────────────────────
 
@@ -120,6 +128,10 @@ export const agentInvokeSchema = z.object({
   id: z.string(),
   tool: z.string(),
   args: z.unknown(),
+  sessionId: z
+    .string()
+    .optional()
+    .describe('Target app session; defaults to the most recently connected.'),
 })
 
 export const agentPingSchema = z.object({
@@ -147,6 +159,7 @@ export const bridgeStatusSchema = z.object({
   app: appInfoSchema.nullable(),
   domains: z.array(z.string()),
   tools: z.array(toolDescriptorSchema),
+  sessions: z.array(sessionSummarySchema).default([]),
 })
 export type BridgeStatusMessage = z.infer<typeof bridgeStatusSchema>
 

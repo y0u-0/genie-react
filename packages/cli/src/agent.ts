@@ -8,11 +8,7 @@ import { GenieAgentLink } from './agent-link'
 import { resolveBridgeUrl } from './discovery'
 import { isRecord } from './guards'
 
-/**
- * The CLI's tool-calling surface — connects to the live bridge as the `agent` role and runs tool
- * calls, the same channel the app advertises its catalog over. Drives Genie's tools straight from a
- * shell, no separate server: `genie call react_get_renders '{"sort":"renders"}'`.
- */
+// The CLI's tool-calling surface: connects to the bridge as the `agent` role — straight from a shell, no separate server.
 
 export interface AgentOptions {
   cwd?: string
@@ -22,6 +18,8 @@ export interface AgentOptions {
   waitMs?: number
   /** Print raw pretty JSON instead of the compact per-tool summary. */
   json?: boolean
+  /** Target a specific app session when several tabs are connected (see `genie status`). */
+  session?: string
 }
 
 const out = (message: string): void => void process.stdout.write(`${message}\n`)
@@ -29,7 +27,12 @@ const err = (message: string): void => void process.stderr.write(`${message}\n`)
 
 async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url: string }> {
   const url = opts.url ?? (await resolveBridgeUrl(opts.cwd ?? process.cwd()))
-  const link = new GenieAgentLink({ url, connectTimeoutMs: 8_000, invokeTimeoutMs: 20_000 })
+  const link = new GenieAgentLink({
+    url,
+    connectTimeoutMs: 8_000,
+    invokeTimeoutMs: 20_000,
+    sessionId: opts.session,
+  })
   link.start()
   return { link, url }
 }
@@ -41,11 +44,7 @@ const summarizers: Record<string, (result: unknown) => string | null> = {
   react_dom_for_component: summarizeDom,
 }
 
-/**
- * Renders a tool result for the terminal. Falls back to pretty JSON whenever `json` is set, no
- * summarizer is registered for the tool, or the summarizer rejects the shape — so the compact mode
- * can shrink output but never silently drop data the agent needs.
- */
+/** Falls back to pretty JSON on any miss (`json` set, no summarizer, rejected shape) so compact mode never drops data. */
 export function renderResult(tool: string, result: unknown, json?: boolean): string {
   if (json) return prettyJson(result)
   const summarize = summarizers[tool]
@@ -220,8 +219,13 @@ export async function runCall(
   const { link } = await connect(opts)
   try {
     if (tool !== 'devtools_status') {
+      // Bridge-global wait (sessionId: null) so a stale --session fails fast on the real call instead of stalling here.
       const ready = await link
-        .invoke(devtoolsWaitContract, { condition: 'connected', timeoutMs: opts.waitMs ?? 15_000 })
+        .invoke(
+          devtoolsWaitContract,
+          { condition: 'connected', timeoutMs: opts.waitMs ?? 15_000 },
+          null,
+        )
         .catch(() => null)
       if (!ready?.ok) {
         err('no app connected — start your dev server (with the genie() plugin) and open the app')
@@ -243,9 +247,15 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
   const { link, url } = await connect(opts)
   try {
     const status = await link.invoke(devtoolsStatusContract, {})
+    // A 0.1.0 bridge predates the `sessions` field; the typed contract can't see that skew.
+    const sessions = Array.isArray(status.sessions) ? status.sessions : []
     // Preamble on stderr so stdout stays pure (parseable) — important for `--json` and piping.
     err(`bridge: ${url}`)
     err(`run from any dir: genie --url ${url} call react_get_renders '{"sort":"unnecessary"}'`)
+    if (sessions.length > 1)
+      err(
+        `${sessions.length} sessions connected — calls hit the most recent; target one with --session <id>`,
+      )
     err('')
     out(renderResult('devtools_status', status, opts.json))
     return 0
@@ -265,6 +275,10 @@ export async function runTools(opts: AgentOptions = {}): Promise<number> {
       err('no tools advertised — start your dev server and open the app in a browser')
       return 1
     }
+    if (opts.session)
+      err(
+        'note: the catalog shown is the current session’s; sessions of the same app advertise the same tools',
+      )
     out(formatToolsListing(status))
     return 0
   } catch (error) {
@@ -277,11 +291,7 @@ export async function runTools(opts: AgentOptions = {}): Promise<number> {
 
 type ToolDescriptor = BridgeStatusMessage['tools'][number]
 
-/**
- * Renders the advertised catalog grouped by domain, with each tool's parameters derived from the
- * input JSON schema the app already advertises — so an agent can call a tool correctly instead of
- * guessing argument names and hitting a validation error. A `?` suffix marks an optional parameter.
- */
+/** Renders the catalog grouped by domain, params derived from each tool's advertised input schema (`?` marks optional). */
 export function formatToolsListing(status: BridgeStatusMessage): string {
   const lines: string[] = [`${status.tools.length} tools from ${status.app?.name ?? 'the app'}:`]
   const groups = new Map<string, ToolDescriptor[]>()

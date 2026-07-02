@@ -40,12 +40,7 @@ const OK = '✓'
 const FAIL = '✗'
 const WARN = '!'
 
-/**
- * The shape of the host project, which decides where (and whether) `<Genie />` is wired and which
- * packages are required. A plain React + Vite app needs only the Vite plugin — it injects the
- * in-browser client through `index.html`, so no component or `@genie-react/react` install is needed.
- * TanStack Router/Start apps render `<Genie />` in the root route to attach the Router/Query surface.
- */
+/** Host shape, which decides wiring: plain Vite needs only the plugin (`index.html` injection); Router/Start render `<Genie />`. */
 export type Framework = 'react-vite' | 'tanstack-router' | 'tanstack-start' | 'unknown'
 
 export interface InitOptions {
@@ -119,9 +114,7 @@ export function runInit(options: InitOptions = {}): InitResult {
   const viteWired = viteConfig.action === 'already' || viteConfig.action === 'edit'
   const componentWired =
     rootRoute.action === 'already' || rootRoute.action === 'edit' || rootRoute.action === 'skip'
-  // Only TanStack Start depends on the component: with no index.html, `<Genie />` is the sole thing
-  // that starts the client. Other shapes get the client from the plugin's index.html injection, so a
-  // failed component insert is a warning, not a failure.
+  // Start has no index.html, so there `<Genie />` alone starts the client; elsewhere a failed insert is only a warning.
   const ok = framework === 'tanstack-start' ? viteWired && componentWired : viteWired
   return { ok, dryRun, framework, viteConfig, rootRoute }
 }
@@ -181,13 +174,7 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
   return { ok, framework, checks, bridge }
 }
 
-/**
- * Classifies the host project from its dependencies, most-specific first: `@tanstack/react-start`
- * means Start; otherwise `@tanstack/react-router` means a TanStack Router SPA (regardless of where
- * its routes live, so a custom routesDirectory still wires/warns correctly); otherwise a bare
- * `index.html` means a plain React + Vite SPA. The router dep is checked before `index.html` because
- * a Router SPA also ships an `index.html`, so the file alone cannot distinguish the two.
- */
+/** Classifies by deps, most-specific first; the router dep outranks `index.html` because Router SPAs ship one too. */
 export function detectFramework(cwd: string): Framework {
   const deps = readPackageDeps(cwd)
   if (deps.has('@tanstack/react-start')) return 'tanstack-start'
@@ -343,8 +330,7 @@ function editRootRoute(code: string, framework: Framework): ViteEditResult {
 
   let next = code
   if (!rendersGenie) {
-    // TanStack Router SPAs have no document shell; their root component renders <Outlet />. Start (and
-    // any other root with a document body) gets the snippet before </body>.
+    // Router SPAs have no document shell (root renders <Outlet />); roots with a <body> get the snippet before </body>.
     const inserted =
       framework === 'tanstack-router' ? insertGenieAfterOutlet(next) : insertGenieBeforeBody(next)
     if (inserted.kind === 'manual') return inserted

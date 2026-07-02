@@ -1,16 +1,13 @@
 import { z } from 'zod'
 import { defineAgentToolContract } from './contract'
-import { appInfoSchema } from './protocol'
+import { appInfoSchema, sessionSummarySchema } from './protocol'
 
-/**
- * Meta tools are answered by the bridge itself (not forwarded to the app), so they work even
- * before an app connects — which is exactly what `devtools_wait` needs.
- */
+/** Meta tools are answered by the bridge itself (not the app), so they work before an app connects — as `devtools_wait` needs. */
 export const devtoolsStatusContract = defineAgentToolContract({
   name: 'devtools_status',
   title: 'DevTools status',
   description:
-    'Check whether a Genie-instrumented React + TanStack app is connected, and report its session, React/TanStack versions, available data domains, and tool count.',
+    'Check whether a Genie-instrumented React + TanStack app is connected, and report its session, React/TanStack versions, available data domains, and tool count. `sessions` lists every connected tab; tool calls hit the `current` one unless a session is targeted explicitly (CLI: --session <id>).',
   group: 'meta',
   input: z.object({}),
   output: z.object({
@@ -19,6 +16,7 @@ export const devtoolsStatusContract = defineAgentToolContract({
     app: appInfoSchema.nullable(),
     domains: z.array(z.string()),
     toolCount: z.number(),
+    sessions: z.array(sessionSummarySchema),
   }),
   annotations: { readOnlyHint: true },
 })

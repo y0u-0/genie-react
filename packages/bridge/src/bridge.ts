@@ -16,6 +16,7 @@ import {
   metaTools,
   newId,
   ROLE_QUERY_PARAM,
+  type SessionSummary,
   type ToolDescriptor,
   type WaitCondition,
 } from '@genie-react/core'
@@ -36,6 +37,7 @@ interface BridgeStatus {
   app: AppInfo | null
   domains: string[]
   tools: ToolDescriptor[]
+  sessions: SessionSummary[]
 }
 
 interface AppSession {
@@ -44,6 +46,7 @@ interface AppSession {
   app: AppInfo
   capabilities: string[]
   tools: ToolDescriptor[]
+  connectedAt: number
 }
 
 interface Connection {
@@ -60,35 +63,29 @@ interface AppResponse {
 interface PendingRequest {
   settle: (response: AppResponse) => void
   timer: ReturnType<typeof setTimeout>
+  sessionId: string
 }
 
 const POLL_INTERVAL_MS = 150
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-/**
- * The hub. Owns a `noServer` WebSocket server so it can be mounted on an existing HTTP server
- * (Vite's dev server) via {@link handleUpgrade}, or run standalone. Routes agent tool calls to the
- * connected app and relays responses back, and answers the meta tools (`devtools_status`,
- * `devtools_wait`) itself — including resolving wait conditions by polling the app's own tools.
- */
+/** The hub: a `noServer` WSS mountable on Vite's HTTP server; calls route to the newest app session unless `agent/invoke.sessionId` targets one, and it answers the `devtools_status`/`devtools_wait` meta tools itself. */
 export class GenieBridge {
   private readonly wss = new WebSocketServer({ noServer: true })
   private readonly agents = new Set<WebSocket>()
   private readonly pending = new Map<string, PendingRequest>()
-  private readonly connectionWaiters = new Set<(connected: boolean) => void>()
+  private readonly connectionWaiters = new Set<() => void>()
   private readonly requestTimeoutMs: number
   private readonly log: BridgeLogger
-  private app: AppSession | null = null
+  private readonly apps = new Map<string, AppSession>()
+  private currentSessionId: string | null = null
 
   constructor(options: GenieBridgeOptions = {}) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     this.log = options.logger ?? (() => {})
   }
 
-  /**
-   * Routes an HTTP upgrade to the hub when it targets {@link GENIE_WS_PATH}. Returns `false`
-   * for any other path so the caller can let another listener (e.g. Vite HMR) handle it.
-   */
+  /** Returns `false` for non-{@link GENIE_WS_PATH} upgrades so another listener (e.g. Vite HMR) can handle them. */
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean {
     const { pathname, role } = parseUpgradeUrl(request.url)
     if (pathname !== GENIE_WS_PATH) return false
@@ -97,12 +94,14 @@ export class GenieBridge {
   }
 
   getStatus(): BridgeStatus {
+    const current = this.currentSession()
     return {
-      connected: this.app !== null,
-      sessionId: this.app?.sessionId ?? null,
-      app: this.app?.app ?? null,
-      domains: this.app?.capabilities ?? [],
-      tools: this.app?.tools ?? [],
+      connected: this.apps.size > 0,
+      sessionId: current?.sessionId ?? null,
+      app: current?.app ?? null,
+      domains: current?.capabilities ?? [],
+      tools: current?.tools ?? [],
+      sessions: this.sessionSummaries(),
     }
   }
 
@@ -110,8 +109,29 @@ export class GenieBridge {
     for (const { timer } of this.pending.values()) clearTimeout(timer)
     this.pending.clear()
     for (const socket of this.agents) socket.close()
-    this.app?.socket.close()
+    for (const session of this.apps.values()) session.socket.close()
     this.wss.close()
+  }
+
+  private currentSession(): AppSession | null {
+    return this.currentSessionId ? (this.apps.get(this.currentSessionId) ?? null) : null
+  }
+
+  private sessionSummaries(): SessionSummary[] {
+    return [...this.apps.values()]
+      .sort((a, b) => b.connectedAt - a.connectedAt)
+      .map((session) => ({
+        sessionId: session.sessionId,
+        app: session.app,
+        domains: session.capabilities,
+        toolCount: session.tools.length + metaTools.length,
+        connectedAt: session.connectedAt,
+        current: session.sessionId === this.currentSessionId,
+      }))
+  }
+
+  private hasSession(sessionId?: string): boolean {
+    return sessionId ? this.apps.has(sessionId) : this.apps.size > 0
   }
 
   private onConnection(socket: WebSocket, role: ConnectionRole | null): void {
@@ -155,16 +175,30 @@ export class GenieBridge {
   private handleAppMessage(socket: WebSocket, message: AppMessage): void {
     switch (message.kind) {
       case 'app/hello': {
-        this.app = {
+        const existing = this.apps.get(message.sessionId)
+        if (existing && existing.socket !== socket) {
+          // Requests in flight on the replaced socket will never get a response.
+          this.failPendingForSession(
+            message.sessionId,
+            'app reconnected — the previous connection was replaced; retry the call',
+          )
+          existing.socket.close()
+        }
+        this.apps.set(message.sessionId, {
           socket,
           sessionId: message.sessionId,
           app: message.app,
           capabilities: message.capabilities,
           tools: message.tools,
-        }
-        this.log('info', `app connected: ${message.app.name ?? message.sessionId}`)
-        for (const resolve of this.connectionWaiters) resolve(true)
-        this.connectionWaiters.clear()
+          // Refreshed on every hello so "current" is always first in the recency-sorted list.
+          connectedAt: Date.now(),
+        })
+        this.currentSessionId = message.sessionId
+        this.log(
+          'info',
+          `app connected: ${message.app.name ?? message.sessionId} (${this.apps.size} session${this.apps.size === 1 ? '' : 's'})`,
+        )
+        for (const notify of [...this.connectionWaiters]) notify()
         this.broadcastStatus()
         return
       }
@@ -187,7 +221,7 @@ export class GenieBridge {
         this.send(socket, { kind: 'bridge/pong', id: message.id })
         return
       case 'agent/invoke':
-        void this.handleInvoke(socket, message.id, message.tool, message.args)
+        void this.handleInvoke(socket, message.id, message.tool, message.args, message.sessionId)
         return
     }
   }
@@ -197,28 +231,39 @@ export class GenieBridge {
     id: string,
     tool: string,
     args: unknown,
+    sessionId?: string,
   ): Promise<void> {
     if (tool === devtoolsStatusContract.name) {
-      const status = this.getStatus()
+      const target = sessionId ? this.apps.get(sessionId) : this.currentSession()
+      if (sessionId && !target) {
+        this.result(agent, id, false, undefined, this.unknownSessionError(sessionId))
+        return
+      }
       this.result(agent, id, true, {
-        connected: status.connected,
-        sessionId: status.sessionId,
-        app: status.app,
-        domains: status.domains,
-        toolCount: status.tools.length + metaTools.length,
+        connected: this.apps.size > 0,
+        sessionId: target?.sessionId ?? null,
+        app: target?.app ?? null,
+        domains: target?.capabilities ?? [],
+        toolCount: (target?.tools.length ?? 0) + metaTools.length,
+        sessions: this.sessionSummaries(),
       })
       return
     }
 
     if (tool === devtoolsWaitContract.name) {
-      await this.handleWait(agent, id, args)
+      await this.handleWait(agent, id, args, sessionId)
       return
     }
 
-    this.forwardToApp(agent, id, tool, args)
+    this.forwardToApp(agent, id, tool, args, sessionId)
   }
 
-  private async handleWait(agent: WebSocket, id: string, args: unknown): Promise<void> {
+  private async handleWait(
+    agent: WebSocket,
+    id: string,
+    args: unknown,
+    sessionId?: string,
+  ): Promise<void> {
     const parsed = devtoolsWaitContract.input.safeParse(args ?? {})
     if (!parsed.success) {
       this.result(agent, id, false, undefined, 'invalid devtools_wait arguments')
@@ -230,46 +275,51 @@ export class GenieBridge {
       this.result(agent, id, true, { ok, waitedMs: Date.now() - started, reason })
 
     if (input.condition === 'connected') {
-      const connected = this.app !== null ? true : await this.waitForConnection(input.timeoutMs)
+      const connected = await this.waitForConnection(input.timeoutMs, sessionId)
       finish(connected, connected ? undefined : 'timeout')
       return
     }
 
-    if (!this.app && !(await this.waitForConnection(input.timeoutMs))) {
+    if (
+      !this.hasSession(sessionId) &&
+      !(await this.waitForConnection(input.timeoutMs, sessionId))
+    ) {
       finish(false, 'no app connected')
       return
     }
 
-    const ok = await this.pollCondition(input, input.timeoutMs - (Date.now() - started))
+    const ok = await this.pollCondition(input, input.timeoutMs - (Date.now() - started), sessionId)
     finish(ok, ok ? undefined : 'timeout')
   }
 
   private async pollCondition(
     input: { condition: WaitCondition; name?: string },
     remainingMs: number,
+    sessionId?: string,
   ): Promise<boolean> {
     const deadline = Date.now() + Math.max(0, remainingMs)
     while (Date.now() < deadline) {
-      if (await this.checkCondition(input)) return true
+      if (await this.checkCondition(input, sessionId)) return true
       await delay(POLL_INTERVAL_MS)
     }
     return false
   }
 
-  private async checkCondition(input: {
-    condition: WaitCondition
-    name?: string
-  }): Promise<boolean> {
+  private async checkCondition(
+    input: { condition: WaitCondition; name?: string },
+    sessionId?: string,
+  ): Promise<boolean> {
     if (input.condition === 'component') {
-      const res = await this.appRequest('react_find_components', {
-        query: input.name ?? '',
-        limit: 1,
-      })
+      const res = await this.appRequest(
+        'react_find_components',
+        { query: input.name ?? '', limit: 1 },
+        sessionId,
+      )
       const matches = matchesOf(res.result)
       return res.ok && matches !== undefined && matches.length > 0
     }
     if (input.condition === 'query-settled') {
-      const res = await this.appRequest('query_list', {})
+      const res = await this.appRequest('query_list', {}, sessionId)
       const queries = parseQueryList(res.result)
       if (!res.ok || !queries || queries.length === 0) return false
       const name = input.name
@@ -279,7 +329,7 @@ export class GenieBridge {
       return relevant.length > 0 && relevant.every((query) => query.fetchStatus === 'idle')
     }
     if (input.condition === 'navigation') {
-      const res = await this.appRequest('router_get_state', {})
+      const res = await this.appRequest('router_get_state', {}, sessionId)
       const state = routerStateOf(res.result)
       if (!res.ok || !state) return false
       return input.name ? state.pathname === input.name && !state.isLoading : !state.isLoading
@@ -287,14 +337,24 @@ export class GenieBridge {
     return false
   }
 
-  private forwardToApp(agent: WebSocket, id: string, tool: string, args: unknown): void {
-    this.sendAppRequest(id, tool, args, ({ ok, result, error }) =>
-      this.result(agent, id, ok, result, error),
+  private forwardToApp(
+    agent: WebSocket,
+    id: string,
+    tool: string,
+    args: unknown,
+    sessionId?: string,
+  ): void {
+    this.sendAppRequest(
+      id,
+      tool,
+      args,
+      ({ ok, result, error }) => this.result(agent, id, ok, result, error),
+      sessionId,
     )
   }
 
-  private appRequest(tool: string, args: unknown): Promise<AppResponse> {
-    return new Promise((resolve) => this.sendAppRequest(newId(), tool, args, resolve))
+  private appRequest(tool: string, args: unknown, sessionId?: string): Promise<AppResponse> {
+    return new Promise((resolve) => this.sendAppRequest(newId(), tool, args, resolve, sessionId))
   }
 
   private sendAppRequest(
@@ -302,11 +362,15 @@ export class GenieBridge {
     tool: string,
     args: unknown,
     settle: (response: AppResponse) => void,
+    sessionId?: string,
   ): void {
-    if (!this.app) {
+    const session = sessionId ? this.apps.get(sessionId) : this.currentSession()
+    if (!session) {
       settle({
         ok: false,
-        error: 'No app connected. Run your dev server with the Genie Vite plugin.',
+        error: sessionId
+          ? this.unknownSessionError(sessionId)
+          : 'No app connected. Run your dev server with the Genie Vite plugin.',
       })
       return
     }
@@ -314,11 +378,12 @@ export class GenieBridge {
       this.pending.delete(id)
       settle({ ok: false, error: `Tool "${tool}" timed out after ${this.requestTimeoutMs}ms` })
     }, this.requestTimeoutMs)
-    this.pending.set(id, { settle, timer })
-    this.send(this.app.socket, { kind: 'bridge/request', id, tool, args })
+    this.pending.set(id, { settle, timer, sessionId: session.sessionId })
+    this.send(session.socket, { kind: 'bridge/request', id, tool, args })
   }
 
-  private waitForConnection(timeoutMs: number): Promise<boolean> {
+  private waitForConnection(timeoutMs: number, sessionId?: string): Promise<boolean> {
+    if (this.hasSession(sessionId)) return Promise.resolve(true)
     return new Promise((resolve) => {
       let settled = false
       const finish = (connected: boolean) => {
@@ -328,21 +393,37 @@ export class GenieBridge {
         clearTimeout(timer)
         resolve(connected)
       }
-      const waiter = (connected: boolean) => finish(connected)
+      const waiter = () => {
+        if (this.hasSession(sessionId)) finish(true)
+      }
       const timer = setTimeout(() => finish(false), timeoutMs)
       this.connectionWaiters.add(waiter)
     })
   }
 
+  private unknownSessionError(sessionId: string): string {
+    return `Unknown session "${sessionId}". Connected sessions: ${[...this.apps.keys()].join(', ') || 'none'} — run devtools_status to list them.`
+  }
+
+  private failPendingForSession(sessionId: string, error: string): void {
+    for (const [id, pending] of this.pending) {
+      if (pending.sessionId !== sessionId) continue
+      clearTimeout(pending.timer)
+      pending.settle({ ok: false, error })
+      this.pending.delete(id)
+    }
+  }
+
   private onClose(connection: Connection): void {
-    if (this.app && connection.socket === this.app.socket) {
-      this.app = null
-      this.log('info', 'app disconnected')
-      for (const [, pending] of this.pending) {
-        clearTimeout(pending.timer)
-        pending.settle({ ok: false, error: 'app disconnected' })
+    const session = [...this.apps.values()].find((s) => s.socket === connection.socket)
+    if (session) {
+      this.apps.delete(session.sessionId)
+      this.log('info', `app disconnected: ${session.app.name ?? session.sessionId}`)
+      this.failPendingForSession(session.sessionId, 'app disconnected')
+      if (this.currentSessionId === session.sessionId) {
+        const next = [...this.apps.values()].sort((a, b) => b.connectedAt - a.connectedAt)[0]
+        this.currentSessionId = next?.sessionId ?? null
       }
-      this.pending.clear()
       this.broadcastStatus()
       return
     }

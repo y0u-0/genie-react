@@ -1,14 +1,12 @@
 import { defineAgentToolContract } from '@genie-react/core'
 import { z } from 'zod'
 
-/**
- * A React fiber's stable identity (from bippy's `getFiberId`), branded so it can't be confused with
- * the many other numbers this collector traffics in — render counts, depths, hook indices. Erases to
- * a plain `number` at runtime, so it still serializes over the wire and indexes maps unchanged. The
- * brand is minted by the schema itself, so a tool `id` input is already a `NodeId` once parsed.
- */
+/** A fiber's stable id (bippy `getFiberId`), branded against the collector's other numbers; erases to a plain number at runtime, so it serializes unchanged. */
 const nodeIdSchema = z.number().int().brand<'ReactNodeId'>()
 export type NodeId = z.infer<typeof nodeIdSchema>
+
+/** Cap on the memoizedState hook walk, shared by the inspector, the hook-state override, and its contract. */
+export const MAX_HOOKS = 100
 
 const sourceSchema = z
   .object({
@@ -183,6 +181,89 @@ export const reactOverridePropsContract = defineAgentToolContract({
   }),
   output: z.object({ ok: z.boolean() }),
   annotations: { destructiveHint: true, idempotentHint: false },
+})
+
+export const reactOverrideHookStateContract = defineAgentToolContract({
+  name: 'react_override_hook_state',
+  title: 'Override hook state (dev)',
+  description:
+    'Set a hook\'s state by index and re-render — drive a function component into any state (a wizard step, an open modal, an invalid form) without a multi-step UI script. hookIndex is the index react_inspect_component reports; only stateful hooks (useState/useReducer) can be overridden. `path` targets a nested field of the state value (e.g. ["filters","page"]); omit it to replace the whole value. The component\'s own next setState takes back control.',
+  group: 'action',
+  input: z.object({
+    id: nodeIdSchema,
+    hookIndex: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_HOOKS - 1)
+      .describe('Hook index as shown by react_inspect_component.'),
+    path: z
+      .array(z.union([z.string(), z.number()]))
+      .default([])
+      .describe('Path into the hook value; empty replaces the whole value.'),
+    value: z.unknown(),
+  }),
+  output: z.object({ ok: z.boolean(), name: z.string(), hookIndex: z.number() }),
+  annotations: { destructiveHint: true, idempotentHint: false },
+})
+
+export const reactOverrideContextContract = defineAgentToolContract({
+  name: 'react_override_context',
+  title: 'Override a context value (dev)',
+  description:
+    "Override a React Context for a whole subtree by editing the nearest Provider's `value` above a component — test a different theme/locale/flag without touching code. Pass the id of a component that consumes the context (react_inspect_context lists them; `context` picks one by name when it consumes several) or a Provider id directly. A plain-object `value` shallow-merges into the current value; any other value replaces it. Reverts when the Provider's parent re-renders — same lifetime as react_override_props. A context running on its default value (no Provider mounted) cannot be overridden.",
+  group: 'action',
+  input: z.object({
+    id: nodeIdSchema,
+    context: z
+      .string()
+      .optional()
+      .describe(
+        'Context displayName, from react_inspect_context — required when several are consumed.',
+      ),
+    value: z.unknown(),
+  }),
+  output: z.object({ ok: z.boolean(), providerId: z.number(), contextName: z.string() }),
+  annotations: { destructiveHint: true, idempotentHint: false },
+})
+
+export const reactToggleSuspenseFallbackContract = defineAgentToolContract({
+  name: 'react_toggle_suspense_fallback',
+  title: 'Force a Suspense fallback (dev)',
+  description:
+    'Hold the nearest Suspense boundary at/above a component in its fallback (loading) state, or release it — a state normally visible for milliseconds becomes one you can inspect and screenshot to verify loading UI. Pass any component id inside the boundary, or a boundaryId from react_error_state. Persists until released with showFallback:false or a page reload.',
+  group: 'action',
+  input: z.object({
+    id: nodeIdSchema,
+    showFallback: z.boolean().default(true),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    boundaryId: z.number(),
+    showingFallback: z.boolean(),
+    activeOverrides: z.number().describe('Suspense boundaries currently held in fallback.'),
+  }),
+  annotations: { destructiveHint: true, idempotentHint: true },
+})
+
+export const reactForceErrorBoundaryContract = defineAgentToolContract({
+  name: 'react_force_error_boundary',
+  title: 'Force an error boundary (dev)',
+  description:
+    'Make the nearest error boundary at/above a component catch a simulated error, or release it — verify error UI renders and that the intended boundary contains the failure, without manufacturing a real crash. Pass any component id inside the boundary. Release with the returned boundaryId and forceError:false — the original child id unmounts while the boundary is erroring; children then remount fresh.',
+  group: 'action',
+  input: z.object({
+    id: nodeIdSchema,
+    forceError: z.boolean().default(true),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    boundaryId: z.number(),
+    boundaryName: z.string(),
+    erroring: z.boolean(),
+    activeOverrides: z.number().describe('Error boundaries currently forced to error.'),
+  }),
+  annotations: { destructiveHint: true, idempotentHint: true },
 })
 
 const renderComponentSchema = z.object({

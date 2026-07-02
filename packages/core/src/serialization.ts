@@ -7,10 +7,7 @@ import {
 } from './constants'
 import { errorMessage } from './errors'
 
-/**
- * Wire codec. superjson preserves `Date`, `Map`, `Set`, `BigInt`, `undefined`, etc.,
- * which the bridge frames and dehydrated payloads both rely on.
- */
+/** Wire codec is superjson: bridge frames and dehydrated payloads rely on `Date`/`Map`/`Set`/`BigInt`/`undefined` surviving. */
 export function encodeFrame(value: unknown): string {
   return superjson.stringify(value)
 }
@@ -21,9 +18,7 @@ export function decodeFrame(raw: string): unknown {
 
 export const DEHYDRATED = '__genie_dehydrated__' as const
 
-// Prototype-chain keys are pollution vectors that the wire codec (superjson) refuses to reconstruct,
-// and that inspectors conventionally hide. Mirroring React DevTools, `dehydrate` omits them from
-// object output; they carry no inspection value and their presence would discard the whole payload.
+// Pollution-vector keys superjson refuses to reconstruct — including one would discard the whole payload.
 const RESERVED_OBJECT_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
 
 export type DehydratedKind =
@@ -41,11 +36,7 @@ export type DehydratedKind =
   | 'not-found'
   | 'truncated'
 
-/**
- * Placeholder emitted when a value is too deep, too large, circular, or otherwise
- * unsafe to serialize in full. `path` is absolute from the inspected root, so an agent
- * can re-request that subtree with `dehydrate(value, { path })`.
- */
+/** Placeholder for values too deep/large/circular to serialize; `path` is absolute from the root so the subtree can be re-requested. */
 export interface DehydratedNode {
   readonly [DEHYDRATED]: true
   kind: DehydratedKind
@@ -159,11 +150,7 @@ function dehydratedNode(
   return { [DEHYDRATED]: true, kind, preview, path, ...(size === undefined ? {} : { size }) }
 }
 
-/**
- * Bounds an arbitrary runtime value into a depth- and size-capped structure safe to
- * send over the wire and cheap on an agent's token budget. Mirrors React DevTools'
- * dehydration: shallow values survive, deep ones become {@link DehydratedNode} placeholders.
- */
+/** Depth- and size-caps a runtime value for the wire (and token budgets), mirroring React DevTools' dehydration. */
 export function dehydrate(input: unknown, options: DehydrateOptions = {}): unknown {
   const depth = options.depth ?? DEFAULT_INSPECT_DEPTH
   const maxStringLength = options.maxStringLength ?? DEFAULT_MAX_STRING_LENGTH
@@ -197,8 +184,7 @@ export function dehydrate(input: unknown, options: DehydrateOptions = {}): unkno
     const obj = value
     if (seen.has(obj)) return dehydratedNode('circular', '[Circular]', path)
     if (value instanceof Date) return value
-    // RegExp has no toJSON, so a raw value collapses to "{}" in the JSON output path; emit its
-    // source form to stay consistent with bigint/previewValue handling.
+    // RegExp has no toJSON (a raw value collapses to "{}"), so emit its source form like bigint/previewValue.
     if (value instanceof RegExp) return value.toString()
     if (typeof Promise !== 'undefined' && value instanceof Promise)
       return dehydratedNode('promise', 'Promise', path)

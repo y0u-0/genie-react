@@ -2,11 +2,7 @@ import { existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/**
- * Symlinks the Genie packages from a local checkout into the current app's node_modules — the
- * unpublished "local link" install path. After this, `@genie-react/*` resolve like normal deps and
- * `genie init` / a plain `genie()` plugin work without publishing to a registry.
- */
+// The unpublished "local link" install path: symlinks a checkout into node_modules so `@genie-react/*` resolve normally.
 
 const LINKABLE = [
   'core',

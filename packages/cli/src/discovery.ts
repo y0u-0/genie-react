@@ -8,12 +8,7 @@ export interface BridgeDiscovery {
   pid?: number
 }
 
-/**
- * The single reader of a `.genie/bridge.json` payload. Parses the raw file text to `unknown` and
- * accepts it only when it is an object carrying a string `url`, so both callers — this module's
- * upward walk and the doctor command in `index.ts` — trust the exact same shape instead of each
- * re-narrowing the JSON divergently.
- */
+/** The single reader of a `.genie/bridge.json` payload, so the upward walk and `doctor` narrow the JSON identically. */
 export function parseBridgeDiscovery(raw: string): BridgeDiscovery | null {
   let parsed: unknown
   try {
@@ -28,11 +23,7 @@ export function parseBridgeDiscovery(raw: string): BridgeDiscovery | null {
   }
 }
 
-/**
- * Resolves the bridge WebSocket URL. Priority: `GENIE_BRIDGE_URL` env → discovery file written by
- * the Vite plugin → `ws://localhost:<GENIE_BRIDGE_PORT|5173><GENIE_WS_PATH>` default. `localhost`
- * (not a fixed IP) so it connects whether Vite bound IPv4 or IPv6 loopback.
- */
+/** Priority: `GENIE_BRIDGE_URL` env → discovery file → localhost default (hostname, so IPv4 or IPv6 loopback both work). */
 export async function resolveBridgeUrl(cwd: string = process.cwd()): Promise<string> {
   const fromEnv = process.env.GENIE_BRIDGE_URL
   if (fromEnv) return fromEnv
@@ -44,10 +35,7 @@ export async function resolveBridgeUrl(cwd: string = process.cwd()): Promise<str
   return `ws://localhost:${port}${GENIE_WS_PATH}`
 }
 
-/**
- * Walks up from `startDir` to the filesystem root looking for the discovery file, so `genie call`
- * works from a nested directory or a monorepo root, not only the exact dir the dev server runs in.
- */
+// Walks up to the filesystem root, so `genie call` works from nested dirs and monorepo roots.
 async function readDiscoveryUpward(startDir: string): Promise<string | null> {
   const { root } = parse(startDir)
   let dir = startDir

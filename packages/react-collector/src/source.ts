@@ -33,13 +33,7 @@ export function clearSourceCache(): void {
   moduleMapCache.clear()
 }
 
-/**
- * Resolves a fiber to its definition site (file:line). On React 19 `_debugSource` is gone, so bippy
- * symbolicates `_debugStack` through the bundle's source map — hence this is async and network-bound
- * (the source map is fetched once per bundle, then cached). bippy skips Vite's inline maps, so the line
- * is then upgraded to the original via {@link toOriginalPosition} for parity with per-effect sources.
- * Only successes are cached, so a transient null (e.g. just after HMR) can recover on the next call.
- */
+/** Fiber → definition site via bippy's `_debugStack` symbolication (React 19 dropped `_debugSource`), so async and network-bound; only successes are cached, letting a transient null (e.g. right after HMR) recover. */
 export async function resolveSource(fiber: Fiber): Promise<ResolvedSource | null> {
   const id = getFiberId(fiber)
   const cached = cache.get(id)
@@ -71,11 +65,7 @@ export function isLibraryFile(file: string): boolean {
   return !isSourceFile(file)
 }
 
-/**
- * Classifies a fiber as app vs library by its resolved source. Host fibers and framework-only stacks
- * resolve to nothing, so it climbs to the nearest composite ancestor that does and inherits that.
- * Unresolved stays app (`isLibrary: false`) so a missing source never silently hides a component.
- */
+/** App vs library by resolved source, climbing to the nearest ancestor that resolves; unresolved stays app so a missing source never silently hides a component. */
 export async function classifyFiber(fiber: Fiber): Promise<FiberClassification> {
   let current: Fiber | null = fiber
   for (let hops = 0; current && hops < ANCESTOR_HOPS; hops++) {
@@ -95,14 +85,7 @@ export function sourceLabel(source: ResolvedSource | null): string | null {
 
 const EFFECT_HOOK_NAMES = new Set(['Effect', 'LayoutEffect', 'InsertionEffect'])
 
-/**
- * Walk the hook tree depth-first (hook-call order) and collect each effect node's call-site. An effect
- * node is identified by name — not by being a leaf: in a bundled (esbuild-optimized) dev build the
- * inspector nests the effect's own React/bippy frames beneath it, so the effect node has children. We
- * recurse only through non-effect containers (component frames, custom/library hooks) so an effect
- * created inside a library hook is still found, and stop at the effect node itself (its subHooks are
- * its internal implementation, not more user effects).
- */
+// Effect nodes are matched by name, not leaf-ness (bundled dev builds nest frames beneath them): recurse only through non-effect containers and stop at the effect itself — its subHooks are implementation, not more user effects.
 function collectEffectCallSites(nodes: HooksNode[], out: HookSource[]): void {
   for (const node of nodes) {
     if (EFFECT_HOOK_NAMES.has(node.name)) {
@@ -118,11 +101,7 @@ const INLINE_SOURCE_MAP_RE =
 
 const moduleMapCache = new Map<string, SourceMap | null>()
 
-/**
- * Loads a Vite-served module's inline (`data:`) source map. bippy's symbolicator only fetches *external*
- * map URLs, so in dev — where Vite inlines the map — its line numbers stay at the served (transformed)
- * position. Decoding the inline map ourselves recovers the original line.
- */
+// bippy's symbolicator only fetches external map URLs; Vite inlines the map in dev, so decode it ourselves to recover original (not served/transformed) lines.
 async function inlineSourceMap(url: string): Promise<SourceMap | null> {
   if (moduleMapCache.has(url)) return moduleMapCache.get(url) ?? null
   let map: SourceMap | null = null
@@ -142,11 +121,7 @@ async function inlineSourceMap(url: string): Promise<SourceMap | null> {
   return map
 }
 
-/**
- * Maps a served (transformed) line/column to the original via the module's inline source map — the
- * piece bippy's symbolicator skips. Returns the input unchanged when there is no inline map (e.g. a dep
- * served with an external map, or production), so callers keep a usable served-coordinate fallback.
- */
+// Maps a served line/column to the original via the module's inline map; returns the input unchanged when none exists, so callers keep a served-coordinate fallback.
 async function toOriginalPosition(
   servedUrl: string,
   line: number | null,
@@ -161,12 +136,7 @@ async function toOriginalPosition(
   return { line, column }
 }
 
-/**
- * Resolves one hook's call-site. The file and library classification come from the served URL (reliable:
- * `/node_modules/.vite/deps/*` is a dep, `/src/*` is yours) — never from the source map's own `sources`,
- * which can point a bundled dep at a non-node_modules path and misclassify it. Only the line/column are
- * mapped back to the original.
- */
+// File + library classification come from the served URL, never the map's own `sources` (which can point a bundled dep outside node_modules); only line/column are mapped back.
 async function resolveHookSource(hook: HookSource): Promise<ResolvedSource | null> {
   if (!hook.fileName) return null
   const file = normalizeFileName(hook.fileName)
@@ -179,19 +149,7 @@ async function resolveHookSource(hook: HookSource): Promise<ResolvedSource | nul
   return { file, line, column, functionName: hook.functionName ?? null }
 }
 
-/**
- * Resolves the call-site of each of a function component's user effects (useEffect / useLayoutEffect /
- * useInsertionEffect), in hook-call order. Where `resolveSource` resolves the component's *definition*
- * line (the same for every effect), this uses bippy's hook inspector — a shadow render that captures a
- * stack at each hook — so an effect created inside a library hook (i18next, cmdk) resolves to that
- * library's file, not the component.
- *
- * Returns `null` when inspection is unavailable (a non-function fiber, or a hook the inspector cannot
- * replay) — the caller cannot attribute and falls back. Returns `[]` when inspection *succeeded* but the
- * component calls no user effects at all: any effects in its commit list then come from internal hooks
- * (useSyncExternalStore, useActionState), which the caller can treat as library noise. A non-empty array
- * lines up 1:1 with the commit list only when its length matches (no interleaved internal effects).
- */
+/** Each user effect's own call-site, in hook order, via bippy's hook inspector (a shadow render). null = inspection unavailable, don't attribute; [] = inspected but no user effects, so commit-list entries are internal noise; a non-empty array aligns 1:1 with the commit list only when lengths match. */
 export async function resolveEffectSources(
   fiber: Fiber,
 ): Promise<(ResolvedSource | null)[] | null> {

@@ -104,8 +104,7 @@ export class GenieClient {
   private onOpen(): void {
     this.tools.clear()
     for (const collector of this.collectors) this.registerCollectorTools(collector)
-    // Hello (carrying the full tool + capability list) must precede collector start(), so the bridge
-    // does not drop the initial snapshots collectors push before the app session is registered.
+    // Hello must precede collector start() so the bridge doesn't drop snapshots pushed before the session registers.
     this.sendHello()
     for (const collector of this.collectors) this.runCollectorStart(collector)
   }
@@ -195,8 +194,7 @@ export class GenieClient {
   }
 
   private exposeGlobal(): void {
-    // Core types a published collector as `unknown` (it cannot know higher-layer shapes); foreign
-    // discoverers are trusted to hand real collectors, so this publish site is the one narrowing seam.
+    // Core publishes collectors as `unknown`; discoverers are trusted, so this is the one narrowing seam.
     globalThis.__GENIE_REACT_AGENT__ = {
       register: (collector) => this.registerCollector(collector as GenieCollector),
     }
@@ -207,11 +205,7 @@ export function createGenieClient(options: GenieClientOptions): GenieClient {
   return new GenieClient(options)
 }
 
-/**
- * Dev-only guard against handler↔contract drift: we already validate tool *input* on the way in, so
- * this closes the other side of the boundary. Non-throwing (a `safeParse` warning, not a hard error)
- * so a schema lag never breaks a running app; skipped entirely in production builds.
- */
+// Dev-only output-side twin of the input validation; warns instead of throwing so schema lag never breaks a running app.
 function warnOnOutputDrift(contract: AgentToolContract, result: unknown): void {
   if (!isDevBuild()) return
   const check = contract.output.safeParse(result)
@@ -227,10 +221,7 @@ function isDevBuild(): boolean {
   return readNodeEnv()?.NODE_ENV !== 'production'
 }
 
-/**
- * This package runs in both browser and Node, where `process` is an optional ambient global. The one
- * cast to its shape is isolated here so call sites read a typed `env` without asserting at each use.
- */
+// Runs in both browser and Node; the one cast for the optional ambient `process` global is isolated here.
 function readNodeEnv(): Record<string, string | undefined> | undefined {
   return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
 }

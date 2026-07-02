@@ -3,9 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { clearEffects, getEffectAudit, recordEffect } from './effect-tracker'
 import { clearSourceCache } from './source'
 
-// Source resolution is async + source-map-bound; the fake fibers here have no _debugStack, so stub it
-// to "no source" — every component then classifies as app (isLibrary:false) and survives appOnly.
-// getFiberHooks / symbolicateStack are vi.fn() so per-test trees drive the per-effect attribution.
+// Fake fibers have no _debugStack: stub source lookup to null so everything classifies as app and survives appOnly; per-test getFiberHooks trees drive per-effect attribution.
 const inspector = vi.hoisted(() => ({
   getFiberHooks: vi.fn<(fiber: unknown) => unknown[]>(() => []),
   symbolicateStack: vi.fn<(frames: unknown[]) => Promise<unknown[]>>(async (frames) => frames),
@@ -67,10 +65,7 @@ function effectList(specs: EffectSpec[]): Effect | null {
   return nodes[nodes.length - 1] ?? null
 }
 
-/**
- * A single component fiber whose identity (hence bippy fiber id) is stable across commits — the
- * effect list and alternate are mutated per commit, exactly as React reuses one fiber across renders.
- */
+// One fiber whose identity (hence bippy id) is stable across commits; the effect list and alternate are mutated per commit, as React reuses fibers.
 function makeComponent(name: string) {
   const type = (): null => null
   ;(type as { displayName?: string }).displayName = name
@@ -99,9 +94,7 @@ beforeAll(() => {
 beforeEach(() => {
   clearEffects()
   clearSourceCache()
-  // Default: the inspector cannot replay these synthetic fibers → resolveEffectSources returns null
-  // (unavailable) → source-agnostic tests see effects unattributed and unfiltered. Per-effect tests
-  // below override getFiberHooks with an explicit hook tree.
+  // Default: the inspector throws → resolveEffectSources returns null → effects stay unattributed and unfiltered; per-effect tests override getFiberHooks.
   inspector.getFiberHooks.mockReset().mockImplementation(() => {
     throw new Error('inspector unavailable in test')
   })
@@ -241,8 +234,7 @@ describe('recordEffect tracking lifecycle', () => {
 })
 
 describe('per-effect source attribution', () => {
-  // A component with one app effect and one effect created inside a library hook (nested as a
-  // subHook), plus an unrelated useState the inspector also reports — the realistic shape.
+  // One app effect, one effect created inside a library hook (nested subHook), plus an unrelated useState the inspector also reports — the realistic shape.
   const tree = () => [
     hookNode('State', '/src/tree-search.tsx', 30),
     hookNode('Effect', '/src/tree-search.tsx', 99),
@@ -282,8 +274,7 @@ describe('per-effect source attribution', () => {
   })
 
   it('omits per-effect source when the effect list carries effects the inspector cannot see', async () => {
-    // The inspector finds one user effect, but the commit list has two — the signature of an
-    // internal hook (useSyncExternalStore) pushing an effect. Mis-attribution must not happen.
+    // Inspector sees one user effect but the commit list has two (an internal hook like useSyncExternalStore pushed one) — must not mis-attribute.
     inspector.getFiberHooks.mockReturnValue([hookNode('Effect', '/src/a.tsx', 10)])
     const c = makeComponent('Mixed')
     c.commit('mount', [
@@ -312,9 +303,7 @@ describe('per-effect source attribution', () => {
   })
 
   it('marks every effect as library when no effect call-site is app code (data-only component)', async () => {
-    // The Dashboard pattern: the inspector finds effect call-sites but all are library (react-query's
-    // internal useEffects), and the commit list has more entries still (useSyncExternalStore pushes
-    // untracked effects). The component wrote no useEffect, so the whole list is library/internal noise.
+    // Every inspected call-site is library and the commit list has extra internal effects: the component wrote no useEffect, so the whole list is library noise.
     inspector.getFiberHooks.mockReturnValue([
       hookNode('Effect', '/node_modules/.vite/deps/react-query.js', 100),
       hookNode('Effect', '/node_modules/.vite/deps/react-query.js', 120),

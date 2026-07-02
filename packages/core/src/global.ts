@@ -1,11 +1,6 @@
 import { GENIE_GLOBAL_KEY } from './constants'
 
-/**
- * The object the in-browser client publishes on `globalThis[GENIE_GLOBAL_KEY]`. Third-party code
- * (the shell plugin, late-mounting React collectors) discovers the running client through this and
- * hands it collectors to register. A collector's concrete shape lives in higher layers that depend
- * on core, so it is `unknown` here — core stays the base of the dependency graph.
- */
+/** Registry the client publishes on `globalThis[GENIE_GLOBAL_KEY]`; collectors are `unknown` here so core stays the dependency base. */
 export interface GenieRegistry {
   register: (collector: unknown) => void
 }

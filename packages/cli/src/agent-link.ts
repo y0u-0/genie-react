@@ -12,16 +12,14 @@ import {
 import { WebSocket } from 'ws'
 
 export interface GenieAgentLinkOptions {
-  /**
-   * Bridge URL, or a resolver re-invoked on every (re)connect. A resolver lets the URL change over
-   * time — e.g. the dev server writes its discovery file after the CLI has already started —
-   * so the link self-heals instead of locking onto a stale default.
-   */
+  /** Bridge URL, or a resolver re-invoked on every (re)connect so the link self-heals when the URL changes. */
   url: string | (() => string | Promise<string>)
   logger?: (message: string) => void
   connectTimeoutMs?: number
   invokeTimeoutMs?: number
   reconnectDelayMs?: number
+  /** Target a specific app session when several tabs are connected (default: most recent). */
+  sessionId?: string
 }
 
 interface Pending {
@@ -30,17 +28,14 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>
 }
 
-/**
- * The agent-side WebSocket client to the bridge. Survives dev-server restarts via reconnection,
- * re-resolves the bridge URL each attempt, tracks the latest bridge status, and turns tool calls
- * into request/response round-trips.
- */
+/** Agent-side WebSocket client to the bridge; reconnects and re-resolves the URL each attempt to survive dev-server restarts. */
 export class GenieAgentLink {
   private readonly resolveUrl: () => string | Promise<string>
   private readonly log: (message: string) => void
   private readonly connectTimeoutMs: number
   private readonly invokeTimeoutMs: number
   private readonly reconnectDelayMs: number
+  private readonly sessionId: string | undefined
   private readonly pending = new Map<string, Pending>()
   private ws: WebSocket | null = null
   private status: BridgeStatusMessage | null = null
@@ -60,6 +55,7 @@ export class GenieAgentLink {
     this.connectTimeoutMs = options.connectTimeoutMs ?? 5_000
     this.invokeTimeoutMs = options.invokeTimeoutMs ?? 30_000
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1_000
+    this.sessionId = options.sessionId
   }
 
   start(): void {
@@ -71,15 +67,19 @@ export class GenieAgentLink {
     return this.status
   }
 
-  /**
-   * Pass a contract for a fully-typed round-trip — args are checked against its `z.input` and the
-   * result is its `z.output`. This is the `queryOptions`/`DataTag` move: the contract is a typed
-   * handle carrying the result type, so no cast is needed at the call site.
-   */
-  invoke<C extends AgentToolContract>(contract: C, args: ToolInput<C>): Promise<ToolOutput<C>>
+  /** Contract-typed round-trip (no cast); `sessionId` overrides the link target, and `null` forces a bridge-global call. */
+  invoke<C extends AgentToolContract>(
+    contract: C,
+    args: ToolInput<C>,
+    sessionId?: string | null,
+  ): Promise<ToolOutput<C>>
   /** Pass a bare tool name for dynamic dispatch of a tool discovered at runtime over the wire. */
-  invoke(tool: string, args: unknown): Promise<unknown>
-  async invoke(toolOrContract: string | AgentToolContract, args: unknown): Promise<unknown> {
+  invoke(tool: string, args: unknown, sessionId?: string | null): Promise<unknown>
+  async invoke(
+    toolOrContract: string | AgentToolContract,
+    args: unknown,
+    sessionId: string | null | undefined = this.sessionId,
+  ): Promise<unknown> {
     const tool = typeof toolOrContract === 'string' ? toolOrContract : toolOrContract.name
     const ws = await this.ensureConnection()
     const id = newId()
@@ -89,7 +89,9 @@ export class GenieAgentLink {
         reject(new Error(`Bridge did not respond to "${tool}" within ${this.invokeTimeoutMs}ms`))
       }, this.invokeTimeoutMs)
       this.pending.set(id, { resolve, reject, timer })
-      ws.send(encodeMessage({ kind: 'agent/invoke', id, tool, args }))
+      ws.send(
+        encodeMessage({ kind: 'agent/invoke', id, tool, args, sessionId: sessionId ?? undefined }),
+      )
     })
   }
 

@@ -1,13 +1,4 @@
-/**
- * A defensive tap over the TanStack DevTools client-side event bus.
- *
- * TanStack DevTools is alpha and its event-client class API (`EventClient.onAll`/`emit`)
- * is in flux, so we bind to the underlying wire protocol instead: every plugin's traffic
- * is re-broadcast on the `tanstack-devtools-global` channel of the shared event target, and
- * dispatching on `tanstack-dispatch-event` feeds an event back through the bus to all plugins.
- * Channel names mirror @tanstack/devtools-event-bus and @tanstack/devtools-event-client. Nothing
- * here throws: when no bus (or no DOM) is present every operation degrades to a no-op.
- */
+// TanStack DevTools' event-client API is alpha and in flux, so we tap its underlying bus channels instead; every operation degrades to a no-op when no bus (or DOM) is present.
 
 const GLOBAL_CHANNEL = 'tanstack-devtools-global'
 const DISPATCH_CHANNEL = 'tanstack-dispatch-event'
@@ -19,11 +10,7 @@ export interface DevtoolsBusEvent {
 }
 
 declare global {
-  /**
-   * Injected by @tanstack/devtools-event-bus: the shared event target that re-broadcasts every
-   * plugin's traffic on `tanstack-devtools-global` and feeds `tanstack-dispatch-event` back through
-   * the bus. Absent (`undefined`) when no DevTools bus — or no DOM — is present.
-   */
+  /** Injected by @tanstack/devtools-event-bus; `undefined` when no DevTools bus (or DOM) is present. */
   var __TANSTACK_EVENT_TARGET__: EventTarget | undefined
 }
 
@@ -53,8 +40,7 @@ export function subscribeToDevtoolsBus(onEvent: (event: DevtoolsBusEvent) => voi
 
   const handler = (event: Event) => {
     try {
-      // Read `detail` off any event carrying one (incl. cross-realm CustomEvents, where `instanceof`
-      // fails) via `in`-narrowing — no cast — then let isDevtoolsBusEvent vouch for the shape.
+      // `in`-narrowing reads `detail` even off cross-realm CustomEvents, where `instanceof` fails.
       const detail: unknown = 'detail' in event ? event.detail : undefined
       if (isDevtoolsBusEvent(detail)) onEvent(detail)
     } catch {}
@@ -85,8 +71,7 @@ function resolveRealBus(): EventTarget | null {
 }
 
 export function emitToDevtoolsBus(event: DevtoolsBusEvent): boolean {
-  // Dispatch only to a real TanStack DevTools bus; the boolean reflects whether a bus was present,
-  // not dispatchEvent's defaultPrevented status (which is true even when nothing is listening).
+  // The boolean means a real bus was present — not dispatchEvent's return, which is true even with no listeners.
   const target = resolveRealBus()
   if (!target || typeof CustomEvent === 'undefined') return false
   try {

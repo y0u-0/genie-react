@@ -9,10 +9,7 @@ export interface StandaloneBridgeHandle {
   close: () => Promise<void>
 }
 
-/**
- * Runs the hub on its own HTTP server. Used for tests and for any deployment where the bridge
- * is not embedded in Vite. Production usage is the embedded path (`@genie-react/vite`).
- */
+/** Runs the hub on its own HTTP server (tests, non-Vite deployments); production embeds it via `@genie-react/vite`. */
 export function createStandaloneBridge(options?: GenieBridgeOptions): StandaloneBridgeHandle {
   const bridge = new GenieBridge(options)
   const server = createServer((_req, res) => {
