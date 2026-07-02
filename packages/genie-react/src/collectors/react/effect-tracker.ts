@@ -39,6 +39,8 @@ interface EffectStat {
   fired: number
   hasCleanup: boolean
   lastChangedDep: number | null
+  /** Whether the last changed dep held a primitive — a value that legitimately changed, not an unstable reference. */
+  lastChangedDepIsPrimitive: boolean | null
 }
 
 interface EffectRecord {
@@ -95,6 +97,7 @@ export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
         fired: 0,
         hasCleanup: false,
         lastChangedDep: null,
+        lastChangedDepIsPrimitive: null,
       }
       record.stats[i] = stat
     } else {
@@ -111,6 +114,8 @@ export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
       if ((effect.tag & HOOK_HAS_EFFECT) !== 0) {
         stat.fired += 1
         stat.lastChangedDep = changedDepIndex(effect.deps, prev[i]?.deps ?? null)
+        stat.lastChangedDepIsPrimitive =
+          stat.lastChangedDep === null ? null : isPrimitive(effect.deps?.[stat.lastChangedDep])
       }
     }
   }
@@ -228,11 +233,12 @@ function noteFor(stat: EffectStat, firesEveryUpdate: boolean): string | undefine
     return `no dependency array — this ${hookName} runs after every render (ran on ${stat.fired}/${stat.updates} updates); add a deps array if it should not`
   }
   if (stat.depsMode === 'list' && firesEveryUpdate && stat.updates > 1) {
-    const where =
-      stat.lastChangedDep === null
-        ? 'a dependency changes'
-        : `dependency [${stat.lastChangedDep}] changes`
-    return `re-runs on every update (${stat.fired}/${stat.updates}) — ${where} reference each commit (likely unstable); stabilize it with useMemo/useCallback or drop it from deps`
+    const slot =
+      stat.lastChangedDep === null ? 'a dependency' : `dependency [${stat.lastChangedDep}]`
+    // A changed primitive is a real value change (maybe intended); only reference churn is fixable with memoization.
+    return stat.lastChangedDepIsPrimitive
+      ? `re-runs on every update (${stat.fired}/${stat.updates}) — ${slot} changes value each commit; intended for state that changes per interaction, a loop smell if this effect also sets that state`
+      : `re-runs on every update (${stat.fired}/${stat.updates}) — ${slot} changes reference each commit (likely unstable); stabilize it with useMemo/useCallback or drop it from deps`
   }
   return undefined
 }
@@ -269,6 +275,10 @@ function effectKind(tag: number): EffectKind | null {
 function depsModeOf(deps: unknown[] | null): DepsMode {
   if (deps == null) return 'none'
   return deps.length === 0 ? 'empty' : 'list'
+}
+
+function isPrimitive(value: unknown): boolean {
+  return (typeof value !== 'object' && typeof value !== 'function') || value === null
 }
 
 function changedDepIndex(next: unknown[] | null, prev: unknown[] | null): number | null {

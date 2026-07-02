@@ -131,6 +131,8 @@ describe('GenieBridge', () => {
     expect(statusAfter.result.connected).toBe(true)
     expect(statusAfter.result.app.name).toBe('demo')
     expect(statusAfter.result.toolCount).toBe(3) // 1 app tool + 2 meta tools (devtools_status/wait)
+    const names = statusAfter.result.tools.map((tool: { name: string }) => tool.name)
+    expect(names).toEqual(['echo', 'devtools_status', 'devtools_wait']) // catalog carries the meta tools too
   })
 
   it('errors when forwarding a tool with no app connected', async () => {

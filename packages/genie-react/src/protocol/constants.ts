@@ -12,6 +12,9 @@ export const GENIE_DISCOVERY_FILE = '.genie/bridge.json'
 /** Default port for the standalone hub (`genie hub`, Next.js instrumentation). */
 export const GENIE_DEFAULT_HUB_PORT = 4390
 
+/** `Symbol.for` key the hub's bound port is published under: survives Next.js resetting `process.env` between recompiles, so `<GenieScript />` keeps emitting a walked port. */
+export const GENIE_HUB_PORT_GLOBAL = 'genie-react.hubPort'
+
 /** HTTP path the standalone hub serves the self-contained browser client from. */
 export const GENIE_CLIENT_PATH = '/__genie/client.js'
 

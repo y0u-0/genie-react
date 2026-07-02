@@ -95,7 +95,10 @@ export function installErrorCapture(): void {
 export function parseBoundaryError(args: unknown[]): ErrorLog | null {
   const text = args.filter((arg): arg is string => typeof arg === 'string').join('\n')
   const occurred = /occurred in the <([^>\s]+)[^>]*> component/.exec(text)
-  const boundary = /error boundary you provided,?\s+(\w+)/.exec(text)
+  // React 18: "…the error boundary you provided, Name" — React 19: "It was handled by the <Name> error boundary."
+  const boundary =
+    /error boundary you provided,?\s+(\w+)/.exec(text) ??
+    /handled by the <([^>\s]+)[^>]*> error boundary/.exec(text)
   if (!occurred && !boundary) return null
   const error = args.find((arg): arg is Error => arg instanceof Error)
   return {

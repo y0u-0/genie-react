@@ -184,7 +184,7 @@ export class GenieAgentLink {
         this.openWaiters = this.openWaiters.filter((waiter) => waiter !== onOpen)
         reject(
           new Error(
-            `Genie bridge not reachable at ${this.currentUrl || '(unresolved)'}. Is your dev server running with the Genie Vite plugin?`,
+            `Genie bridge not reachable at ${this.currentUrl || '(unresolved)'}. Start it: Vite apps run the dev server with the genie() plugin; Next.js/other apps run \`genie hub\` (or next dev with instrumentation).`,
           ),
         )
       }, this.connectTimeoutMs)

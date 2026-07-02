@@ -134,9 +134,21 @@ export function runInit(options: InitOptions = {}): InitResult {
   const viteConfig = planViteEdit(cwd)
   const rootRoute = planRootRouteEdit(cwd, framework)
 
+  // No Vite, no Next: the hub + script-tag path IS the setup, so don't fail or print Vite-only guidance.
+  if (framework === 'unknown' && viteConfig.action === 'missing') {
+    printUniversalSetup(log)
+    printUniversalNextSteps(log)
+    return {
+      ok: true,
+      dryRun,
+      framework,
+      viteConfig,
+      rootRoute: { action: 'skip', reason: 'universal hub + script-tag setup' },
+    }
+  }
+
   applyViteOutcome(viteConfig, ctx)
   applyRootRouteOutcome(rootRoute, ctx)
-  if (framework === 'unknown' && viteConfig.action === 'missing') printUniversalSetup(log)
   printNextSteps(log, framework, rootRoute)
   if (!dryRun && !options.yes) {
     log.info(
@@ -169,12 +181,23 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
   } else {
     const vitePath = detectViteConfig(cwd)
     if (!vitePath) {
-      checks.push({
-        label: `Vite config references ${VITE_PLUGIN_SPECIFIER}`,
-        ok: false,
-        critical: true,
-        detail: 'no vite config found',
-      })
+      // Universal (hub + script tag) hosts have no Vite config to check; the hub's discovery file is the wiring proof.
+      if (framework === 'unknown') {
+        const discovered = readBridgeDiscovery(cwd) !== null
+        checks.push({
+          label: `universal setup: hub discovery file (${GENIE_DISCOVERY_FILE})`,
+          ok: discovered,
+          critical: true,
+          detail: discovered ? undefined : `not found — run: npx ${CLI_PACKAGE} hub`,
+        })
+      } else {
+        checks.push({
+          label: `Vite config references ${VITE_PLUGIN_SPECIFIER}`,
+          ok: false,
+          critical: true,
+          detail: 'no vite config found',
+        })
+      }
     } else {
       checks.push({
         label: `Vite config references ${VITE_PLUGIN_SPECIFIER}`,
@@ -348,7 +371,8 @@ function planRootRouteEdit(cwd: string, framework: Framework): RootRouteOutcome 
   if (framework === 'react-vite') {
     return {
       action: 'skip',
-      reason: 'plain React + Vite — the genie() plugin injects the in-browser client automatically',
+      reason:
+        'plain React + Vite — genie() injects the react + session tools; render <Genie /> (next steps) for the memory + plugin tools',
     }
   }
 
@@ -479,8 +503,8 @@ function applyRootRouteOutcome(outcome: RootRouteOutcome, ctx: ApplyContext): vo
 }
 
 function printNextSteps(log: Logger, framework: Framework, rootRoute: RootRouteOutcome): void {
-  const componentHandled =
-    rootRoute.action === 'edit' || rootRoute.action === 'already' || rootRoute.action === 'skip'
+  // 'skip' (plain React + Vite) still wants the render step: only <Genie /> surfaces the memory + plugin tools there.
+  const componentHandled = rootRoute.action === 'edit' || rootRoute.action === 'already'
   let step = 1
   log.info('\nNext steps:')
   log.info(`  ${step++}. install Genie (if you have not yet):`)
@@ -658,11 +682,23 @@ function printNextStepsForNext(log: Logger): void {
 }
 
 function printUniversalSetup(log: Logger): void {
-  log.info('\nNo Vite config or Next.js detected — universal setup for any React app:')
+  log.info(`${OK} no Vite config or Next.js detected — universal setup for any React app:`)
   log.info(`  1. run the hub: npx ${CLI_PACKAGE} hub`)
   log.info(
     `  2. add first in <head>: <script src="http://localhost:${GENIE_DEFAULT_HUB_PORT}${GENIE_CLIENT_PATH}"></script>`,
   )
+  log.info('     (the hub prints this tag with its actual port if 4390 was busy)')
+}
+
+function printUniversalNextSteps(log: Logger): void {
+  let step = 1
+  log.info('\nNext steps:')
+  log.info(`  ${step++}. install Genie (if you have not yet):`)
+  log.info(`       pnpm add -D ${GENIE_PACKAGE} ${CLI_PACKAGE}`)
+  log.info(`  ${step++}. start the hub and your dev server, open the app in a browser`)
+  log.info(`  ${step++}. drive the live tools from your shell:`)
+  log.info(`       npx ${CLI_PACKAGE} status`)
+  log.info(`       npx ${CLI_PACKAGE} call react_get_renders '{"sort":"renders"}'`)
 }
 
 function printViteManual(log: Logger): void {

@@ -233,7 +233,9 @@ export async function runCall(
         )
         .catch(() => null)
       if (!ready?.ok) {
-        err('no app connected — start your dev server (with the genie() plugin) and open the app')
+        err(
+          'no app connected — start your dev server (Vite: genie() plugin; Next.js/other: genie hub) and open the app in a browser',
+        )
         return 1
       }
     }
@@ -275,16 +277,21 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
 export async function runTools(opts: AgentOptions = {}): Promise<number> {
   const { link } = await connect(opts)
   try {
-    const status = await waitForTools(link, opts.waitMs ?? 12_000)
-    if (!status || status.tools.length === 0) {
+    const pinned = resolveSession(opts.session)
+    // The broadcast status only carries the current session's catalog; a pinned session must ask the bridge for its own.
+    const status = pinned
+      ? await link.invoke(devtoolsStatusContract, {})
+      : await waitForTools(link, opts.waitMs ?? 12_000)
+    const tools = status?.tools ?? []
+    if (!status || tools.length === 0) {
       err('no tools advertised — start your dev server and open the app in a browser')
       return 1
     }
-    if (resolveSession(opts.session))
-      err(
-        'note: the catalog shown is the current session’s; sessions of the same app advertise the same tools',
-      )
-    out(formatToolsListing(status))
+    if (opts.json) {
+      out(prettyJson({ app: status.app, tools }))
+      return 0
+    }
+    out(formatToolsListing({ app: status.app, tools }))
     return 0
   } catch (error) {
     err(`genie tools: ${errorMessage(error)}`)
@@ -297,7 +304,10 @@ export async function runTools(opts: AgentOptions = {}): Promise<number> {
 type ToolDescriptor = BridgeStatusMessage['tools'][number]
 
 /** Renders the catalog grouped by domain, params derived from each tool's advertised input schema (`?` marks optional). */
-export function formatToolsListing(status: BridgeStatusMessage): string {
+export function formatToolsListing(status: {
+  app?: { name?: string } | null
+  tools: ToolDescriptor[]
+}): string {
   const lines: string[] = [`${status.tools.length} tools from ${status.app?.name ?? 'the app'}:`]
   const groups = new Map<string, ToolDescriptor[]>()
   for (const tool of status.tools) {

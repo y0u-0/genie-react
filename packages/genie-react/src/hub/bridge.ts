@@ -14,7 +14,7 @@ import {
   devtoolsWaitContract,
   encodeMessage,
   GENIE_WS_PATH,
-  metaTools,
+  metaToolDescriptors,
   newId,
   ROLE_QUERY_PARAM,
   type SessionSummary,
@@ -70,6 +70,11 @@ interface PendingRequest {
 
 const POLL_INTERVAL_MS = 150
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000
+
+/** A session's full catalog: its advertised tools plus the bridge-answered meta tools, so listings and toolCount agree. */
+function catalogOf(session: AppSession | null | undefined): ToolDescriptor[] {
+  return [...(session?.tools ?? []), ...metaToolDescriptors]
+}
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Keeps a leaked bridge from pinning the process; Node-only, but typed against a possible DOM `number` timer.
@@ -114,7 +119,7 @@ export class GenieBridge {
       sessionId: current?.sessionId ?? null,
       app: current?.app ?? null,
       domains: current?.capabilities ?? [],
-      tools: current?.tools ?? [],
+      tools: catalogOf(current),
       sessions: this.sessionSummaries(),
     }
   }
@@ -140,7 +145,7 @@ export class GenieBridge {
         sessionId: session.sessionId,
         app: session.app,
         domains: session.capabilities,
-        toolCount: session.tools.length + metaTools.length,
+        toolCount: catalogOf(session).length,
         connectedAt: session.connectedAt,
         current: session.sessionId === this.currentSessionId,
       }))
@@ -278,7 +283,8 @@ export class GenieBridge {
         sessionId: target?.sessionId ?? null,
         app: target?.app ?? null,
         domains: target?.capabilities ?? [],
-        toolCount: (target?.tools.length ?? 0) + metaTools.length,
+        toolCount: catalogOf(target).length,
+        tools: catalogOf(target),
         sessions: this.sessionSummaries(),
       })
       return

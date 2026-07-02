@@ -1,16 +1,22 @@
 import { createElement, type ReactElement } from 'react'
-import { GENIE_CLIENT_PATH, GENIE_DEFAULT_HUB_PORT } from './protocol'
+import { GENIE_CLIENT_PATH, GENIE_DEFAULT_HUB_PORT, GENIE_HUB_PORT_GLOBAL } from './protocol'
 
 export interface GenieScriptProps {
-  /** Port the genie hub listens on; defaults to GENIE_HUB_PORT, then 4390. */
+  /** Port the genie hub listens on; defaults to the in-process hub's bound port, then GENIE_HUB_PORT, then 4390. */
   port?: number
 }
 
 /** Dev-only `<script>` tag for any SSR React root layout (Next.js, Remix, RR7 …): loads the hub-served client before React runs; renders nothing in production; RSC-safe (no hooks, no browser APIs). */
 export function GenieScript({ port }: GenieScriptProps = {}): ReactElement | null {
   if (isProductionBuild()) return null
-  const resolved = port ?? envPort() ?? GENIE_DEFAULT_HUB_PORT
+  const resolved = port ?? globalPort() ?? envPort() ?? GENIE_DEFAULT_HUB_PORT
   return createElement('script', { src: `http://localhost:${resolved}${GENIE_CLIENT_PATH}` })
+}
+
+// The hub publishes its bound port on a global symbol because Next.js resets `process.env` between recompiles — without it a walked port silently degrades to the default.
+function globalPort(): number | undefined {
+  const value = (globalThis as Record<symbol, unknown>)[Symbol.for(GENIE_HUB_PORT_GLOBAL)]
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
 }
 
 // Written as a literal `process.env.NODE_ENV` so client bundlers statically replace it; the catch covers runtimes with no `process` global (unbundled dev pages).

@@ -1,6 +1,11 @@
 import { z } from 'zod'
 import { defineAgentToolContract } from './contract'
-import { appInfoSchema, sessionSummarySchema } from './protocol'
+import {
+  appInfoSchema,
+  sessionSummarySchema,
+  type ToolDescriptor,
+  toolDescriptorSchema,
+} from './protocol'
 
 /** Meta tools are answered by the bridge itself (not the app), so they work before an app connects — as `devtools_wait` needs. */
 export const devtoolsStatusContract = defineAgentToolContract({
@@ -16,6 +21,7 @@ export const devtoolsStatusContract = defineAgentToolContract({
     app: appInfoSchema.nullable(),
     domains: z.array(z.string()),
     toolCount: z.number(),
+    tools: z.array(toolDescriptorSchema).optional(),
     sessions: z.array(sessionSummarySchema),
   }),
   annotations: { readOnlyHint: true },
@@ -47,3 +53,12 @@ export const devtoolsWaitContract = defineAgentToolContract({
 })
 
 export const metaTools = [devtoolsStatusContract, devtoolsWaitContract]
+
+/** Catalog entries for the meta tools, so `tools` listings and toolCount agree on the same set. */
+export const metaToolDescriptors: ToolDescriptor[] = metaTools.map((contract) => ({
+  name: contract.name,
+  title: contract.title,
+  description: contract.description,
+  group: contract.group,
+  inputJsonSchema: z.toJSONSchema(contract.input, { io: 'input' }),
+}))

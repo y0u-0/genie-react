@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, render } from '@testing-library/react'
-import { createElement, StrictMode } from 'react'
+import { createContext, createElement, StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GENIE_GLOBAL_KEY } from '../protocol'
 import type { GenieProps } from './genie'
@@ -28,9 +28,11 @@ async function loadGenie(router: unknown) {
     queryCollector: (q: unknown) => ({ __collector: 'query', query: q }),
   }))
   vi.doMock('@tanstack/react-router', () => ({ useRouter: () => router }))
+  const QueryClientContext = createContext<unknown>(undefined)
+  vi.doMock('@tanstack/react-query', () => ({ QueryClientContext }))
 
   const { Genie } = await import('./genie')
-  return { Genie, createGenieClient, startSpy, pluginPassthroughCollector }
+  return { Genie, createGenieClient, startSpy, pluginPassthroughCollector, QueryClientContext }
 }
 
 const names = (collectors: TaggedCollector[]) => collectors.map((c) => c.__collector)
@@ -108,6 +110,24 @@ describe('<Genie /> under a TanStack Router', () => {
     ])
   })
 
+  it('prefers the router-context QueryClient over a provider one', async () => {
+    const routerClient = { getQueryCache: () => ({}) }
+    const router = { options: { context: { queryClient: routerClient } } }
+    const { Genie, createGenieClient, QueryClientContext } = await loadGenie(router)
+
+    render(
+      createElement(
+        QueryClientContext.Provider,
+        { value: { getQueryCache: () => ({}) } },
+        createElement(Genie),
+      ),
+    )
+
+    const collectors = createGenieClient.mock.calls[0]?.[0]?.collectors ?? []
+    const query = collectors.find((collector) => collector.__collector === 'query')
+    expect((query as { query?: unknown } | undefined)?.query).toBe(routerClient)
+  })
+
   it('does not crash for a minimal router whose options.context is undefined', async () => {
     const router = { options: {} }
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -122,6 +142,56 @@ describe('<Genie /> under a TanStack Router', () => {
       'router',
     ])
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('<Genie /> under a bare QueryClientProvider (no router)', () => {
+  it('picks the QueryClient up from the provider context', async () => {
+    const queryClient = { getQueryCache: () => ({}) }
+    const { Genie, createGenieClient, QueryClientContext } = await loadGenie(undefined)
+
+    render(createElement(QueryClientContext.Provider, { value: queryClient }, createElement(Genie)))
+
+    expect(names(createGenieClient.mock.calls[0]?.[0]?.collectors ?? [])).toEqual([
+      'session',
+      'react',
+      'memory',
+      'plugin',
+      'query',
+    ])
+  })
+
+  it('prefers an explicit queryClient prop over every discovered source', async () => {
+    const propClient = { getQueryCache: () => ({}) }
+    const router = { options: { context: { queryClient: { getQueryCache: () => ({}) } } } }
+    const { Genie, createGenieClient, QueryClientContext } = await loadGenie(router)
+
+    render(
+      createElement(
+        QueryClientContext.Provider,
+        { value: { getQueryCache: () => ({}) } },
+        createElement<GenieProps>(Genie, { queryClient: propClient as never }),
+      ),
+    )
+
+    const collectors = createGenieClient.mock.calls[0]?.[0]?.collectors ?? []
+    const query = collectors.find((collector) => collector.__collector === 'query')
+    expect((query as { query?: unknown } | undefined)?.query).toBe(propClient)
+  })
+
+  it('ignores a provider value that is not a QueryClient', async () => {
+    const { Genie, createGenieClient, QueryClientContext } = await loadGenie(undefined)
+
+    render(
+      createElement(QueryClientContext.Provider, { value: { bogus: true } }, createElement(Genie)),
+    )
+
+    expect(names(createGenieClient.mock.calls[0]?.[0]?.collectors ?? [])).toEqual([
+      'session',
+      'react',
+      'memory',
+      'plugin',
+    ])
   })
 })
 

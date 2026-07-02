@@ -61,3 +61,45 @@ describe('pluginPassthroughCollector declared plugins', () => {
     expect(callTool(toolByName(collector.tools, 'plugin_list'), {})).toEqual({ plugins: [] })
   })
 })
+
+describe('plugin_emit type qualification', () => {
+  function connectableTarget(): { target: EventTarget; dispatched: Array<{ type: string }> } {
+    const target = new EventTarget()
+    const dispatched: Array<{ type: string }> = []
+    target.addEventListener('tanstack-connect', () =>
+      target.dispatchEvent(new CustomEvent('tanstack-connect-success')),
+    )
+    target.addEventListener('tanstack-dispatch-event', (event) => {
+      const detail = (event as CustomEvent).detail as { type: string }
+      dispatched.push(detail)
+    })
+    return { target, dispatched }
+  }
+
+  it('prefixes a bare type with the pluginId so listeners actually receive it', () => {
+    const { target, dispatched } = connectableTarget()
+    globalThis.__TANSTACK_EVENT_TARGET__ = target
+    const collector = pluginPassthroughCollector()
+
+    const result = callTool(toolByName(collector.tools, 'plugin_emit'), {
+      pluginId: 'metrics-devtools',
+      type: 'request-reset',
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(dispatched.map((event) => event.type)).toEqual(['metrics-devtools:request-reset'])
+  })
+
+  it('leaves an already-qualified type untouched', () => {
+    const { target, dispatched } = connectableTarget()
+    globalThis.__TANSTACK_EVENT_TARGET__ = target
+    const collector = pluginPassthroughCollector()
+
+    callTool(toolByName(collector.tools, 'plugin_emit'), {
+      pluginId: 'metrics-devtools',
+      type: 'metrics-devtools:request-reset',
+    })
+
+    expect(dispatched.map((event) => event.type)).toEqual(['metrics-devtools:request-reset'])
+  })
+})

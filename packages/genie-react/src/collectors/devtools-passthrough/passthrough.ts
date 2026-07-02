@@ -66,7 +66,7 @@ export const pluginEmitContract = defineAgentToolContract({
   name: 'plugin_emit',
   title: 'Emit a plugin event',
   description:
-    'Emit an event onto the TanStack DevTools event bus so browser plugins receive it. `type` is the full event name a plugin listens for (e.g. "my-plugin:refresh"); pass the same `type` you observed via plugin_get_events to replay it. Returns ok=false when no DevTools bus is present.',
+    'Emit an event onto the TanStack DevTools event bus so browser plugins receive it. `type` may be bare ("refresh") or fully qualified ("my-plugin:refresh") — a bare type is prefixed with `pluginId` automatically, matching what listeners subscribe to. Returns ok=false when no DevTools bus is present.',
   group: 'action',
   input: z.object({
     pluginId: z.string(),
@@ -153,9 +153,11 @@ export function pluginPassthroughCollector(options: PluginPassthroughOptions = {
       }),
       defineCollectorTool({
         contract: pluginEmitContract,
-        handler: ({ pluginId, type, payload }) => ({
-          ok: emitToDevtoolsBus({ pluginId, type, payload }),
-        }),
+        handler: ({ pluginId, type, payload }) => {
+          // Listeners subscribe to "pluginId:name"; a bare type would dispatch fine yet reach nobody, so qualify it.
+          const qualified = type.startsWith(`${pluginId}:`) ? type : `${pluginId}:${type}`
+          return { ok: emitToDevtoolsBus({ pluginId, type: qualified, payload }) }
+        },
       }),
     ],
   })

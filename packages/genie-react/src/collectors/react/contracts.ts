@@ -42,9 +42,9 @@ export const reactGetTreeContract = defineAgentToolContract({
     maxNodes: z.number().int().min(1).max(2000).default(400),
     appOnly: z
       .boolean()
-      .default(false)
+      .default(true)
       .describe(
-        'Fold each library subtree (node_modules, incl. Vite pre-bundled deps) into a single node and label anonymous nodes by file:line. Off by default (structural view).',
+        'Fold each library subtree (node_modules, incl. Vite pre-bundled deps) into a single node and label anonymous nodes by file:line. On by default like the other react reads; pass false for the raw structural view.',
       ),
   }),
   output: z.object({

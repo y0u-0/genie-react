@@ -31,10 +31,20 @@ function isClientEntry(id: string): boolean {
 const VIRTUAL_ID = 'virtual:genie-client'
 const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_ID}`
 
-// Optional peer of <Genie />: resolved to a no-op stub when absent so neither dev nor `vite build` fails on the import.
-const OPTIONAL_ROUTER_SPECIFIER = '@tanstack/react-router'
-const ROUTER_STUB_ID = '\0virtual:genie-optional-router'
-const ROUTER_STUB_CODE = 'export const useRouter = () => undefined\n'
+// Optional peers of <Genie />: each resolves to a no-op stub when absent so neither dev nor `vite build` fails on the import.
+const OPTIONAL_PEER_STUBS: ReadonlyMap<string, { id: string; code: string }> = new Map([
+  [
+    '@tanstack/react-router',
+    { id: '\0virtual:genie-optional-router', code: 'export const useRouter = () => undefined\n' },
+  ],
+  [
+    '@tanstack/react-query',
+    {
+      id: '\0virtual:genie-optional-query',
+      code: "import { createContext } from 'react'\nexport const QueryClientContext = createContext(undefined)\n",
+    },
+  ],
+])
 // Vite resolves an absent *optional* peer to this synthetic throwing placeholder (not null), so it must count as "not installed".
 const VITE_OPTIONAL_PEER_PREFIX = '__vite-optional-peer-dep:'
 
@@ -125,22 +135,24 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
     },
   }
 
-  return [plugin, optionalRouterPlugin()]
+  return [plugin, optionalPeersPlugin()]
 }
 
-// No `apply` on purpose: unlike the serve-only genie plugin, the router stub must also run during `vite build`.
-function optionalRouterPlugin(): Plugin {
+// No `apply` on purpose: unlike the serve-only genie plugin, the peer stubs must also run during `vite build`.
+function optionalPeersPlugin(): Plugin {
+  const byId = new Map([...OPTIONAL_PEER_STUBS.values()].map((stub) => [stub.id, stub.code]))
   return {
-    name: 'genie:optional-router',
+    name: 'genie:optional-peers',
     enforce: 'pre',
     async resolveId(source, importer, options) {
-      if (source !== OPTIONAL_ROUTER_SPECIFIER) return null
+      const stub = OPTIONAL_PEER_STUBS.get(source)
+      if (!stub) return null
       const resolved = await this.resolve(source, importer, { ...options, skipSelf: true })
       const installed = resolved != null && !resolved.id.startsWith(VITE_OPTIONAL_PEER_PREFIX)
-      return installed ? null : ROUTER_STUB_ID
+      return installed ? null : stub.id
     },
     load(id) {
-      return id === ROUTER_STUB_ID ? ROUTER_STUB_CODE : null
+      return byId.get(id) ?? null
     },
   }
 }

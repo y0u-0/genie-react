@@ -53,6 +53,18 @@ describe('parseBoundaryError', () => {
   it('ignores unrelated console.error calls', () => {
     expect(parseBoundaryError(['just a normal log', 42])).toBeNull()
   })
+
+  it('extracts the boundary from the React 19 "handled by" phrasing', () => {
+    const parsed = parseBoundaryError([
+      '%o\n\n%s\n\n%s\n',
+      new Error('boom from Bomb'),
+      'The above error occurred in the <Bomb> component.',
+      'It was handled by the <DemoErrorBoundary> error boundary.',
+    ])
+    expect(parsed?.message).toBe('boom from Bomb')
+    expect(parsed?.throwingComponent).toBe('Bomb')
+    expect(parsed?.boundaryName).toBe('DemoErrorBoundary')
+  })
 })
 
 describe('recordErrorState — caught errors', () => {

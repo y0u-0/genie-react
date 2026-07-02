@@ -44,18 +44,18 @@ const optionalPeerPlaceholder: ResolveCtx = {
 }
 
 describe('genie() plugin array', () => {
-  it('returns the serve plugin plus the optional-router plugin', () => {
+  it('returns the serve plugin plus the optional-peers plugin', () => {
     const plugins = genie()
     expect(plugins).toHaveLength(2)
     expect(plugins[0]?.name).toBe('genie')
     expect(plugins[0]?.apply).toBe('serve')
-    expect(plugins[1]?.name).toBe('genie:optional-router')
+    expect(plugins[1]?.name).toBe('genie:optional-peers')
     // No `apply`: the stub must run in build too, not only serve.
     expect(plugins[1]?.apply).toBeUndefined()
   })
 })
 
-describe('optional-router stub', () => {
+describe('optional-peer stubs', () => {
   const optional = genie()[1] as Plugin
   const resolveId = getHook<ResolveIdFn>(optional, 'resolveId')
   const load = getHook<LoadFn>(optional, 'load')
@@ -80,8 +80,16 @@ describe('optional-router stub', () => {
     expect(id).toBeNull()
   })
 
-  it('ignores any other specifier', async () => {
+  it('stubs @tanstack/react-query with a bare QueryClientContext when absent', async () => {
     const id = await resolveId.call(absent, '@tanstack/react-query', undefined, {})
+    expect(id).toBe('\0virtual:genie-optional-query')
+    const code = load.call(null, '\0virtual:genie-optional-query')
+    expect(code).toContain('export const QueryClientContext')
+    expect(code).toContain('createContext(undefined)')
+  })
+
+  it('ignores any other specifier', async () => {
+    const id = await resolveId.call(absent, '@tanstack/query-core', undefined, {})
     expect(id).toBeNull()
   })
 

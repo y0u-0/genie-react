@@ -1,4 +1,4 @@
-import { GENIE_DEFAULT_HUB_PORT } from '../protocol'
+import { GENIE_DEFAULT_HUB_PORT, GENIE_HUB_PORT_GLOBAL } from '../protocol'
 
 export interface RegisterGenieOptions {
   /** Preferred port for the hub; defaults to GENIE_HUB_PORT, then 4390. Busy ports walk upward. */
@@ -24,7 +24,8 @@ export async function registerGenie(options: RegisterGenieOptions = {}): Promise
       port: options.port ?? envPort() ?? GENIE_DEFAULT_HUB_PORT,
     })
     if (result.status === 'started') holder[HUB_FLAG] = result.handle
-    // Hand the bound port to <GenieScript /> (rendered later in this same process), so a walked port still loads.
+    // Hand the bound port to <GenieScript /> on a global symbol: Next resets `process.env` on recompiles while the singleton guard skips this re-run, so the env alone loses a walked port.
+    holder[Symbol.for(GENIE_HUB_PORT_GLOBAL)] = result.port
     setEnv('GENIE_HUB_PORT', String(result.port))
     log(
       result.status === 'reused'
@@ -43,6 +44,7 @@ export async function stopGenieHub(): Promise<void> {
   const holder = globalThis as Record<symbol, unknown>
   const handle = holder[HUB_FLAG]
   holder[HUB_FLAG] = undefined
+  holder[Symbol.for(GENIE_HUB_PORT_GLOBAL)] = undefined
   if (isCloseable(handle)) await handle.close()
 }
 

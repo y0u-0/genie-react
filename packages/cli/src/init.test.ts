@@ -189,7 +189,35 @@ describe('runInit — plain React + Vite', () => {
     runInit({ cwd: dir, dryRun: true, logger })
     const text = lines.join('\n')
     expect(text).toContain('pnpm add -D genie-react @genie-react/cli')
-    expect(text).not.toContain('render Genie near your app root')
+  })
+
+  it('still prints the <Genie /> render step — only it surfaces the memory + plugin tools', async () => {
+    const dir = await project({
+      'package.json': pkg({ react: '^19' }),
+      'index.html': '<div id="root"></div>',
+      'vite.config.ts': VITE_CONFIG,
+    })
+    const { logger, lines } = capture()
+    runInit({ cwd: dir, dryRun: true, logger })
+    const text = lines.join('\n')
+    expect(text).toContain('render Genie near your app root')
+    expect(text).toContain('{import.meta.env.DEV && <Genie />}')
+  })
+})
+
+describe('runInit — universal (no Vite, no Next)', () => {
+  it('treats the hub + script-tag path as a valid setup and exits ok', async () => {
+    const dir = await project({ 'package.json': pkg({ react: '^19' }) })
+    const { logger, lines } = capture()
+    const result = runInit({ cwd: dir, dryRun: true, logger })
+    const text = lines.join('\n')
+
+    expect(result.framework).toBe('unknown')
+    expect(result.ok).toBe(true)
+    expect(text).toContain('universal setup')
+    expect(text).toContain('client.js')
+    expect(text).not.toContain('add the plugin to your Vite config manually')
+    expect(text).not.toContain('<Genie />}')
   })
 })
 

@@ -689,7 +689,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
           const queryFn = resolveQueryFn(queryKey)
           if (!queryFn) {
             throw new Error(
-              `No queryFn available for ${JSON.stringify(queryKey)}. query_fetch only works for queries with a mounted observer (a live useQuery) or a registered query default. Use query_refetch or query_invalidate to refresh existing cache entries instead.`,
+              `No queryFn available for ${JSON.stringify(queryKey)}. query_fetch needs a mounted observer (a live useQuery) with a cache entry, or a registered query default — after query_remove the observer re-attaches only on its next render, so interact with the UI first. Use query_refetch or query_invalidate to refresh existing cache entries instead.`,
             )
           }
           const data = await queryClient.fetchQuery({

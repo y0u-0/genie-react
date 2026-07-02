@@ -419,13 +419,18 @@ export interface ContextDependencyInfo {
 /** The raw consumed contexts, walking `dependencies.firstContext` directly — bippy's `traverseContexts` diffs against the alternate and reads nothing on first mount. */
 export function contextDependencies(fiber: Fiber): ContextDependencyInfo[] {
   const dependencies: ContextDependencyInfo[] = []
+  // StrictMode double-reads can chain the same context twice; one entry per context object keeps `override_context` unambiguous.
+  const seen = new Set<unknown>()
   let node: ContextDependency<unknown> | null = fiber.dependencies?.firstContext ?? null
   while (node && typeof node === 'object' && 'memoizedValue' in node) {
-    dependencies.push({
-      context: node.context,
-      name: node.context?.displayName || 'Context',
-      value: node.memoizedValue,
-    })
+    if (!seen.has(node.context)) {
+      seen.add(node.context)
+      dependencies.push({
+        context: node.context,
+        name: node.context?.displayName || 'Context',
+        value: node.memoizedValue,
+      })
+    }
     node = node.next ?? null
   }
   return dependencies
