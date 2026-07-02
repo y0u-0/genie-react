@@ -118,6 +118,36 @@ function fiberKind(fiber: Fiber): string {
   }
 }
 
+/** Walk `return` links to the nearest composite (component) fiber; null when the chain is host/root-only. */
+export function nearestCompositeFiber(fiber: Fiber): Fiber | null {
+  let current: Fiber | null = fiber
+  while (current && !isCompositeFiber(current)) current = current.return
+  return current
+}
+
+export interface OwningComponent {
+  fiber: Fiber
+  id: NodeId
+  name: string
+  kind: string
+  props: unknown
+}
+
+/** The component owning a DOM element (via its host fiber), or null when the element belongs to no React tree. */
+export function owningComponentFor(element: Element, propsDepth: number): OwningComponent | null {
+  const host = getFiberFromHostInstance(element)
+  if (!host) return null
+  const fiber = nearestCompositeFiber(getLatestFiber(host))
+  if (!fiber) return null
+  return {
+    fiber,
+    id: registerFiber(fiber),
+    name: nameOf(fiber),
+    kind: fiberKind(fiber),
+    props: dehydrate(fiber.memoizedProps, { depth: propsDepth }),
+  }
+}
+
 function countNodes(root: Fiber, includeHost: boolean): number {
   let count = 0
   const visit = (fiber: Fiber): void => {

@@ -5,7 +5,7 @@ import { errorMessage } from 'genie-react/protocol'
 import { runCall, runStatus, runTools } from './agent'
 import { isRecord } from './guards'
 import { runHub } from './hub-command'
-import { runDoctor, runInit } from './index'
+import { runDoctor, runInit, runLiveDoctor } from './index'
 import { runLink } from './link'
 
 const HELP = `genie — give an AI agent live DevTools on your running React + TanStack app
@@ -15,7 +15,7 @@ Usage: npx @genie-react/cli <command> [options]
 Setup commands:
   link [path]            symlink the Genie packages from a local checkout (no publish)
   init [--dry-run]       wire Genie into your app (Vite plugin, or Next.js layout + instrumentation)
-  doctor                 check that Genie is set up correctly
+  doctor [--live]        check that Genie is set up correctly (--live also probes the running hub, client, and a session round-trip)
   hub [--port <n>]       run the standalone hub for Next.js / non-Vite apps (default 4390; busy ports walk upward, explicit --port is strict)
 
 Tool commands (dev server must be running with the genie() plugin or hub):
@@ -55,6 +55,7 @@ async function main(): Promise<number> {
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean' },
       'dry-run': { type: 'boolean' },
+      live: { type: 'boolean' },
       yes: { type: 'boolean', short: 'y' },
       url: { type: 'string' },
       wait: { type: 'string' },
@@ -90,8 +91,10 @@ async function main(): Promise<number> {
       })
       return result.ok ? 0 : 1
     }
-    case 'doctor':
-      return runDoctor().ok ? 0 : 1
+    case 'doctor': {
+      const result = values.live ? await runLiveDoctor() : runDoctor()
+      return result.ok ? 0 : 1
+    }
     case 'hub': {
       const port = values.port ? Number(values.port) : undefined
       if (port !== undefined && (!Number.isInteger(port) || port <= 0)) {
@@ -114,9 +117,12 @@ async function main(): Promise<number> {
   }
 }
 
+// exitCode + natural exit, NOT process.exit(): exit() drops buffered stdout past the 64KB pipe window, truncating piped --json output.
 main()
-  .then((code) => process.exit(code))
+  .then((code) => {
+    process.exitCode = code
+  })
   .catch((error) => {
     process.stderr.write(`genie: ${errorMessage(error)}\n`)
-    process.exit(1)
+    process.exitCode = 1
   })

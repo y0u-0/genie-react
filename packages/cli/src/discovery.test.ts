@@ -1,9 +1,10 @@
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from 'genie-react/protocol'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { resolveBridgeUrl } from './discovery'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { isPidAlive, resolveBridgeUrl } from './discovery'
 
 const ENV_KEYS = ['GENIE_BRIDGE_URL', 'GENIE_BRIDGE_PORT'] as const
 
@@ -69,5 +70,36 @@ describe('resolveBridgeUrl', () => {
   it('falls through to the default when the discovery file lacks a url', async () => {
     await writeDiscovery(JSON.stringify({ port: 4321 }))
     expect(await resolveBridgeUrl(cwd)).toBe(`ws://localhost:5173${GENIE_WS_PATH}`)
+  })
+
+  it('removes a stale discovery file (dead pid) and falls through to the default', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    await writeDiscovery(
+      JSON.stringify({ url: 'ws://127.0.0.1:4321/__genie/ws', port: 4321, pid: 999_999 }),
+    )
+    expect(await resolveBridgeUrl(cwd)).toBe(`ws://localhost:5173${GENIE_WS_PATH}`)
+    expect(existsSync(join(cwd, GENIE_DISCOVERY_FILE))).toBe(false)
+    expect(stderrSpy.mock.calls.flat().join('')).toContain('pid 999999 is gone')
+    stderrSpy.mockRestore()
+  })
+
+  it('keeps a discovery file whose pid is alive', async () => {
+    await writeDiscovery(
+      JSON.stringify({ url: 'ws://127.0.0.1:4321/__genie/ws', port: 4321, pid: process.pid }),
+    )
+    expect(await resolveBridgeUrl(cwd)).toBe('ws://127.0.0.1:4321/__genie/ws')
+    expect(existsSync(join(cwd, GENIE_DISCOVERY_FILE))).toBe(true)
+  })
+
+  it('trusts a discovery file that carries no pid at all', async () => {
+    await writeDiscovery(JSON.stringify({ url: 'ws://127.0.0.1:4321/__genie/ws', port: 4321 }))
+    expect(await resolveBridgeUrl(cwd)).toBe('ws://127.0.0.1:4321/__genie/ws')
+  })
+})
+
+describe('isPidAlive', () => {
+  it('reports the current process as alive and a bogus pid as gone', () => {
+    expect(isPidAlive(process.pid)).toBe(true)
+    expect(isPidAlive(999_999)).toBe(false)
   })
 })

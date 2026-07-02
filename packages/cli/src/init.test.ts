@@ -1,8 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { startGenieHub } from 'genie-react/hub'
+import { GENIE_DISCOVERY_FILE } from 'genie-react/protocol'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { detectFramework, type Logger, runDoctor, runInit } from './index'
+import { detectFramework, type Logger, runDoctor, runInit, runLiveDoctor } from './index'
 
 const VITE_CONFIG = `import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -439,4 +442,51 @@ describe('runDoctor — package checks', () => {
     const labels = result.checks.map((c) => c.label)
     expect(labels).toContain('genie-react resolvable in node_modules')
   })
+})
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      server.close(() => resolve(port))
+    })
+    server.once('error', reject)
+  })
+}
+
+describe('runLiveDoctor', () => {
+  it('probes a running standalone hub end to end', async () => {
+    const dir = await project({ 'package.json': pkg({ react: '^19' }) })
+    const hub = await startGenieHub({ rootDir: dir })
+    try {
+      const live = await runLiveDoctor({ cwd: dir, logger: silent })
+      const byLabel = (prefix: string) => live.checks.find((c) => c.label.startsWith(prefix))
+      expect(byLabel('standalone hub answering')?.ok).toBe(true)
+      expect(byLabel('hub serves the browser client')?.ok).toBe(true)
+      expect(byLabel('bridge accepts agent connections')?.ok).toBe(true)
+      const session = byLabel('an app session is connected')
+      expect(session?.ok).toBe(false)
+      expect(session?.critical).toBe(false)
+    } finally {
+      if (hub.status === 'started') await hub.handle.close()
+    }
+  }, 15_000)
+
+  it('reports nothing listening when the discovery file points at a dead port', async () => {
+    const dir = await project({ 'package.json': pkg({ react: '^19' }) })
+    const port = await freePort()
+    const file = join(dir, GENIE_DISCOVERY_FILE)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(
+      file,
+      JSON.stringify({ url: `ws://localhost:${port}/__genie/ws`, port, pid: process.pid }),
+      'utf8',
+    )
+    const live = await runLiveDoctor({ cwd: dir, logger: silent, timeoutMs: 800 })
+    const check = live.checks.find((c) => c.label.startsWith('dev server / hub listening'))
+    expect(check?.ok).toBe(false)
+    expect(live.ok).toBe(false)
+  }, 10_000)
 })

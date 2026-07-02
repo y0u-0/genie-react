@@ -1,11 +1,19 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import {
+  devtoolsStatusContract,
   GENIE_CLIENT_PATH,
   GENIE_DEFAULT_HUB_PORT,
   GENIE_DISCOVERY_FILE,
+  GENIE_INFO_PATH,
 } from 'genie-react/protocol'
-import { type BridgeDiscovery, parseBridgeDiscovery } from './discovery'
+import { GenieAgentLink } from './agent-link'
+import {
+  type BridgeDiscovery,
+  isPidAlive,
+  parseBridgeDiscovery,
+  resolveBridgeUrl,
+} from './discovery'
 import { isRecord } from './guards'
 
 export interface Logger {
@@ -216,7 +224,13 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
     })
   }
 
-  const bridge = readBridgeDiscovery(cwd)
+  let bridge = readBridgeDiscovery(cwd)
+  let staleBridgePid: number | null = null
+  if (bridge?.pid !== undefined && !isPidAlive(bridge.pid)) {
+    staleBridgePid = bridge.pid
+    rmSync(join(cwd, GENIE_DISCOVERY_FILE), { force: true })
+    bridge = null
+  }
 
   log.info('genie doctor\n')
   for (const check of checks) {
@@ -228,6 +242,10 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
   if (bridge) {
     const pid = bridge.pid ? ` (pid ${bridge.pid})` : ''
     log.info(`\n${OK} bridge is live at ${bridge.url}${pid}`)
+  } else if (staleBridgePid !== null) {
+    log.info(
+      `\n${WARN} stale ${GENIE_DISCOVERY_FILE} (pid ${staleBridgePid} is gone) — removed; restart your dev server or genie hub`,
+    )
   } else {
     log.info('\n  bridge is not running — start your dev server to connect')
   }
@@ -238,6 +256,184 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
   }
 
   return { ok, framework, checks, bridge }
+}
+
+export interface LiveDoctorOptions extends DoctorOptions {
+  /** Per-probe timeout; the WS round-trip gets twice this. */
+  timeoutMs?: number
+}
+
+/** `doctor --live`: the static checks plus a probe of the RUNNING stack — hub HTTP + identity, served client bundle, and a session round-trip over the bridge. */
+export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<DoctorResult> {
+  const cwd = options.cwd ?? process.cwd()
+  const log = options.logger ?? defaultLogger
+  const timeoutMs = options.timeoutMs ?? 2_000
+  const staticResult = runDoctor(options)
+  const checks: DoctorCheck[] = []
+
+  const url = await resolveBridgeUrl(cwd)
+  const origin = httpOriginOf(url)
+  if (!origin) {
+    checks.push({ label: 'bridge url is well-formed', ok: false, critical: true, detail: url })
+  } else {
+    const hub = await probeHub(origin, timeoutMs)
+    if (hub.kind === 'unreachable') {
+      checks.push({
+        label: `dev server / hub listening at ${origin}`,
+        ok: false,
+        critical: true,
+        detail: 'nothing answered — start your dev server or genie hub',
+      })
+    } else if (hub.kind === 'standalone') {
+      checks.push({
+        label: `standalone hub answering at ${origin}`,
+        ok: true,
+        critical: true,
+        detail: `rootDir ${hub.rootDir}`,
+      })
+      const clientServed = await fetchNonEmpty(`${origin}${GENIE_CLIENT_PATH}`, timeoutMs)
+      checks.push({
+        label: 'hub serves the browser client',
+        ok: clientServed,
+        critical: true,
+        detail: clientServed ? undefined : `${GENIE_CLIENT_PATH} did not return the bundle`,
+      })
+    } else {
+      checks.push({
+        label: `dev server answering at ${origin}`,
+        ok: true,
+        critical: true,
+        detail: 'vite-mounted bridge (client is injected automatically)',
+      })
+    }
+
+    if (hub.kind !== 'unreachable') {
+      const session = await probeSession(url, timeoutMs)
+      checks.push({
+        label: 'bridge accepts agent connections',
+        ok: session !== null,
+        critical: true,
+        detail: session ? undefined : 'WebSocket round-trip failed',
+      })
+      if (session) {
+        checks.push({
+          label: 'an app session is connected',
+          ok: session.connected,
+          critical: false,
+          detail: session.connected
+            ? [
+                `${session.sessions} session(s)`,
+                session.app,
+                session.reactVersion && `react ${session.reactVersion}`,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+            : 'open the app in a browser',
+        })
+        if (session.roundTripMs !== null) {
+          checks.push({
+            label: 'app tool round-trip',
+            ok: true,
+            critical: false,
+            detail: `react_find_components answered in ${session.roundTripMs}ms`,
+          })
+        }
+      }
+    }
+  }
+
+  log.info('\nlive checks:')
+  for (const check of checks) {
+    const mark = check.ok ? OK : check.critical ? FAIL : WARN
+    const detail = check.detail ? ` (${check.detail})` : ''
+    log.info(`${mark} ${check.label}${detail}`)
+  }
+
+  const ok = staticResult.ok && checks.every((check) => !check.critical || check.ok)
+  return {
+    ok,
+    framework: staticResult.framework,
+    checks: [...staticResult.checks, ...checks],
+    bridge: staticResult.bridge,
+  }
+}
+
+function httpOriginOf(wsUrl: string): string | null {
+  try {
+    const parsed = new URL(wsUrl)
+    const protocol = parsed.protocol === 'wss:' ? 'https:' : 'http:'
+    return `${protocol}//${parsed.host}`
+  } catch {
+    return null
+  }
+}
+
+type HubProbe = { kind: 'unreachable' } | { kind: 'standalone'; rootDir: string } | { kind: 'http' }
+
+// Any HTTP answer (a Vite 404 included) proves a server owns the port; only {genie:true} proves a standalone hub.
+async function probeHub(origin: string, timeoutMs: number): Promise<HubProbe> {
+  try {
+    const response = await fetch(`${origin}${GENIE_INFO_PATH}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (response.ok) {
+      const body: unknown = await response.json().catch(() => null)
+      if (isRecord(body) && body.genie === true && typeof body.rootDir === 'string') {
+        return { kind: 'standalone', rootDir: body.rootDir }
+      }
+    }
+    return { kind: 'http' }
+  } catch {
+    return { kind: 'unreachable' }
+  }
+}
+
+async function fetchNonEmpty(url: string, timeoutMs: number): Promise<boolean> {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    return response.ok && (await response.text()).length > 0
+  } catch {
+    return false
+  }
+}
+
+interface SessionProbe {
+  connected: boolean
+  sessions: number
+  app: string | null
+  reactVersion: string | null
+  roundTripMs: number | null
+}
+
+async function probeSession(url: string, timeoutMs: number): Promise<SessionProbe | null> {
+  const link = new GenieAgentLink({
+    url,
+    connectTimeoutMs: timeoutMs,
+    invokeTimeoutMs: timeoutMs * 2,
+  })
+  link.start()
+  try {
+    const status = await link.invoke(devtoolsStatusContract, {})
+    let roundTripMs: number | null = null
+    if (status.connected && status.domains.includes('react')) {
+      const started = Date.now()
+      roundTripMs = await link
+        .invoke('react_find_components', { query: '__genie_live_doctor__' })
+        .then(() => Date.now() - started)
+        .catch(() => null)
+    }
+    return {
+      connected: status.connected,
+      sessions: status.sessions.length,
+      app: status.app?.name ?? null,
+      reactVersion: status.app?.reactVersion ?? null,
+      roundTripMs,
+    }
+  } catch {
+    return null
+  } finally {
+    link.close()
+  }
 }
 
 /** Classifies by deps, most-specific first; the router dep outranks `index.html` because Router SPAs ship one too. */

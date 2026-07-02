@@ -60,7 +60,7 @@ npx @genie-react/cli call query_list '{}'
 npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
 ```
 
-Run `npx @genie-react/cli doctor` to check the wiring.
+Run `npx @genie-react/cli doctor` to check the wiring — `doctor --live` also probes the running hub, the served client, and a session round-trip. Stale `.genie/bridge.json` files left by a killed dev server are detected and cleaned up automatically.
 
 ## Give your agent the skill
 
@@ -97,11 +97,11 @@ npx skills add y0u-0/genie-react
 - override a component's props, hook state, or a context value
 - force a Suspense fallback or an error boundary — hold loading / error UI open to inspect it, no code edits
 
-50 tools total. `read` is safe to call freely; `action` mutates the running app.
+51 tools total. `read` is safe to call freely; `action` mutates the running app.
 
 ## Tools
 
-**React** — `react_get_tree`, `react_find_components` (tree); `react_inspect_component` (props / state / hooks), `react_inspect_context` (consumed contexts + values), `react_dom_for_component` (DOM element(s) + selectors); `react_get_renders`, `react_clear_renders` (why-did-render), `react_effect_audit` (which effects fired), `react_error_state` (errors / suspended); `react_profile_start`, `react_profile_report` (profiler) — read. `react_override_props`, `react_override_hook_state`, `react_override_context` (drive props / hook state / context), `react_toggle_suspense_fallback`, `react_force_error_boundary` (hold loading / error UI open) — action.
+**React** — `react_get_tree`, `react_find_components` (tree); `react_inspect_component` (props / state / hooks), `react_inspect_context` (consumed contexts + values), `react_dom_for_component` (DOM element(s) + selectors), `react_component_for_dom` (CSS selector → the owning component + its source — the reverse direction, for "this button is wrong, whose is it?"); `react_get_renders`, `react_clear_renders` (why-did-render), `react_effect_audit` (which effects fired), `react_error_state` (errors / suspended); `react_profile_start`, `react_profile_report` (profiler) — read. `react_override_props`, `react_override_hook_state`, `react_override_context` (drive props / hook state / context), `react_toggle_suspense_fallback`, `react_force_error_boundary` (hold loading / error UI open) — action.
 
 **Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_fetch`, `query_ensure`, `mutation_rerun`.
 

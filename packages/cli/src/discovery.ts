@@ -1,7 +1,17 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, unlink } from 'node:fs/promises'
 import { dirname, join, parse } from 'node:path'
 import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from 'genie-react/protocol'
 import { isRecord } from './guards'
+
+/** ESRCH/ERANGE mean the process is gone; EPERM means alive but owned by another user. */
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error instanceof Error && 'code' in error && error.code === 'EPERM'
+  }
+}
 
 export interface BridgeDiscovery {
   url: string
@@ -40,10 +50,18 @@ async function readDiscoveryUpward(startDir: string): Promise<string | null> {
   const { root } = parse(startDir)
   let dir = startDir
   for (;;) {
+    const path = join(dir, GENIE_DISCOVERY_FILE)
     try {
-      const raw = await readFile(join(dir, GENIE_DISCOVERY_FILE), 'utf8')
+      const raw = await readFile(path, 'utf8')
       const discovery = parseBridgeDiscovery(raw)
-      if (discovery?.url) return discovery.url
+      if (discovery?.url) {
+        if (discovery.pid === undefined || isPidAlive(discovery.pid)) return discovery.url
+        // A SIGKILLed dev server/hub never cleans up; a dead pid means the URL is a lie — heal instead of failing weird.
+        await unlink(path).catch(() => {})
+        process.stderr.write(
+          `genie: removed stale ${GENIE_DISCOVERY_FILE} (pid ${discovery.pid} is gone)\n`,
+        )
+      }
     } catch {
       // not in this dir — keep walking up
     }

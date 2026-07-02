@@ -1,6 +1,6 @@
-import type { Fiber } from 'bippy'
+import { type Fiber, FunctionComponentTag, HostComponentTag } from 'bippy'
 import { describe, expect, it } from 'vitest'
-import { contextsForFiber, describeHostElement } from './fiber'
+import { contextsForFiber, describeHostElement, nearestCompositeFiber } from './fiber'
 
 const fakeElement = (opts: {
   tag: string
@@ -17,6 +17,28 @@ const fakeElement = (opts: {
     getAttribute: (name: string) => attrs[name] ?? null,
   } as unknown as Element
 }
+
+describe('nearestCompositeFiber', () => {
+  const composite = {
+    tag: FunctionComponentTag,
+    type: () => null,
+    return: null,
+  } as unknown as Fiber
+
+  it('walks host fibers up to the owning component', () => {
+    const host = { tag: HostComponentTag, type: 'button', return: composite } as unknown as Fiber
+    expect(nearestCompositeFiber(host)).toBe(composite)
+  })
+
+  it('returns a composite fiber unchanged', () => {
+    expect(nearestCompositeFiber(composite)).toBe(composite)
+  })
+
+  it('returns null when the chain is host-only', () => {
+    const host = { tag: HostComponentTag, type: 'div', return: null } as unknown as Fiber
+    expect(nearestCompositeFiber(host)).toBeNull()
+  })
+})
 
 describe('describeHostElement', () => {
   it('prefers #id, then [data-testid], then tag + simple classes', () => {

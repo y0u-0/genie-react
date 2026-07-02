@@ -146,6 +146,37 @@ export const reactDomForComponentContract = defineAgentToolContract({
   annotations: { readOnlyHint: true },
 })
 
+export const reactComponentForDomContract = defineAgentToolContract({
+  name: 'react_component_for_dom',
+  title: 'Owning component for a DOM element',
+  description:
+    'Map a CSS selector (e.g. an element a browser tool found) to the React component(s) rendering it — the reverse of react_dom_for_component, turning "this button is wrong" into "edit this component". Each match reports the owning component id (feed it to react_inspect_component / overrides), name, kind, shallow props, and source file:line. Elements outside this React tree are skipped; duplicate owners are collapsed.',
+  group: 'react.inspect',
+  input: z.object({
+    selector: z
+      .string()
+      .describe('CSS selector; each matched element resolves to its owning component.'),
+    limit: z.number().int().min(1).max(20).default(5).describe('Max matched elements to resolve.'),
+    propsDepth: z.number().int().min(0).max(4).default(1),
+  }),
+  output: z.object({
+    selector: z.string(),
+    matched: z.number().describe('Total DOM elements the selector matched (before limit).'),
+    components: z.array(
+      z.object({
+        id: z.number(),
+        name: z.string(),
+        kind: z.string(),
+        tag: z.string().describe('Tag of the matched DOM element.'),
+        props: z.unknown(),
+        source: sourceSchema,
+        isLibrary: z.boolean(),
+      }),
+    ),
+  }),
+  annotations: { readOnlyHint: true },
+})
+
 export const reactInspectContextContract = defineAgentToolContract({
   name: 'react_inspect_context',
   title: 'Inspect consumed React contexts',

@@ -3,6 +3,7 @@ import { defineCollector, defineCollectorTool, type GenieCollector } from '../..
 import type { NodeId } from './contracts'
 import {
   reactClearRendersContract,
+  reactComponentForDomContract,
   reactDomForComponentContract,
   reactEffectAuditContract,
   reactErrorStateContract,
@@ -30,6 +31,7 @@ import {
   findRootFiber,
   inspectFiber,
   nameOf,
+  owningComponentFor,
   registerFiber,
 } from './fiber'
 import {
@@ -47,6 +49,7 @@ import {
   isTracking,
   startRenderTracking,
 } from './render-tracker'
+import { classifyFiber } from './source'
 
 /** React collector: tree, search, inspection, live overrides; why-did-render + profiling need commit instrumentation from `genie-react/hook`. */
 export function reactCollector(): GenieCollector {
@@ -145,6 +148,36 @@ export function reactCollector(): GenieCollector {
           const fiber = root ? findFiberById(root, id) : null
           if (!fiber) throw new Error(`Component ${id} not found (it may have unmounted).`)
           return domForFiber(fiber, { limit })
+        },
+      }),
+      defineCollectorTool({
+        contract: reactComponentForDomContract,
+        handler: async ({ selector, limit, propsDepth }) => {
+          if (typeof document === 'undefined') throw new Error('No DOM in this environment.')
+          let elements: Element[]
+          try {
+            elements = Array.from(document.querySelectorAll(selector))
+          } catch {
+            throw new Error(`Invalid CSS selector: ${JSON.stringify(selector)}`)
+          }
+          const seen = new Set<number>()
+          const components = []
+          for (const element of elements.slice(0, limit)) {
+            const owner = owningComponentFor(element, propsDepth)
+            if (!owner || seen.has(owner.id)) continue
+            seen.add(owner.id)
+            const { source, isLibrary } = await classifyFiber(owner.fiber)
+            components.push({
+              id: owner.id as number,
+              name: owner.name,
+              kind: owner.kind,
+              tag: element.tagName.toLowerCase(),
+              props: owner.props,
+              source,
+              isLibrary,
+            })
+          }
+          return { selector, matched: elements.length, components }
         },
       }),
       defineCollectorTool({
