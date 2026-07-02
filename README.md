@@ -53,8 +53,8 @@ createGenieClient({
 Then drive it:
 
 ```bash
-npx @genie-react/cli status     # connected once a browser opens the app
-npx @genie-react/cli tools      # list the tools the live app exposes
+npx @genie-react/cli status                    # connected once a browser opens the app
+npx @genie-react/cli tools                     # group index; drill in: tools <group> / tools <tool>
 npx @genie-react/cli call react_get_renders '{"sort":"renders"}'
 npx @genie-react/cli call query_list '{}'
 npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'

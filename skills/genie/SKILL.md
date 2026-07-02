@@ -49,7 +49,7 @@ Skip the clear and counts blend mount plus every prior commit.
 
 ## Tools by symptom
 
-Output is a compact text summary by default; add `--json` for the raw blob. `genie tools` prints the authoritative live catalog with argument schemas. Reach for:
+Output is a compact text summary by default; add `--json` for the raw (compact) blob. Discover tools progressively instead of dumping the catalog: `genie tools` (group index) → `genie tools <group>` (that group's params) → `genie tools <tool>` (full description + a runnable example); `--all` prints everything. Reach for:
 
 - **Re-renders / jank** (you have a suspect component) → `react_get_renders` (why-did-render: which prop/state changed, unstable refs, unnecessary vs wasted renders, Compiler status, self-time, each component's `file:line`).
 - **Slow flow / where's the cost?** (offender unknown, whole interaction) → `react_profile_start` (clears counters for you) → drive the flow → `react_profile_report` — four leaderboards: slowest by self-time, most re-rendered, most unnecessary renders, most renders wasted on unstable-reference props. `'{"limit":N}'` sizes each list. Then drill into a named offender with `react_get_renders`.

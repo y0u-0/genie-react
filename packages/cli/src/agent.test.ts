@@ -1,11 +1,19 @@
 import type { BridgeStatusMessage } from 'genie-react/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  formatGroupIndex,
+  formatToolDetail,
   formatToolsListing,
   renderResult,
   resolveSession,
+  resolveToolsSelector,
   summarizeEffects,
+  summarizeErrorState,
+  summarizeProfile,
+  summarizeQueryList,
   summarizeRenders,
+  summarizeRouterState,
+  summarizeStatus,
   summarizeTree,
 } from './agent'
 
@@ -291,9 +299,9 @@ describe('renderResult', () => {
     expect(out).not.toBe(JSON.stringify(rendersPayload, null, 2))
   })
 
-  it('falls back to pretty JSON when json is true', () => {
+  it('prints compact machine JSON when json is true', () => {
     expect(renderResult('react_get_renders', rendersPayload, true)).toBe(
-      JSON.stringify(rendersPayload, null, 2),
+      JSON.stringify(rendersPayload),
     )
   })
 
@@ -305,6 +313,181 @@ describe('renderResult', () => {
   it('falls back to pretty JSON when the summarizer returns null', () => {
     const malformed = { summary: {}, components: 'nope' }
     expect(renderResult('react_get_renders', malformed)).toBe(JSON.stringify(malformed, null, 2))
+  })
+})
+
+const CATALOG = [
+  tool({ name: 'react_get_renders', title: 'Why-did-render', group: 'react.render' }),
+  tool({ name: 'react_clear_renders', title: 'Clear counters', group: 'react.render' }),
+  tool({
+    name: 'query_list',
+    title: 'List queries',
+    group: 'query',
+    inputJsonSchema: {
+      type: 'object',
+      properties: {
+        staleOnly: { type: 'boolean', default: false },
+        limit: { type: 'integer', default: 100, description: 'Max entries.' },
+      },
+      required: [],
+    },
+  }),
+  tool({
+    name: 'plugin_get_events',
+    title: 'Get plugin events',
+    group: 'plugin',
+    description: 'Read buffered plugin events.',
+    inputJsonSchema: {
+      type: 'object',
+      properties: { pluginId: { type: 'string' }, limit: { type: 'integer', default: 50 } },
+      required: ['pluginId'],
+    },
+  }),
+]
+
+describe('progressive tools discovery', () => {
+  it('formatGroupIndex renders counts, previews, and the drill-down footer', () => {
+    const index = formatGroupIndex('Demo', CATALOG)
+    expect(index).toContain('4 tools from Demo · 3 groups')
+    expect(index).toContain('react.render')
+    expect(index).toContain('react_get_renders, react_clear_renders')
+    expect(index).toContain('genie tools <group>')
+    expect(index).not.toContain('staleOnly')
+  })
+
+  it('resolveToolsSelector prefers exact tool, then group, then suggests', () => {
+    expect(resolveToolsSelector(CATALOG, 'query_list')).toMatchObject({ kind: 'tool' })
+    const group = resolveToolsSelector(CATALOG, 'react.render')
+    expect(group.kind).toBe('group')
+    if (group.kind === 'group') expect(group.tools).toHaveLength(2)
+    const unknown = resolveToolsSelector(CATALOG, 'renders')
+    expect(unknown.kind).toBe('unknown')
+    if (unknown.kind === 'unknown') {
+      expect(unknown.message).toContain('react_get_renders')
+      expect(unknown.message).toContain('Groups: plugin, query, react.render')
+    }
+  })
+
+  it('formatToolDetail shows the description, per-param lines, and a runnable example', () => {
+    const detail = formatToolDetail(CATALOG[3] as never)
+    expect(detail).toContain('plugin_get_events — Get plugin events [plugin]')
+    expect(detail).toContain('Read buffered plugin events.')
+    expect(detail).toContain('pluginId: string')
+    expect(detail).toContain('limit?: integer (default 50)')
+    expect(detail).toContain(`example: genie call plugin_get_events '{"pluginId":"<pluginId>"}'`)
+  })
+})
+
+describe('new summarizers', () => {
+  it('summarizeStatus: single session is one line; multi-session lists full ids', () => {
+    expect(
+      summarizeStatus({
+        connected: true,
+        app: { name: 'Demo', reactVersion: '19.2.7' },
+        toolCount: 51,
+        sessions: [{ sessionId: 'abc', app: { name: 'Demo' }, current: true }],
+      }),
+    ).toBe('connected · Demo · react 19.2.7 · 51 tools')
+    const multi = summarizeStatus({
+      connected: true,
+      app: { name: 'Demo' },
+      toolCount: 51,
+      sessions: [
+        { sessionId: 'aaa-111', app: { url: 'http://x/?_genie=a' }, current: true },
+        { sessionId: 'bbb-222', app: { url: 'http://x/?_genie=b' }, current: false },
+      ],
+    })
+    expect(multi).toContain('2 sessions')
+    expect(multi).toContain('aaa-111 · http://x/?_genie=a · (current)')
+    expect(multi).toContain('--session <id>')
+    expect(summarizeStatus({ connected: false, sessions: [] })).toContain('not connected')
+    expect(summarizeStatus({ nope: 1 })).toBeNull()
+  })
+
+  it('summarizeQueryList: header flags + one line per query', () => {
+    const outText = summarizeQueryList({
+      total: 2,
+      churn: { orphaned: 1, families: [] },
+      queries: [
+        {
+          queryHash: '["a"]',
+          queryKey: ['a'],
+          status: 'success',
+          fetchStatus: 'idle',
+          isStale: true,
+          isActive: true,
+          observerCount: 1,
+          dataUpdatedAt: 1,
+          recentFetches: 3,
+        },
+      ],
+    })
+    expect(outText).toContain('2 queries (showing 1) · 1 stale · ⚠ 1 orphaned (churn)')
+    expect(outText).toContain('["a"] · success · stale · 1 obs · ⚠ 3 fetches/10s')
+    expect(summarizeQueryList({ queries: 'nope' })).toBeNull()
+  })
+
+  it('summarizeErrorState: caught + suspended + hint; empty state is one calm line', () => {
+    const outText = summarizeErrorState({
+      caughtErrors: [
+        {
+          boundaryId: 47,
+          boundaryName: 'LabErrorBoundary',
+          boundarySource: { file: 'src/App.tsx', line: 59, column: 1, functionName: null },
+          throwingComponent: 'Bomb',
+          message: 'boom',
+          stack: null,
+          isLibraryBoundary: false,
+        },
+      ],
+      suspended: [
+        {
+          boundaryId: 71,
+          boundaryName: 'Zone',
+          source: null,
+          isFallbackShowing: true,
+        },
+      ],
+      blankTreeHint: 'subtree unmounted',
+    })
+    expect(outText).toContain('1 caught · 1 suspended')
+    expect(outText).toContain('LabErrorBoundary #47 caught "boom" from Bomb (App.tsx:59)')
+    expect(outText).toContain('Zone #71 fallback SHOWING')
+    expect(outText).toContain('hint: subtree unmounted')
+    expect(summarizeErrorState({ caughtErrors: [], suspended: [] })).toBe(
+      'no caught errors · nothing suspended',
+    )
+  })
+
+  it('summarizeProfile: four leaderboards on one screen', () => {
+    const outText = summarizeProfile({
+      commits: 5,
+      tracking: true,
+      slowest: [{ id: 1, name: 'Dash', selfTime: 12.06, renders: 5 }],
+      mostRerendered: [{ id: 2, name: 'Row', renders: 9, unnecessary: 4 }],
+      mostUnnecessary: [{ id: 2, name: 'Row', unnecessary: 4, renders: 9 }],
+      mostUnstable: [{ id: 3, name: 'Badge', unstableRenders: 3, renders: 5 }],
+    })
+    expect(outText).toContain('5 commits')
+    expect(outText).toContain('slowest: Dash 12.1ms×5')
+    expect(outText).toContain('re-rendered: Row 9×')
+    expect(outText).toContain('unnecessary: Row 4/9')
+    expect(outText).toContain('unstable: Badge 3/5')
+  })
+
+  it('summarizeRouterState: one line with location, status, and match counts', () => {
+    expect(
+      summarizeRouterState({
+        pathname: '/dash',
+        searchStr: '?tab=kpi',
+        href: '/dash?tab=kpi',
+        status: 'idle',
+        isLoading: false,
+        isTransitioning: false,
+        matchCount: 2,
+        pendingMatchCount: 0,
+      }),
+    ).toBe('"/dash?tab=kpi" · idle · 2 matches')
   })
 })
 
