@@ -1,5 +1,10 @@
 # Genie React
 
+[![npm version](https://img.shields.io/npm/v/genie-react.svg)](https://www.npmjs.com/package/genie-react)
+[![npm downloads](https://img.shields.io/npm/dm/genie-react.svg)](https://www.npmjs.com/package/genie-react)
+[![CLI](https://img.shields.io/npm/v/@genie-react/cli.svg?label=%40genie-react%2Fcli)](https://www.npmjs.com/package/@genie-react/cli)
+[![license](https://img.shields.io/npm/l/genie-react.svg)](./LICENSE)
+
 > Live DevTools for your running React + TanStack app — driven from the terminal by your AI agent, through one CLI.
 
 The idea is simple: give your AI coding agent the same view into the running app that you have as an engineer — so it doesn't have to guess from the source code, or wait for you to describe what's happening. Genie connects the agent (Claude Code, Codex, OpenCode, PI, etc.) to your app's live DevTools while it runs. It can **see** what's going on and **act** on it, across everything you'd normally open by hand: all of TanStack's DevTools (Query, Router, with more on the way), any custom devtools you've built on top of TanStack, and React's own internals — which components rendered and why, what's slow, what data is loaded, and more. Taking that back-and-forth out of the way lets the agent work on its own and, most importantly, check its own work end to end: it can confirm a change really works, find what's slow, and improve performance against the real app instead of hoping the code is right.
