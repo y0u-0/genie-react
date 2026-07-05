@@ -64,22 +64,30 @@ export function registerFiber(fiber: Fiber): NodeId {
   return id
 }
 
+// Last committed FiberRoot's current fiber: the DOM-free way to find the tree (React Native has no document to seed from).
+let committedRootFiber: Fiber | null = null
+
+export function noteCommittedRoot(rootCurrent: Fiber): void {
+  committedRootFiber = rootCurrent
+}
+
 export function findRootFiber(): Fiber | null {
-  if (typeof document === 'undefined') return null
-  const seeds: Array<Element | null> = [
-    document.getElementById('root'),
-    document.body,
-    document.documentElement,
-  ]
-  for (const seed of seeds) {
-    const fiber = seed ? getFiberFromHostInstance(seed) : null
-    if (fiber) return climbToRoot(fiber)
+  if (typeof document !== 'undefined') {
+    const seeds: Array<Element | null> = [
+      document.getElementById('root'),
+      document.body,
+      document.documentElement,
+    ]
+    for (const seed of seeds) {
+      const fiber = seed ? getFiberFromHostInstance(seed) : null
+      if (fiber) return climbToRoot(fiber)
+    }
+    for (const element of Array.from(document.querySelectorAll('body *')).slice(0, 50)) {
+      const fiber = getFiberFromHostInstance(element)
+      if (fiber) return climbToRoot(fiber)
+    }
   }
-  for (const element of Array.from(document.querySelectorAll('body *')).slice(0, 50)) {
-    const fiber = getFiberFromHostInstance(element)
-    if (fiber) return climbToRoot(fiber)
-  }
-  return null
+  return committedRootFiber ? climbToRoot(committedRootFiber) : null
 }
 
 function climbToRoot(fiber: Fiber): Fiber {
@@ -393,17 +401,26 @@ export interface DomForResult {
 const isElement = (node: unknown): node is Element =>
   typeof node === 'object' && node !== null && (node as { nodeType?: number }).nodeType === 1
 
-/** Maps a component to the DOM element(s) it renders — its nearest host fibers' `stateNode` — skipping text/comment host nodes. */
+/** The host node(s) a component renders: DOM elements get a CSS selector, React Native views a testID/accessibility locator. */
 export function domForFiber(fiber: Fiber, options: { limit: number }): DomForResult {
   const elements: HostElementInfo[] = []
   let total = 0
-  for (const host of getNearestHostFibers(fiber)) {
-    if (!isElement(host.stateNode)) continue
+  const push = (info: HostElementInfo): void => {
     total += 1
-    if (elements.length < options.limit) elements.push(describeHostElement(host.stateNode))
+    if (elements.length < options.limit) elements.push(info)
+  }
+  for (const host of getNearestHostFibers(fiber)) {
+    if (isElement(host.stateNode)) push(describeHostElement(host.stateNode))
+    else if (isNativeHostFiber(host)) push(describeNativeHostFiber(host))
   }
   return { id: asNodeId(getFiberId(fiber)), name: nameOf(fiber), elements, total }
 }
+
+const isNativeHostFiber = (fiber: Fiber): boolean =>
+  typeof fiber.type === 'string' && typeof fiber.stateNode === 'object' && fiber.stateNode !== null
+
+const strProp = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() ? value.trim() : null
 
 const attrOf = (el: Element, name: string): string | null => {
   const value = el.getAttribute?.(name)?.trim()
@@ -434,6 +451,25 @@ export function describeHostElement(el: Element): HostElementInfo {
 
 const truncateText = (text: string): string =>
   text.length > MAX_ELEMENT_TEXT ? `${text.slice(0, MAX_ELEMENT_TEXT)}…` : text
+
+/** RN analog of describeHostElement. Exported for tests. */
+export function describeNativeHostFiber(fiber: Fiber): HostElementInfo {
+  const tag = typeof fiber.type === 'string' ? fiber.type : 'host'
+  const props = (fiber.memoizedProps ?? {}) as Record<string, unknown>
+  const testId = strProp(props.testID)
+  const rawText = strProp(props.children) ?? strProp(props.text)
+  return {
+    tag,
+    selector: testId ? `[testID=${JSON.stringify(testId)}]` : tag,
+    domId: null,
+    testId,
+    role: strProp(props.accessibilityRole) ?? strProp(props.role),
+    ariaLabel: strProp(props.accessibilityLabel) ?? strProp(props['aria-label']),
+    name: strProp(props.nativeID),
+    classes: [],
+    text: rawText ? truncateText(rawText) : null,
+  }
+}
 
 // Utility-framework classes (`hover:bg-x`, `md:flex`) are not valid bare selectors, so only simple tokens follow the dot; role/testId/text ride alongside for semantic locators.
 const SIMPLE_CLASS = /^[a-zA-Z_][\w-]*$/

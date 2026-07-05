@@ -16,7 +16,7 @@ import {
 } from 'bippy'
 import { clearEffects, recordEffect } from './effect-tracker'
 import { clearErrorState, recordErrorState } from './error-tracker'
-import { nameOf } from './fiber'
+import { nameOf, noteCommittedRoot } from './fiber'
 import { classifyFiber, clearSourceCache, type ResolvedSource, sourceLabel } from './source'
 
 export interface RenderChange {
@@ -70,6 +70,7 @@ export function startRenderTracking(): boolean {
         name: 'genie-react',
         onCommitFiberRoot: (_rendererId: number, root: FiberRoot) => {
           commits += 1
+          if (root.current) noteCommittedRoot(root.current)
           traverseRenderedFibers(root, (fiber, phase) => {
             recordRender(fiber, phase)
             recordEffect(fiber, phase)

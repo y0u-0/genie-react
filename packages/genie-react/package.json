@@ -30,6 +30,10 @@
       "types": "./dist/collectors.d.ts",
       "import": "./dist/collectors.js"
     },
+    "./native": {
+      "types": "./dist/native.d.ts",
+      "import": "./dist/native.js"
+    },
     "./script": {
       "types": "./dist/script.d.ts",
       "import": "./dist/script.js"

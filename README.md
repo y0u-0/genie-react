@@ -56,6 +56,21 @@ createGenieClient({
 }).start()
 ```
 
+**React Native / Expo**: `genie-react/native` wires the DOM-free collectors (React, memory, perf, plugins) and takes your TanStack instances by value, so it loads under Metro whether or not TanStack is installed. Run the hub on your dev machine (`npx @genie-react/cli hub`), then start Genie from your app entry, dev-only:
+
+```tsx
+import { Genie } from 'genie-react/native'
+
+// iOS simulator: localhost, Android emulator: 10.0.2.2, physical device: your machine's LAN IP
+{__DEV__ && <Genie url="ws://localhost:4390/__genie/ws" />}
+```
+
+Or imperatively (e.g. in `index.js`, before `registerRootComponent`): `if (__DEV__) startGenie({ url: 'ws://localhost:4390/__genie/ws' })`. Pass `queryClient` / `router` to add the Query / Router tools: `<Genie url={...} queryClient={queryClient} />`.
+
+The React tools, `browser_fps`, and the Query/Router tools work as they do on the web. `react_dom_for_component` reports the native view(s) a component renders with their `testID` / accessibility props (there are no CSS selectors). `browser_get_memory` is a Chromium-only API and reports unsupported; `react_component_for_dom` needs a DOM and is unavailable.
+
+For driving the app, pair with **agent-device** (the React Native hands: taps, types, and screenshots the simulator or device), the role agent-browser plays on the web.
+
 Then drive it:
 
 ```bash
@@ -142,7 +157,7 @@ Dev-only and local: the Vite plugin is inert in production builds, the browser c
 
 ## Packages
 
-- `genie-react` — everything app-side, one package with subpath exports: the `<Genie />` component (`genie-react`), the Vite plugin (`genie-react/vite`), `<GenieScript />` for any SSR root layout (`genie-react/script`), Next.js helpers (`genie-react/next`), the injected client (`genie-react/client`, `genie-react/hook`), every collector for manual composition (`genie-react/collectors` — e.g. `queryCollector` in an app without TanStack Router), the WS hub (`genie-react/hub`), and the wire protocol (`genie-react/protocol`)
+- `genie-react` — everything app-side, one package with subpath exports: the `<Genie />` component (`genie-react`), the Vite plugin (`genie-react/vite`), `<GenieScript />` for any SSR root layout (`genie-react/script`), Next.js helpers (`genie-react/next`), the injected client (`genie-react/client`, `genie-react/hook`), every collector for manual composition (`genie-react/collectors` — e.g. `queryCollector` in an app without TanStack Router), the React Native / Expo entry (`genie-react/native`), the WS hub (`genie-react/hub`), and the wire protocol (`genie-react/protocol`)
 - `@genie-react/cli` — the agent interface: `init` / `doctor` / `link`, `status` / `tools` / `call`
 
 MIT © Genie React Agent contributors

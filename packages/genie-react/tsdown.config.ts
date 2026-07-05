@@ -16,6 +16,7 @@ export default defineConfig([
       hook: 'src/collectors/react/hook.ts',
       client: 'src/client-entry.ts',
       collectors: 'src/collectors/index.ts',
+      native: 'src/native/index.ts',
       script: 'src/script.ts',
       next: 'src/next/index.ts',
       protocol: 'src/protocol/index.ts',
