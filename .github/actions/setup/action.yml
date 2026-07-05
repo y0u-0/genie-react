@@ -1,0 +1,25 @@
+name: Setup
+description: Install pnpm and Node, then restore dependencies from the lockfile.
+
+inputs:
+  registry-url:
+    description: npm registry to authenticate against (only needed for publishing).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+        registry-url: ${{ inputs.registry-url }}
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

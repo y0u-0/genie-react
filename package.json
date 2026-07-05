@@ -21,6 +21,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "biome check . && node scripts/check-comments.mjs",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "format": "biome format --write .",
     "fix": "biome check --write .",
     "changeset": "changeset",
@@ -31,6 +32,7 @@
     "@biomejs/biome": "^2.5.1",
     "@changesets/cli": "^2.31.0",
     "@types/node": "^26.0.1",
+    "pkg-pr-new": "^0.0.75",
     "tsdown": "^0.22.3",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"

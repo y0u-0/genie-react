@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/genie-react.svg)](https://www.npmjs.com/package/genie-react)
 [![npm downloads](https://img.shields.io/npm/dm/genie-react.svg)](https://www.npmjs.com/package/genie-react)
 [![CLI](https://img.shields.io/npm/v/@genie-react/cli.svg?label=%40genie-react%2Fcli)](https://www.npmjs.com/package/@genie-react/cli)
+[![CI](https://github.com/y0u-0/genie-react/actions/workflows/ci.yml/badge.svg)](https://github.com/y0u-0/genie-react/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/genie-react.svg)](./LICENSE)
 
 > Live DevTools for your running React + TanStack app — driven from the terminal by your AI agent, through one CLI.
@@ -66,6 +67,17 @@ npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
 ```
 
 Run `npx @genie-react/cli doctor` to check the wiring — `doctor --live` also probes the running hub, the served client, and a session round-trip. Stale `.genie/bridge.json` files left by a killed dev server are detected and cleaned up automatically.
+
+## Try a change before it ships
+
+Every pull request and every push to `main` publishes preview builds to [pkg.pr.new](https://pkg.pr.new) — no npm release required. Install the exact code from a PR or commit by its SHA:
+
+```bash
+pnpm add -D https://pkg.pr.new/genie-react@<sha>
+npx https://pkg.pr.new/@genie-react/cli@<sha> status
+```
+
+The Preview Release workflow comments the ready-to-copy URLs on each PR.
 
 ## Give your agent the skill
 
