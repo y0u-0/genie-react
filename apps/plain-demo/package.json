@@ -21,7 +21,7 @@
     "@genie-react/cli": "workspace:*",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.1",
     "genie-react": "workspace:*",
     "typescript": "^6"
   }
