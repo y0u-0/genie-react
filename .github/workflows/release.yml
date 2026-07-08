@@ -32,9 +32,6 @@ jobs:
       - name: Setup
         uses: ./.github/actions/setup
 
-      - name: Upgrade npm for trusted publishing
-        run: npm install --global npm@latest
-
       - name: Create Release Pull Request or Publish
         uses: changesets/action@v1
         with:
@@ -42,3 +39,5 @@ jobs:
           publish: pnpm release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # pnpm runs the publish and auto-generates a provenance attestation under OIDC, but its sigstore path fails to resolve; disable provenance so OIDC trusted publishing still authenticates and ships.
+          NPM_CONFIG_PROVENANCE: "false"
