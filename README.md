@@ -63,11 +63,12 @@ createGenieClient({
 ```tsx
 import { Genie } from 'genie-react/native'
 
-// iOS simulator: localhost, Android emulator: 10.0.2.2, physical device: your machine's LAN IP
-{__DEV__ && <Genie url="ws://localhost:4390/__genie/ws" />}
+// iOS simulator: 127.0.0.1, Android emulator: 10.0.2.2, physical device: your machine's LAN IP
+// Use 127.0.0.1, not localhost — the hub binds IPv4 loopback, and some runtimes resolve localhost to IPv6 (::1) first.
+{__DEV__ && <Genie url="ws://127.0.0.1:4390/__genie/ws" />}
 ```
 
-Or imperatively (e.g. in `index.js`, before `registerRootComponent`): `if (__DEV__) startGenie({ url: 'ws://localhost:4390/__genie/ws' })`. Pass `queryClient` / `router` to add the Query / Router tools: `<Genie url={...} queryClient={queryClient} />` — on the first render or any later one; Genie registers them onto the running client. Needs Metro with `package.json` exports enabled (React Native 0.79+ / Expo SDK 53+).
+Or imperatively (e.g. in `index.js`, before `registerRootComponent`): `if (__DEV__) startGenie({ url: 'ws://127.0.0.1:4390/__genie/ws' })`. Pass `queryClient` / `router` to add the Query / Router tools: `<Genie url={...} queryClient={queryClient} />` — on the first render or any later one; Genie registers them onto the running client. Needs Metro with `package.json` exports enabled (React Native 0.79+ / Expo SDK 53+).
 
 The React tools, `browser_fps`, and the Query/Router tools work as they do on the web. `react_dom_for_component` reports the native view(s) a component renders with their `testID` / accessibility props (there are no CSS selectors). `browser_get_memory` reports the Hermes heap when the runtime exposes `performance.memory` (RN 0.85+ does), otherwise unsupported; `react_component_for_dom` needs a DOM and is unavailable.
 

@@ -6,6 +6,7 @@ const noopContext: CollectorContext = {
   pushSnapshot: vi.fn(),
   pushEvent: vi.fn(),
   refreshTools: vi.fn(),
+  markActivity: vi.fn(),
 }
 
 function toolByName(tools: ErasedCollectorTool[] | undefined, name: string): ErasedCollectorTool {

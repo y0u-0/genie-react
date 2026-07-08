@@ -6,6 +6,8 @@ export interface CollectorContext {
   pushSnapshot: (domain: string, data: unknown) => void
   pushEvent: (domain: string, event: unknown) => void
   refreshTools: () => void
+  /** Report that the app is doing work (e.g. a React commit) so a throttled heartbeat rides the render loop; keeps a commit-saturated thread from reading as busy when the interval timer is starved. */
+  markActivity: () => void
 }
 
 export interface CollectorTool<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType> {

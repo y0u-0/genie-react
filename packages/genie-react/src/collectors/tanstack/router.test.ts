@@ -7,6 +7,7 @@ const ctx: CollectorContext = {
   pushSnapshot() {},
   pushEvent() {},
   refreshTools() {},
+  markActivity() {},
 }
 
 function call<T = unknown>(collector: GenieCollector, name: string, args: unknown): Promise<T> | T {

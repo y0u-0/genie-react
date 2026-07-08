@@ -560,6 +560,15 @@ export class GenieBridge {
       }
       this.clearPendingTimers(pending)
       this.pending.delete(id)
+      // Past the stale threshold the app is not merely busy but likely reloading or hung; retrying won't help, so drop the retry hint and point at reload / an explicit timeoutMs.
+      if (gap > this.sessionStaleMs) {
+        settle({
+          ok: false,
+          errorCode: 'busy',
+          error: `App unresponsive (no heartbeat for ${gap}ms) — likely reloading, frozen, or its JS thread is stuck; retrying won't help. Reload the app, or pass a larger timeoutMs to wait it out.`,
+        })
+        return
+      }
       settle({
         ok: false,
         errorCode: 'busy',

@@ -91,6 +91,13 @@ export function createCommitAnalysisBudget(
   return { processed: 0, skipped: 0, limit }
 }
 
+let commitListener: (() => void) | null = null
+
+/** Register a per-commit callback (the client's liveness pump). Called on every commit — even while paused — because a committing thread is alive regardless of whether we record it. */
+export function setCommitListener(listener: (() => void) | null): void {
+  commitListener = listener
+}
+
 /** Installs commit-time instrumentation (idempotent) and (re)enables tracking; the DevTools hook must already be present before React loads, or no commits are delivered. */
 export function startRenderTracking(): boolean {
   paused = false
@@ -100,6 +107,7 @@ export function startRenderTracking(): boolean {
       secure({
         name: 'genie-react',
         onCommitFiberRoot: (_rendererId: number, root: FiberRoot) => {
+          commitListener?.()
           if (paused) return
           commits += 1
           noteCommittedRoot(root)

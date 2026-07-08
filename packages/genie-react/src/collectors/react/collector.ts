@@ -58,6 +58,7 @@ import {
   getRendersReport,
   isTracking,
   rendersDiff,
+  setCommitListener,
   startRenderTracking,
   stopRenderTracking,
   takeSnapshot,
@@ -87,9 +88,12 @@ export function reactCollector(): GenieCollector {
       const reactVersion = detectReactVersion()
       return reactVersion ? { reactVersion } : {}
     },
-    start: () => {
+    start: (ctx) => {
       // Fallback for setups that did not load the hook early — captures future commits only.
       startRenderTracking()
+      // Ride the commit loop with a throttled heartbeat so an animation- or list-saturated thread stays live.
+      setCommitListener(ctx.markActivity)
+      return () => setCommitListener(null)
     },
     tools: [
       defineCollectorTool({

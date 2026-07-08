@@ -500,6 +500,40 @@ describe('GenieBridge', () => {
     }
   })
 
+  it('escalates the busy message to "unresponsive" (no retry hint) once the gap crosses the stale threshold', async () => {
+    const fastHandle = createStandaloneBridge({
+      requestTimeoutMs: 20_000,
+      busyProbeMs: 200,
+      busyHeartbeatGapMs: 50,
+      sessionStaleMs: 120,
+    })
+    const fastUrl = (await fastHandle.listen()).url
+    try {
+      const app = await connect(`${fastUrl}?role=app`)
+      send(app, {
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId: 's-dead',
+        app: { name: 'dead' },
+        capabilities: [],
+        tools: [],
+      })
+      send(app, { kind: 'app/heartbeat', sessionId: 's-dead' })
+      await expect.poll(() => fastHandle.bridge.getStatus().connected).toBe(true)
+
+      const { ws: agent, inbox } = await open(`${fastUrl}?role=agent`)
+      const id = newId()
+      // First probe at 200ms sees a ~200ms gap: past both the busy (50ms) and stale (120ms) thresholds → the escalated message.
+      send(agent, { kind: 'agent/invoke', id, tool: 'never_responds', args: {} })
+      const result = await inbox.wait(isResult(id), 5000)
+      expect(result.errorCode).toBe('busy')
+      expect(result.error).toContain('unresponsive')
+      expect(result.retryInMs).toBeUndefined()
+    } finally {
+      await fastHandle.close()
+    }
+  })
+
   it('routes default calls away from a heartbeat-stale session to a fresh one, and flags it in status', async () => {
     const fastHandle = createStandaloneBridge({ requestTimeoutMs: 4_000, sessionStaleMs: 150 })
     const fastUrl = (await fastHandle.listen()).url

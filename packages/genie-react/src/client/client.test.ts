@@ -214,5 +214,38 @@ describe('GenieClient', () => {
       vi.advanceTimersByTime(5_000)
       expect(socket.decoded().filter((m) => m.kind === 'app/heartbeat')).toHaveLength(before)
     })
+
+    it('pumps a throttled heartbeat on commit activity even while the interval timer is starved', () => {
+      vi.useFakeTimers()
+      const commits: { pump: () => void } = { pump: () => {} }
+      const socket = new FakeSocket()
+      const client = createGenieClient({
+        appName: 'saturated',
+        collectors: [
+          defineCollector({
+            meta: { id: 'commits', title: 'Commits' },
+            start: (ctx) => {
+              commits.pump = ctx.markActivity
+            },
+          }),
+        ],
+        socketFactory: () => socket,
+      })
+      client.start()
+      socket.open()
+      const heartbeats = () => socket.decoded().filter((m) => m.kind === 'app/heartbeat')
+      expect(heartbeats()).toHaveLength(0)
+
+      // A commit sends immediately; a burst is throttled to at most one per interval.
+      commits.pump()
+      commits.pump()
+      commits.pump()
+      expect(heartbeats()).toHaveLength(1)
+
+      // Wall-clock advances but the macrotask interval never fires (a saturated event loop); a commit still keeps liveness flowing.
+      vi.setSystemTime(Date.now() + 5_000)
+      commits.pump()
+      expect(heartbeats()).toHaveLength(2)
+    })
   })
 })

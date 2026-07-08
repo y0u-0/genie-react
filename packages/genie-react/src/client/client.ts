@@ -49,6 +49,8 @@ export class GenieClient {
   private started = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private heartbeatFrame: string | null = null
+  private lastHeartbeatSentAt = 0
 
   constructor(options: GenieClientOptions) {
     this.url = options.url ?? defaultBridgeUrl()
@@ -116,11 +118,8 @@ export class GenieClient {
 
   private startHeartbeat(): void {
     this.stopHeartbeat()
-    // The frame is constant for the session; encode once instead of per tick.
-    const frame = encodeMessage({ kind: 'app/heartbeat', sessionId: this.sessionId })
-    this.heartbeatTimer = setInterval(() => {
-      if (this.socket?.readyState === SOCKET_OPEN) this.socket.send(frame)
-    }, HEARTBEAT_INTERVAL_MS)
+    this.lastHeartbeatSentAt = 0
+    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), HEARTBEAT_INTERVAL_MS)
     // Node-only guard so the interval never keeps a test process (or an SSR host) alive.
     if (
       typeof this.heartbeatTimer === 'object' &&
@@ -128,6 +127,17 @@ export class GenieClient {
       'unref' in this.heartbeatTimer
     )
       this.heartbeatTimer.unref()
+  }
+
+  // Sends at most one heartbeat per interval whether the timer or a commit triggered it: the interval covers idle apps; commit-driven sends keep a saturated thread alive when the macrotask timer is starved.
+  private sendHeartbeat(): void {
+    if (this.socket?.readyState !== SOCKET_OPEN) return
+    const now = Date.now()
+    if (now - this.lastHeartbeatSentAt < HEARTBEAT_INTERVAL_MS) return
+    // The frame is constant for the session; encode once.
+    this.heartbeatFrame ??= encodeMessage({ kind: 'app/heartbeat', sessionId: this.sessionId })
+    this.socket.send(this.heartbeatFrame)
+    this.lastHeartbeatSentAt = now
   }
 
   private stopHeartbeat(): void {
@@ -152,6 +162,7 @@ export class GenieClient {
         this.send({ kind: 'app/snapshot', domain, data, ts: Date.now() }),
       pushEvent: (domain, event) => this.send({ kind: 'app/event', domain, event, ts: Date.now() }),
       refreshTools: () => this.sendHello(),
+      markActivity: () => this.sendHeartbeat(),
     }
   }
 
