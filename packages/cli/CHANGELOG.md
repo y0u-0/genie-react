@@ -1,5 +1,18 @@
 # @genie-react/cli
 
+## 0.4.0
+
+### Minor Changes
+
+- 8d4d7bf: Better agent experience: typed errors with retry hints, fast busy detection, hook kinds and overrides by stateful index, override list/reset, render snapshot/diff, CLI `batch` / `--fields` / `--timeout`, and one bin name: `genie-react`.
+
+### Patch Changes
+
+- Updated dependencies [8d4d7bf]
+- Updated dependencies [8c945ed]
+- Updated dependencies [5314fbf]
+  - genie-react@0.4.0
+
 ## 0.3.0
 
 ### Minor Changes

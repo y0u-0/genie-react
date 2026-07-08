@@ -1,6 +1,6 @@
 {
   "name": "genie-react",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Live DevTools for a running React + TanStack app, driven from the terminal by an AI agent — browser collectors, the <Genie /> component, the Vite plugin, and the WebSocket hub in one package.",
   "license": "MIT",
