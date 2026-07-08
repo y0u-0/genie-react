@@ -1,18 +1,43 @@
 // @vitest-environment jsdom
 
-import { type Fiber, FunctionComponentTag, HostComponentTag, HostRootTag } from 'bippy'
+import {
+  type Fiber,
+  type FiberRoot,
+  FunctionComponentTag,
+  HostComponentTag,
+  HostRootTag,
+} from 'bippy'
 import { afterEach, describe, expect, it } from 'vitest'
-import { describeNativeHostFiber, domForFiber, findRootFiber, noteCommittedRoot } from './fiber'
-
-const NO_ROOT = null as unknown as Fiber
+import {
+  describeNativeHostFiber,
+  domForFiber,
+  findRootFiber,
+  forgetCommittedRoots,
+  noteCommittedRoot,
+} from './fiber'
 
 afterEach(() => {
   document.body.innerHTML = ''
-  noteCommittedRoot(NO_ROOT)
+  forgetCommittedRoots()
 })
 
-const rootFiber = (): Fiber =>
+// A mounted root: current has a child, the liveness signal noteCommittedRoot keys on.
+const rootFiber = (): Fiber => {
+  const root = { tag: HostRootTag, return: null, alternate: null, child: null } as unknown as Fiber
+  ;(root as { child: unknown }).child = {
+    tag: HostComponentTag,
+    return: root,
+    alternate: null,
+    child: null,
+    sibling: null,
+  }
+  return root
+}
+
+const emptiedRootFiber = (): Fiber =>
   ({ tag: HostRootTag, return: null, alternate: null, child: null }) as unknown as Fiber
+
+const asRoot = (current: Fiber | null): FiberRoot => ({ current }) as unknown as FiberRoot
 
 const nativeHost = (
   type: unknown,
@@ -76,23 +101,54 @@ describe('findRootFiber', () => {
 
   it('returns the captured root when there is no DOM to seed from', () => {
     const root = rootFiber()
-    noteCommittedRoot(root)
+    noteCommittedRoot(asRoot(root))
     expect(findRootFiber()).toBe(root)
   })
 
-  it('climbs to the topmost fiber when a deep fiber is captured', () => {
+  it('climbs to the topmost fiber if the stored current is not the root', () => {
     const root = rootFiber()
-    const mid = { tag: FunctionComponentTag, return: root, alternate: null } as unknown as Fiber
-    const leaf = { tag: HostComponentTag, return: mid, alternate: null } as unknown as Fiber
-    noteCommittedRoot(leaf)
+    const mid = {
+      tag: FunctionComponentTag,
+      return: root,
+      alternate: null,
+      child: root.child,
+    } as unknown as Fiber
+    noteCommittedRoot(asRoot(mid))
     expect(findRootFiber()).toBe(root)
   })
 
-  it('uses the most recently committed root', () => {
+  it('keeps the first live root when a second root commits later', () => {
     const first = rootFiber()
     const second = rootFiber()
+    noteCommittedRoot(asRoot(first))
+    noteCommittedRoot(asRoot(second))
+    expect(findRootFiber()).toBe(first)
+  })
+
+  it('follows a recommit of the same root to its new current fiber', () => {
+    const root = asRoot(rootFiber())
+    const after = rootFiber()
+    noteCommittedRoot(root)
+    ;(root as { current: Fiber }).current = after
+    noteCommittedRoot(root)
+    expect(findRootFiber()).toBe(after)
+  })
+
+  it('returns null after the only root unmounts (empty commit)', () => {
+    const root = asRoot(rootFiber())
+    noteCommittedRoot(root)
+    ;(root as { current: Fiber }).current = emptiedRootFiber()
+    noteCommittedRoot(root)
+    expect(findRootFiber()).toBeNull()
+  })
+
+  it('falls over to the next live root when the first unmounts', () => {
+    const first = asRoot(rootFiber())
+    const second = rootFiber()
     noteCommittedRoot(first)
-    noteCommittedRoot(second)
+    noteCommittedRoot(asRoot(second))
+    ;(first as { current: Fiber }).current = emptiedRootFiber()
+    noteCommittedRoot(first)
     expect(findRootFiber()).toBe(second)
   })
 
@@ -101,7 +157,7 @@ describe('findRootFiber', () => {
     div.id = 'root'
     document.body.appendChild(div)
     const root = rootFiber()
-    noteCommittedRoot(root)
+    noteCommittedRoot(asRoot(root))
     expect(findRootFiber()).toBe(root)
   })
 
@@ -111,7 +167,7 @@ describe('findRootFiber', () => {
     div.id = 'root'
     ;(div as unknown as Record<string, unknown>).__reactFiber$test = domRoot
     document.body.appendChild(div)
-    noteCommittedRoot(rootFiber())
+    noteCommittedRoot(asRoot(rootFiber()))
     expect(findRootFiber()).toBe(domRoot)
   })
 })
@@ -158,9 +214,22 @@ describe('describeNativeHostFiber', () => {
     )
   })
 
-  it('ignores non-string children and text', () => {
+  it('reads text from number children', () => {
+    expect(describeNativeHostFiber(nativeHost('RCTText', { children: 42 })).text).toBe('42')
+  })
+
+  it('joins the string and number segments of interpolated children', () => {
+    expect(describeNativeHostFiber(nativeHost('RCTText', { children: ['Score: ', 42] })).text).toBe(
+      'Score: 42',
+    )
+    expect(describeNativeHostFiber(nativeHost('RCTText', { children: ['a', {}, 'b'] })).text).toBe(
+      'ab',
+    )
+  })
+
+  it('ignores children and text with no textual segments', () => {
     expect(describeNativeHostFiber(nativeHost('View', { children: [{}, {}] })).text).toBeNull()
-    expect(describeNativeHostFiber(nativeHost('View', { children: 42, text: {} })).text).toBeNull()
+    expect(describeNativeHostFiber(nativeHost('View', { children: {}, text: {} })).text).toBeNull()
   })
 
   it('truncates text over 80 characters', () => {

@@ -70,7 +70,7 @@ export function startRenderTracking(): boolean {
         name: 'genie-react',
         onCommitFiberRoot: (_rendererId: number, root: FiberRoot) => {
           commits += 1
-          if (root.current) noteCommittedRoot(root.current)
+          noteCommittedRoot(root)
           traverseRenderedFibers(root, (fiber, phase) => {
             recordRender(fiber, phase)
             recordEffect(fiber, phase)

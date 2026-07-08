@@ -1,12 +1,10 @@
 import { type QueryClient, QueryClientContext } from '@tanstack/react-query'
 import { useRouter } from '@tanstack/react-router'
 import { useContext, useEffect } from 'react'
-import { createGenieClient, type GenieCollector, sessionCollector } from '../client'
-import { pluginPassthroughCollector } from '../collectors/devtools-passthrough'
-import { memoryCollector } from '../collectors/memory'
-import { perfCollector } from '../collectors/perf'
+import { createGenieClient, sessionCollector } from '../client'
+import { defaultAppCollectors } from '../collectors/defaults'
 import { reactCollector } from '../collectors/react'
-import { queryCollector, routerCollector } from '../collectors/tanstack'
+import { isQueryClient } from '../collectors/tanstack/guards'
 import { readGenieGlobal } from '../protocol'
 
 let started = false
@@ -25,16 +23,6 @@ export interface GenieProps {
 // useRouter's type omits `undefined`, but the Vite-plugin peer stub and the no-provider case return it; this is the single widening for that boundary.
 function useOptionalRouter(): ReturnType<typeof useRouter> | undefined {
   return useRouter({ warn: false }) as ReturnType<typeof useRouter> | undefined
-}
-
-// One-method duck-type: strict enough to reject foreign context values, loose enough to survive query-core minors.
-function isQueryClient(value: unknown): value is QueryClient {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'getQueryCache' in value &&
-    typeof value.getQueryCache === 'function'
-  )
 }
 
 /** Reads a `QueryClient` off the router context when the app wired one in, otherwise `undefined`. */
@@ -63,13 +51,7 @@ export function Genie(props: GenieProps = {}): null {
     if (started || typeof window === 'undefined') return
     started = true
 
-    const collectors: GenieCollector[] = [
-      memoryCollector(),
-      perfCollector(),
-      pluginPassthroughCollector({ plugins }),
-    ]
-    if (router) collectors.push(routerCollector(router))
-    if (queryClient) collectors.push(queryCollector(queryClient))
+    const collectors = defaultAppCollectors({ plugins, router, queryClient })
 
     const existing = readGenieGlobal()
     if (existing) {

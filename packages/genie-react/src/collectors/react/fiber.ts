@@ -2,6 +2,7 @@ import {
   ClassComponentTag,
   type ContextDependency,
   type Fiber,
+  type FiberRoot,
   ForwardRefTag,
   FunctionComponentTag,
   getDisplayName,
@@ -64,11 +65,22 @@ export function registerFiber(fiber: Fiber): NodeId {
   return id
 }
 
-// Last committed FiberRoot's current fiber: the DOM-free way to find the tree (React Native has no document to seed from).
-let committedRootFiber: Fiber | null = null
+// Live committed roots in first-committed order: the DOM-free way to find the tree (React Native has no document to seed from).
+const committedRoots = new Map<FiberRoot, Fiber>()
 
-export function noteCommittedRoot(rootCurrent: Fiber): void {
-  committedRootFiber = rootCurrent
+// DevTools semantics: a commit whose current has no child is that root unmounting, so it stops being a candidate (and stops being retained).
+export function noteCommittedRoot(root: FiberRoot): void {
+  const current = root.current
+  if (!current || current.child === null) {
+    committedRoots.delete(root)
+    return
+  }
+  committedRoots.set(root, current)
+}
+
+/** Test-only escape hatch: drop every tracked root. */
+export function forgetCommittedRoots(): void {
+  committedRoots.clear()
 }
 
 export function findRootFiber(): Fiber | null {
@@ -87,7 +99,8 @@ export function findRootFiber(): Fiber | null {
       if (fiber) return climbToRoot(fiber)
     }
   }
-  return committedRootFiber ? climbToRoot(committedRootFiber) : null
+  const first = committedRoots.values().next()
+  return first.done ? null : climbToRoot(first.value)
 }
 
 function climbToRoot(fiber: Fiber): Fiber {
@@ -422,10 +435,21 @@ const isNativeHostFiber = (fiber: Fiber): boolean =>
 const strProp = (value: unknown): string | null =>
   typeof value === 'string' && value.trim() ? value.trim() : null
 
-const attrOf = (el: Element, name: string): string | null => {
-  const value = el.getAttribute?.(name)?.trim()
-  return value ? value : null
+// RN Text children are a string, a number, or an interpolation array (`Score: {count}` → ['Score: ', 42]).
+const textOf = (value: unknown): string | null => {
+  if (typeof value === 'string' || typeof value === 'number') return strProp(String(value))
+  if (Array.isArray(value)) {
+    const parts = value.filter(
+      (part) => typeof part === 'string' || typeof part === 'number',
+    ) as Array<string | number>
+    return strProp(parts.join(''))
+  }
+  return null
 }
+
+const attrOf = (el: Element, name: string): string | null => strProp(el.getAttribute?.(name))
+
+const attrSelector = (name: string, value: string): string => `[${name}=${JSON.stringify(value)}]`
 
 const MAX_ELEMENT_TEXT = 80
 
@@ -457,10 +481,10 @@ export function describeNativeHostFiber(fiber: Fiber): HostElementInfo {
   const tag = typeof fiber.type === 'string' ? fiber.type : 'host'
   const props = (fiber.memoizedProps ?? {}) as Record<string, unknown>
   const testId = strProp(props.testID)
-  const rawText = strProp(props.children) ?? strProp(props.text)
+  const rawText = textOf(props.children) ?? textOf(props.text)
   return {
     tag,
-    selector: testId ? `[testID=${JSON.stringify(testId)}]` : tag,
+    selector: testId ? attrSelector('testID', testId) : tag,
     domId: null,
     testId,
     role: strProp(props.accessibilityRole) ?? strProp(props.role),
@@ -481,7 +505,7 @@ function hostSelector(
   classes: string[],
 ): string {
   if (domId) return `#${domId}`
-  if (testId) return `[data-testid="${testId}"]`
+  if (testId) return attrSelector('data-testid', testId)
   const simple = classes.filter((token) => SIMPLE_CLASS.test(token)).slice(0, 3)
   return simple.length ? `${tag}.${simple.join('.')}` : tag
 }
