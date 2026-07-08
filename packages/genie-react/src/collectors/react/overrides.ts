@@ -327,6 +327,18 @@ export function pruneUnmountedOverrides(fiber: Fiber): void {
   }
 }
 
+/** Boundaries currently forced into their error state via react_force_error_boundary — so react_error_state can surface DevTools-driven errors alongside organic ones. Unmount pruning keeps the set to live fibers. */
+export function forcedErrorBoundaries(): Fiber[] {
+  const out: Fiber[] = []
+  for (const [fiber, forced] of forcedErrors) if (forced) out.push(fiber)
+  return out
+}
+
+/** Suspense boundaries currently forced to show their fallback via react_toggle_suspense_fallback. */
+export function forcedSuspenseBoundaries(): Fiber[] {
+  return [...forcedSuspense]
+}
+
 // ── Suspense fallback forcing ────────────────────────────────────────────────
 
 const suspenseHandlerInstalled = new WeakSet<DevRenderer>()

@@ -14,6 +14,13 @@ vi.mock('bippy/source', () => ({
   normalizeFileName: (file: string) => file,
 }))
 
+// The forced-boundary source lives in ./overrides; stub it so getErrorState's merge is unit-testable without the DevTools renderer.
+const forced = vi.hoisted(() => ({ errors: [] as unknown[], suspense: [] as unknown[] }))
+vi.mock('./overrides', () => ({
+  forcedErrorBoundaries: () => forced.errors,
+  forcedSuspenseBoundaries: () => forced.suspense,
+}))
+
 const asFiber = (shape: unknown): Fiber => shape as Fiber
 const DID_CAPTURE = 0b1000_0000
 
@@ -40,7 +47,11 @@ beforeAll(() => {
 afterAll(() => {
   console.error = originalError
 })
-beforeEach(() => clearErrorState())
+beforeEach(() => {
+  clearErrorState()
+  forced.errors = []
+  forced.suspense = []
+})
 
 describe('parseBoundaryError', () => {
   it('extracts the message, throwing component, and boundary from React 19.2 console.error args', () => {
@@ -129,5 +140,49 @@ describe('recordErrorState — suspense', () => {
     fiber.memoizedState = null
     recordErrorState(asFiber(fiber))
     expect((await getErrorState({})).suspended).toHaveLength(0)
+  })
+})
+
+describe('getErrorState — DevTools-forced boundaries', () => {
+  it('surfaces a forced error boundary flagged forced, without a DidCapture flag or console log', async () => {
+    forced.errors = [boundaryFiber('ForcedEB', 0)]
+    const state = await getErrorState({})
+    expect(state.caughtErrors).toHaveLength(1)
+    expect(state.caughtErrors[0]?.boundaryName).toBe('ForcedEB')
+    expect(state.caughtErrors[0]?.forced).toBe(true)
+    expect(state.caughtErrors[0]?.message).toMatch(/react_force_error_boundary/)
+    expect(state.blankTreeHint).toMatch(/react_reset_overrides/)
+  })
+
+  it('surfaces a forced suspense fallback flagged forced', async () => {
+    forced.suspense = [boundaryFiber('ForcedSusp', 0)]
+    const state = await getErrorState({})
+    expect(state.suspended).toHaveLength(1)
+    expect(state.suspended[0]?.boundaryName).toBe('ForcedSusp')
+    expect(state.suspended[0]?.forced).toBe(true)
+  })
+
+  it('marks organically caught boundaries forced:false', async () => {
+    recordErrorState(boundaryFiber('RealEB'))
+    expect((await getErrorState({})).caughtErrors[0]?.forced).toBe(false)
+  })
+
+  it('lets a real thrown error win the hint over a forced boundary and lists both', async () => {
+    console.error(...reactBoundaryArgs)
+    recordErrorState(boundaryFiber('ErrorBoundary'))
+    forced.errors = [boundaryFiber('ForcedEB', 0)]
+    const state = await getErrorState({})
+    expect(state.caughtErrors.map((c) => c.forced)).toEqual([false, true])
+    expect(state.blankTreeHint).toMatch(/ErrorBoundary/)
+    expect(state.blankTreeHint).not.toMatch(/react_reset_overrides/)
+  })
+
+  it('de-dupes a boundary that is both organically caught and forced (organic wins)', async () => {
+    const eb = boundaryFiber('DupEB')
+    recordErrorState(eb)
+    forced.errors = [eb]
+    const state = await getErrorState({})
+    expect(state.caughtErrors).toHaveLength(1)
+    expect(state.caughtErrors[0]?.forced).toBe(false)
   })
 })

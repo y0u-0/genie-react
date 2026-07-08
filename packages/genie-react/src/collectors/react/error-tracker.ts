@@ -7,6 +7,7 @@ import {
   traverseFiberSync,
 } from 'bippy'
 import { nameOf } from './fiber'
+import { forcedErrorBoundaries, forcedSuspenseBoundaries } from './overrides'
 import { classifyFiber, type ResolvedSource } from './source'
 
 // React's DidCapture flag is set on a boundary only during the catch commit, then cleared — transient, like fallback state, so both are recorded at commit time rather than scanned on demand.
@@ -120,6 +121,8 @@ export interface CaughtError {
   /** The thrower's file:line is in this stack; we don't resolve it separately (its fiber is gone). */
   stack: string | null
   isLibraryBoundary: boolean
+  /** True when the boundary is held in its error state by react_force_error_boundary rather than a real thrown error. */
+  forced: boolean
 }
 
 export interface SuspendedBoundary {
@@ -127,7 +130,11 @@ export interface SuspendedBoundary {
   boundaryName: string
   source: ResolvedSource | null
   isFallbackShowing: boolean
+  /** True when the fallback is held open by react_toggle_suspense_fallback rather than a real pending resource. */
+  forced: boolean
 }
+
+const FORCED_ERROR_MESSAGE = 'forced via react_force_error_boundary (no real error thrown)'
 
 export interface ErrorState {
   caughtErrors: CaughtError[]
@@ -152,51 +159,98 @@ export async function getErrorState(query: {
     for (const [id, entry] of suspended) if (!isMounted(entry.fiber)) suspended.delete(id)
   }
 
-  // Match each caught boundary to its console-logged error by name, consuming each log once so same-named boundaries can't grab the same (or an unrelated) entry.
+  // Match each caught boundary to its console-logged error by name, consuming each log once so same-named boundaries can't grab the same (or an unrelated) entry. Forced boundaries never threw, so they carry no log.
   const consumed = new Set<number>()
-  const matched = [...caught.values()].slice(0, limit).map((entry) => {
+  const organicCaught = [...caught.values()].map((entry) => {
     const boundaryName = nameOf(entry.fiber)
     const index = errorLog.findIndex(
       (item, i) => !consumed.has(i) && item.boundaryName === boundaryName,
     )
     if (index >= 0) consumed.add(index)
-    return { entry, boundaryName, log: index >= 0 ? errorLog[index] : null }
+    return {
+      fiber: entry.fiber,
+      boundaryId: entry.boundaryId,
+      boundaryName,
+      log: index >= 0 ? errorLog[index] : null,
+      forced: false,
+    }
   })
+  const caughtIds = new Set(caught.keys())
+  const forcedCaught = dedupeByBoundaryId(forcedErrorBoundaries(), caughtIds).map((entry) => ({
+    ...entry,
+    boundaryName: nameOf(entry.fiber),
+    log: null as ErrorLog | null,
+    forced: true,
+  }))
 
   const caughtErrors: CaughtError[] = await Promise.all(
-    matched.map(async ({ entry, boundaryName, log }) => {
-      const { source, isLibrary } = await classify(entry.fiber)
-      return {
-        boundaryId: entry.boundaryId,
-        boundaryName,
-        boundarySource: source,
-        throwingComponent: log?.throwingComponent ?? null,
-        message: log?.message ?? null,
-        stack: log?.stack ?? null,
-        isLibraryBoundary: isLibrary,
-      }
-    }),
+    [...organicCaught, ...forcedCaught]
+      .slice(0, limit)
+      .map(async ({ fiber, boundaryId, boundaryName, log, forced }) => {
+        const { source, isLibrary } = await classify(fiber)
+        return {
+          boundaryId,
+          boundaryName,
+          boundarySource: source,
+          throwingComponent: log?.throwingComponent ?? null,
+          message: log?.message ?? (forced ? FORCED_ERROR_MESSAGE : null),
+          stack: log?.stack ?? null,
+          isLibraryBoundary: isLibrary,
+          forced,
+        }
+      }),
   )
 
+  const suspendedIds = new Set(suspended.keys())
+  const forcedSuspended = dedupeByBoundaryId(forcedSuspenseBoundaries(), suspendedIds)
   const suspendedList: SuspendedBoundary[] = await Promise.all(
-    [...suspended.values()].slice(0, limit).map(async (entry) => ({
-      boundaryId: entry.id,
-      boundaryName: nameOf(entry.fiber),
-      source: (await classify(entry.fiber)).source,
-      isFallbackShowing: true,
-    })),
+    [
+      ...[...suspended.values()].map((entry) => ({
+        fiber: entry.fiber,
+        boundaryId: entry.id,
+        forced: false,
+      })),
+      ...forcedSuspended.map((entry) => ({ ...entry, forced: true })),
+    ]
+      .slice(0, limit)
+      .map(async ({ fiber, boundaryId, forced }) => ({
+        boundaryId,
+        boundaryName: nameOf(fiber),
+        source: (await classify(fiber)).source,
+        isFallbackShowing: true,
+        forced,
+      })),
   )
 
   return { caughtErrors, suspended: suspendedList, blankTreeHint: hintFrom(caughtErrors) }
 }
 
+// Forced boundaries are appended after organic ones, so a real thrown error always wins the hint; a forced-only state gets its own reset guidance.
 function hintFrom(caughtErrors: CaughtError[]): string | null {
   const first = caughtErrors[0]
   if (!first) return null
+  if (first.forced)
+    return `error boundary <${first.boundaryName}> is held in its error state by react_force_error_boundary (no real error) — call react_reset_overrides to release it`
   const at = first.boundarySource
     ? ` at ${first.boundarySource.file}:${first.boundarySource.line}`
     : ''
   const what = first.message ? `"${first.message}"` : 'an error'
   const by = first.throwingComponent ? ` thrown by <${first.throwingComponent}>` : ''
   return `error boundary <${first.boundaryName}>${at} caught ${what}${by} — the subtree below it did not render`
+}
+
+// Forced fibers can arrive as both current and alternate buffers; collapse by boundary id and drop any already reported organically.
+function dedupeByBoundaryId(
+  fibers: Fiber[],
+  exclude: Set<number>,
+): { fiber: Fiber; boundaryId: number }[] {
+  const seen = new Set<number>()
+  const out: { fiber: Fiber; boundaryId: number }[] = []
+  for (const fiber of fibers) {
+    const boundaryId = getFiberId(fiber)
+    if (exclude.has(boundaryId) || seen.has(boundaryId)) continue
+    seen.add(boundaryId)
+    out.push({ fiber, boundaryId })
+  }
+  return out
 }

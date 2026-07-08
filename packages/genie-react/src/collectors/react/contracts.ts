@@ -564,7 +564,7 @@ export const reactErrorStateContract = defineAgentToolContract({
   name: 'react_error_state',
   title: 'Error & suspense state (why is it blank/stuck?)',
   description:
-    'Report error boundaries that have caught an error (with the boundary + throwing component, the message/stack, and their source file:line) and Suspense boundaries currently showing a fallback. Answers "why is the page blank or stuck?" — a render/tree snapshot cannot show a caught error or a suspended subtree. Recorded at commit time, so call it after the blank/stuck state appears.',
+    'Report error boundaries that have caught an error (with the boundary + throwing component, the message/stack, and their source file:line) and Suspense boundaries currently showing a fallback. Answers "why is the page blank or stuck?" — a render/tree snapshot cannot show a caught error or a suspended subtree. Recorded at commit time, so call it after the blank/stuck state appears. Boundaries you are holding open with react_force_error_boundary / react_toggle_suspense_fallback are included and flagged `forced:true` (release them with react_reset_overrides); real errors/suspends are `forced:false`.',
   group: 'react.render',
   input: z.object({
     includeSource: z
@@ -583,6 +583,11 @@ export const reactErrorStateContract = defineAgentToolContract({
         message: z.string().nullable(),
         stack: z.string().nullable().describe('The thrower’s file:line is in this stack.'),
         isLibraryBoundary: z.boolean(),
+        forced: z
+          .boolean()
+          .describe(
+            'true = held open by react_force_error_boundary (no real throw); false = a real caught error.',
+          ),
       }),
     ),
     suspended: z.array(
@@ -591,6 +596,11 @@ export const reactErrorStateContract = defineAgentToolContract({
         boundaryName: z.string(),
         source: sourceSchema,
         isFallbackShowing: z.boolean(),
+        forced: z
+          .boolean()
+          .describe(
+            'true = held open by react_toggle_suspense_fallback; false = a real pending resource.',
+          ),
       }),
     ),
     blankTreeHint: z.string().nullable(),
