@@ -32,15 +32,18 @@ jobs:
       - name: Setup
         uses: ./.github/actions/setup
         with:
-          # Writes an .npmrc pointing at npm; pnpm reads it, finds no token, and falls back to OIDC trusted publishing.
+          # Writes the .npmrc the publish step authenticates against via OIDC.
           registry-url: "https://registry.npmjs.org"
+
+      # ci:publish uses `npm publish`, and OIDC trusted publishing needs npm >= 11.5.1 (newer than Node 22 bundles).
+      - name: Upgrade npm for trusted publishing
+        run: npm install --global npm@latest
 
       - name: Create Release Pull Request or Publish
         uses: changesets/action@v1
         with:
           version: pnpm version-packages
-          publish: pnpm release
+          # ci:publish shells to `npm publish` instead of pnpm, whose OIDC path 404s (pnpm/pnpm#11513).
+          publish: pnpm ci:publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # pnpm runs the publish and auto-generates a provenance attestation under OIDC, but its sigstore path fails to resolve; disable provenance so OIDC trusted publishing still authenticates and ships.
-          NPM_CONFIG_PROVENANCE: "false"

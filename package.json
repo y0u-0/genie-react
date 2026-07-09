@@ -26,7 +26,8 @@
     "fix": "biome check --write .",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "pnpm build && changeset publish"
+    "release": "pnpm build && changeset publish",
+    "ci:publish": "pnpm build && node scripts/ci-publish.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
