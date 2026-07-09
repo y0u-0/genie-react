@@ -32,18 +32,37 @@ jobs:
       - name: Setup
         uses: ./.github/actions/setup
         with:
-          # Writes the .npmrc the publish step authenticates against via OIDC.
           registry-url: "https://registry.npmjs.org"
 
-      # OIDC trusted publishing needs npm >= 11.5.1 and forces provenance, which require()s a bundled `sigstore` module that npm 11.9+/12 dropped (libnpmpublish still imports it). 11.5.1 is the last release that bundles it — pin it until npm fixes the regression.
+      # OIDC trusted publishing forces provenance, which require()s a bundled `sigstore` module npm 11.9+/12 dropped while still importing it. 11.5.1 is the last release that bundles it — pin until npm fixes the regression.
       - name: Pin npm with working trusted-publishing provenance
         run: npm install --global npm@11.5.1
 
-      - name: Create Release Pull Request or Publish
+      # Opens/updates the Version Packages PR while changesets are pending; hasChangesets flips to false once that PR merges.
+      - name: Version
+        id: changesets
         uses: changesets/action@v1
         with:
           version: pnpm version-packages
-          # ci:publish shells to `npm publish` instead of pnpm, whose OIDC path 404s (pnpm/pnpm#11513).
-          publish: pnpm ci:publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish via npm (pnpm's OIDC path 404s — pnpm/pnpm#11513) once no changesets remain. OIDC auth + provenance come from the job's id-token permission and the Trusted Publisher registered on npm.
+      - name: Publish to npm
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: |
+          pnpm build
+          for manifest in packages/*/package.json; do
+            name=$(node -p "require('./$manifest').name || ''")
+            version=$(node -p "require('./$manifest').version || ''")
+            isPrivate=$(node -p "require('./$manifest').private === true")
+            if [ -z "$name" ] || [ "$isPrivate" = "true" ]; then
+              continue
+            fi
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published — skipping"
+            else
+              echo "Publishing $name@$version"
+              ( cd "$(dirname "$manifest")" && npm publish --access public )
+            fi
+          done
