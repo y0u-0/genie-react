@@ -35,9 +35,9 @@ jobs:
           # Writes the .npmrc the publish step authenticates against via OIDC.
           registry-url: "https://registry.npmjs.org"
 
-      # ci:publish uses `npm publish`, and OIDC trusted publishing needs npm >= 11.5.1 (newer than Node 22 bundles).
-      - name: Upgrade npm for trusted publishing
-        run: npm install --global npm@latest
+      # OIDC trusted publishing needs npm >= 11.5.1 and forces provenance, which require()s a bundled `sigstore` module that npm 11.9+/12 dropped (libnpmpublish still imports it). 11.5.1 is the last release that bundles it — pin it until npm fixes the regression.
+      - name: Pin npm with working trusted-publishing provenance
+        run: npm install --global npm@11.5.1
 
       - name: Create Release Pull Request or Publish
         uses: changesets/action@v1
@@ -47,5 +47,3 @@ jobs:
           publish: pnpm ci:publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # npm 12's provenance path require()s a `sigstore` module it no longer bundles; disable provenance so the OIDC publish (auth works, Trusted Publisher configured) isn't blocked by npm's packaging bug.
-          NPM_CONFIG_PROVENANCE: "false"
