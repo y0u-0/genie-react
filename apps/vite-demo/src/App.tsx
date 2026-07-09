@@ -97,6 +97,35 @@ const SlowChild = lazy(
     }),
 )
 
+function StressLabel({ text }: { text: string }): ReactNode {
+  return <span className="lab-line">{text}</span>
+}
+
+function StressCell({ index }: { index: number }): ReactNode {
+  return <StressLabel text={`cell ${index}`} />
+}
+
+function StressRow({ index }: { index: number }): ReactNode {
+  return (
+    <div>
+      <StressCell index={index} />
+    </div>
+  )
+}
+
+/** Perf fixture: `?rows=N` renders N Row→Cell→Label chains (~6 fibers each) so tools can be exercised against arbitrary tree sizes; absent by default. */
+function StressGrid(): ReactNode {
+  const rows = Number(new URLSearchParams(window.location.search).get('rows') ?? '0')
+  if (!Number.isFinite(rows) || rows <= 0) return null
+  return (
+    <section id="stress">
+      {Array.from({ length: rows }, (_, index) => (
+        <StressRow key={index} index={index} />
+      ))}
+    </section>
+  )
+}
+
 function App(): ReactNode {
   const [count, setCount] = useState(0)
   const [armed, setArmed] = useState(false)
@@ -190,6 +219,7 @@ function App(): ReactNode {
       </section>
 
       <div className="ticks"></div>
+      <StressGrid />
       <section id="spacer"></section>
     </ThemeContext.Provider>
   )
