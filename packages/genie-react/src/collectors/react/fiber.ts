@@ -24,6 +24,7 @@ import {
   classifyFibersWithinBudget,
   type FiberClassification,
   type ResolvedSource,
+  scheduleClassificationWarmup,
   sourceLabel,
 } from './source'
 
@@ -62,7 +63,7 @@ export interface InspectResult {
   hooks: HookEntry[]
 }
 
-// Id → fiber registry. React double-buffers fibers (current/alternate swap each commit), so the id is mirrored onto both buffers and resolved via getLatestFiber to whichever is mounted; capped so a long session can't pin unmounted fibers forever.
+// Id → fiber registry. React double-buffers fibers (current/alternate swap each commit), so the id is mirrored onto both buffers and resolved via getLatestFiber to whichever is mounted; LRU-capped (delete+set refreshes recency) so a long session can't pin unmounted fibers forever.
 const REGISTRY_LIMIT = 5_000
 const fiberRegistry = new Map<NodeId, Fiber>()
 
@@ -71,9 +72,14 @@ const TREE_SOURCE_CLASSIFY_BUDGET_MS = 500
 const UNCLASSIFIED_FIBER: FiberClassification = { source: null, isLibrary: false }
 
 export function registerFiber(fiber: Fiber): NodeId {
-  const id = asNodeId(getFiberId(fiber))
+  // bippy treats a stored id of 0 as absent and silently reassigns on the next read; re-reading here settles the first-ever fiber on its stable id before it is handed out.
+  let id = asNodeId(getFiberId(fiber))
+  if (id === 0) id = asNodeId(getFiberId(fiber))
   if (fiber.alternate) setFiberId(fiber.alternate, id)
-  if (fiberRegistry.size >= REGISTRY_LIMIT && !fiberRegistry.has(id)) fiberRegistry.clear()
+  if (!fiberRegistry.delete(id) && fiberRegistry.size >= REGISTRY_LIMIT) {
+    const oldest = fiberRegistry.keys().next().value
+    if (oldest !== undefined) fiberRegistry.delete(oldest)
+  }
   fiberRegistry.set(id, fiber)
   return id
 }
@@ -96,6 +102,22 @@ export function forgetCommittedRoots(): void {
   committedRoots.clear()
 }
 
+// Tree generation: bumped on every observed commit. Staying at 0 means commit delivery is unproven, which keeps the walk cache disabled rather than ever serving a stale tree.
+let treeGeneration = 0
+
+export function noteCommit(): void {
+  treeGeneration += 1
+}
+
+interface TreeCacheEntry {
+  generation: number
+  root: Fiber
+  key: string
+  result: TreeResult
+}
+
+let treeCache: TreeCacheEntry | null = null
+
 export function findRootFiber(): Fiber | null {
   if (typeof document !== 'undefined') {
     const seeds: Array<Element | null> = [
@@ -117,9 +139,11 @@ export function findRootFiber(): Fiber | null {
 }
 
 function climbToRoot(fiber: Fiber): Fiber {
-  let current = getLatestFiber(fiber)
+  let current = fiber
   while (current.return) current = current.return
-  return current
+  // Both root buffers share the FiberRoot stateNode, whose `current` names the live one — authoritative without bippy's getLatestFiber root scan.
+  const fiberRoot = current.stateNode as { current?: Fiber } | null
+  return fiberRoot?.current ?? current
 }
 
 function isMounted(fiber: Fiber, root: Fiber): boolean {
@@ -205,20 +229,6 @@ export function owningComponentFor(element: Element, propsDepth: number): Owning
   }
 }
 
-function countNodes(root: Fiber, includeHost: boolean): number {
-  let count = 0
-  const visit = (fiber: Fiber): void => {
-    let child: Fiber | null = fiber.child
-    while (child) {
-      if (isCompositeFiber(child) || (includeHost && isHostFiber(child))) count += 1
-      visit(child)
-      child = child.sibling
-    }
-  }
-  visit(root)
-  return count
-}
-
 /** The one appOnly disclosure grammar every filtered read shares, so an empty result is never mistaken for "none exist"; undefined when nothing was hidden. */
 export function appOnlyFilteredNote(
   shown: number,
@@ -234,9 +244,31 @@ export async function buildTree(
   root: Fiber,
   options: { depth: number; includeHost: boolean; maxNodes: number; appOnly?: boolean },
 ): Promise<TreeResult> {
+  const cacheKey = `${options.depth}|${options.maxNodes}|${options.includeHost}|${options.appOnly ?? false}`
+  if (
+    treeCache &&
+    treeCache.generation === treeGeneration &&
+    treeGeneration > 0 &&
+    treeCache.root === root &&
+    treeCache.key === cacheKey
+  ) {
+    return treeCache.result
+  }
+
   const entries: { node: TreeNode; fiber: Fiber }[] = []
+  let total = 0
   let depthClipped = false
   let nodeCapped = false
+
+  // Past the depth/node caps the walk hands off to this tight counter, so one pass serves both the capped collection and the full-tree `total`.
+  const countOnly = (fiber: Fiber): void => {
+    let child: Fiber | null = fiber.child
+    while (child) {
+      if (isCompositeFiber(child) || (options.includeHost && isHostFiber(child))) total += 1
+      countOnly(child)
+      child = child.sibling
+    }
+  }
 
   const visit = (fiber: Fiber, parentId: NodeId | null, depth: number): void => {
     let child: Fiber | null = fiber.child
@@ -244,23 +276,28 @@ export async function buildTree(
       const composite = isCompositeFiber(child)
       const keep = composite || (options.includeHost && isHostFiber(child))
       if (keep) {
+        total += 1
         if (entries.length >= options.maxNodes) {
           nodeCapped = true
-          return
+          countOnly(child)
+        } else {
+          const id = registerFiber(child)
+          entries.push({
+            node: {
+              id,
+              parentId,
+              name: nameOf(child),
+              key: child.key,
+              kind: composite ? 'component' : 'host',
+            },
+            fiber: child,
+          })
+          if (depth > 0) visit(child, id, depth - 1)
+          else {
+            if (child.child) depthClipped = true
+            countOnly(child)
+          }
         }
-        const id = registerFiber(child)
-        entries.push({
-          node: {
-            id,
-            parentId,
-            name: nameOf(child),
-            key: child.key,
-            kind: composite ? 'component' : 'host',
-          },
-          fiber: child,
-        })
-        if (depth > 0) visit(child, id, depth - 1)
-        else if (child.child) depthClipped = true
       } else {
         visit(child, parentId, depth)
       }
@@ -269,13 +306,14 @@ export async function buildTree(
   }
 
   visit(root, null, options.depth)
-  const total = countNodes(root, options.includeHost)
   let nodes = entries.map((entry) => entry.node)
   let filteredNote: string | undefined
+  let classificationPartial = false
 
   if (options.appOnly) {
     const folded = await foldLibrarySubtrees(entries)
     nodes = folded.nodes
+    classificationPartial = folded.partial
     filteredNote = appOnlyFilteredNote(nodes.length, folded.hidden, 'components')
     if (folded.partial) {
       const partialNote =
@@ -285,7 +323,7 @@ export async function buildTree(
   }
 
   const truncatedBy = nodeCapped ? 'maxNodes' : depthClipped ? 'depth' : null
-  return {
+  const result: TreeResult = {
     rootId: nodes[0]?.id ?? null,
     nodes,
     total,
@@ -293,6 +331,11 @@ export async function buildTree(
     truncatedBy,
     ...(filteredNote ? { filteredNote } : {}),
   }
+  // A partial classification can improve as source caches warm, so only complete results are worth pinning until the next commit.
+  if (treeGeneration > 0 && !classificationPartial) {
+    treeCache = { generation: treeGeneration, root, key: cacheKey, result }
+  }
+  return result
 }
 
 // Classifies each node, labels anonymous nodes by source (`cmdk.js:1998`), and folds each library subtree into its top node instead of a wall of "Anonymous"; hidden counts the folded-away library nodes.
@@ -300,6 +343,7 @@ async function foldLibrarySubtrees(
   entries: { node: TreeNode; fiber: Fiber }[],
 ): Promise<{ nodes: TreeNode[]; hidden: number; partial: boolean }> {
   const { classes, partial } = await classifyTreeEntries(entries)
+  if (partial) scheduleClassificationWarmup(entries.map((entry) => entry.fiber))
   entries.forEach((entry, index) => {
     const { source, isLibrary } = classes[index] ?? UNCLASSIFIED_FIBER
     entry.node.source = source
@@ -341,7 +385,18 @@ export function findByName(root: Fiber, query: string, exact: boolean, limit: nu
   const matches: FindMatch[] = []
   const needle = query.toLowerCase()
 
-  const visit = (fiber: Fiber, ancestors: string[]): void => {
+  // Paths are derived per hit from return links (≤limit hits), so the walk itself carries no per-node ancestor copies.
+  const pathTo = (fiber: Fiber, name: string): string => {
+    const names = [name]
+    let current = fiber.return
+    while (current && current !== root) {
+      if (isCompositeFiber(current)) names.push(nameOf(current))
+      current = current.return
+    }
+    return names.reverse().join(' > ')
+  }
+
+  const visit = (fiber: Fiber): void => {
     let child: Fiber | null = fiber.child
     while (child) {
       if (matches.length >= limit) return
@@ -352,18 +407,16 @@ export function findByName(root: Fiber, query: string, exact: boolean, limit: nu
           matches.push({
             id: registerFiber(child),
             name,
-            path: [...ancestors, name].join(' > '),
+            path: pathTo(child, name),
             fiber: child,
           })
-        visit(child, [...ancestors, name])
-      } else {
-        visit(child, ancestors)
       }
+      visit(child)
       child = child.sibling
     }
   }
 
-  visit(root, [])
+  visit(root)
   return matches
 }
 
@@ -375,8 +428,9 @@ export function matchDetail(fiber: Fiber, propsDepth: number): { kind: string; p
 export function findFiberById(root: Fiber, id: NodeId): Fiber | null {
   const cached = fiberRegistry.get(id)
   if (cached) {
-    const latest = getLatestFiber(cached)
-    if (isMounted(latest, root)) return latest
+    // Resolving the mounted buffer via return-link climbs stays O(depth); bippy's getLatestFiber falls back to a full-root scan when profiler timings are absent. Stale entries fall through to the walk below.
+    if (isMounted(cached, root)) return cached
+    if (cached.alternate && isMounted(cached.alternate, root)) return cached.alternate
     fiberRegistry.delete(id)
   }
 
@@ -384,7 +438,7 @@ export function findFiberById(root: Fiber, id: NodeId): Fiber | null {
   const visit = (fiber: Fiber): void => {
     let child: Fiber | null = fiber.child
     while (child && !found) {
-      if (registerFiber(child) === id) {
+      if (getFiberId(child) === id) {
         found = child
         return
       }
@@ -393,7 +447,9 @@ export function findFiberById(root: Fiber, id: NodeId): Fiber | null {
     }
   }
   visit(root)
-  return found ? getLatestFiber(found) : null
+  if (!found) return null
+  registerFiber(found)
+  return getLatestFiber(found)
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null

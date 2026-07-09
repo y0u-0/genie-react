@@ -107,34 +107,75 @@ export async function classifyFiberBeforeDeadline(
   }
 }
 
+/** Cache-only classification: exact when the fiber itself resolved before, null when unknown (never guesses via ancestors, which classifyFiber resolves differently). */
+function classifyFiberFromCache(fiber: Fiber): FiberClassification | null {
+  const cached = cache.get(getFiberId(fiber))
+  return cached ? { source: cached, isLibrary: isLibraryFile(cached.file) } : null
+}
+
+// Cache hits are free and bypass the budget, so repeated reads warm the whole set ~limit fibers per call until partial goes false; only network-bound resolutions spend limit/budgetMs.
 export async function classifyFibersWithinBudget(
   fibers: Fiber[],
   options: { limit?: number; budgetMs?: number } = {},
 ): Promise<{ classes: FiberClassification[]; partial: boolean }> {
   const classes = fibers.map(() => UNCLASSIFIED_FIBER)
   const startedAt = Date.now()
-  const limit = Math.min(fibers.length, options.limit ?? DEFAULT_CLASSIFY_LIMIT)
-  const budgetMs = options.budgetMs ?? DEFAULT_CLASSIFY_BUDGET_MS
-  let partial = fibers.length > limit
+  const limit = options.limit ?? DEFAULT_CLASSIFY_LIMIT
+  // While the off-call warmer is draining, the call keeps only a token budget: return fast and partial instead of re-spending the full budget the warmer will cover anyway.
+  const budgetMs = warmupRunning
+    ? WARMING_CALL_BUDGET_MS
+    : (options.budgetMs ?? DEFAULT_CLASSIFY_BUDGET_MS)
+  let resolved = 0
+  let partial = false
 
-  for (let index = 0; index < limit; index += 1) {
-    const remaining = budgetMs - (Date.now() - startedAt)
-    if (remaining <= 0) {
-      partial = true
-      break
-    }
-
+  for (let index = 0; index < fibers.length; index += 1) {
     const fiber = fibers[index]
-    if (!fiber) break
+    if (!fiber) continue
+    const fromCache = classifyFiberFromCache(fiber)
+    if (fromCache) {
+      classes[index] = fromCache
+      continue
+    }
+    const remaining = budgetMs - (Date.now() - startedAt)
+    if (resolved >= limit || remaining <= 0) {
+      partial = true
+      continue
+    }
+    resolved += 1
     const result = await classifyFiberBeforeDeadline(fiber, remaining)
     if (result === null) {
       partial = true
-      break
+      continue
     }
     classes[index] = result
   }
 
   return { classes, partial }
+}
+
+const WARMUP_CHUNK = 24
+const WARMUP_GAP_MS = 50
+const WARMING_CALL_BUDGET_MS = 100
+
+let warmupQueue: Fiber[] = []
+let warmupRunning = false
+
+/** Continue classifying a partial read's leftovers off the call path, in small paced chunks, so repeated reads stop paying the in-call budget once the set warms. */
+export function scheduleClassificationWarmup(fibers: Fiber[]): void {
+  warmupQueue = fibers.filter((fiber) => !cache.has(getFiberId(fiber)))
+  if (warmupRunning || warmupQueue.length === 0) return
+  warmupRunning = true
+  void (async () => {
+    try {
+      while (warmupQueue.length > 0) {
+        const chunk = warmupQueue.splice(0, WARMUP_CHUNK)
+        await Promise.all(chunk.map((fiber) => classifyFiber(fiber).catch(() => null)))
+        await new Promise((resolve) => setTimeout(resolve, WARMUP_GAP_MS))
+      }
+    } finally {
+      warmupRunning = false
+    }
+  })()
 }
 
 /** A stable display identity for an otherwise-anonymous fiber, e.g. `cmdk.js:1998`. */

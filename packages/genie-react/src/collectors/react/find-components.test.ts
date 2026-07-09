@@ -55,7 +55,11 @@ describe('findByName enrichment flow', () => {
       sibling: tooltip,
     })
     const app = component('App', { __source: at('/src/App.tsx'), child: modal })
-    return asFiber({ tag: FunctionComponentTag, type: (): null => null, child: app })
+    const root = asFiber({ tag: FunctionComponentTag, type: (): null => null, child: app })
+    Object.assign(app, { return: root })
+    Object.assign(modal, { return: app })
+    Object.assign(tooltip, { return: app })
+    return root
   }
 
   it('returns each match with its fiber, so the handler can enrich kind/props/source/isLibrary', async () => {

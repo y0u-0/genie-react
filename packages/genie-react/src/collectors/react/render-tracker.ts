@@ -19,7 +19,7 @@ import type { ToolOutput } from '../../protocol'
 import type { reactRendersDiffContract } from './contracts'
 import { clearEffects, recordEffect } from './effect-tracker'
 import { clearErrorState, recordErrorState } from './error-tracker'
-import { nameOf, noteCommittedRoot } from './fiber'
+import { nameOf, noteCommit, noteCommittedRoot } from './fiber'
 import {
   classifyFibersWithinBudget,
   clearSourceCache,
@@ -108,6 +108,7 @@ export function startRenderTracking(): boolean {
         name: 'genie-react',
         onCommitFiberRoot: (_rendererId: number, root: FiberRoot) => {
           commitListener?.()
+          noteCommit()
           if (paused) return
           commits += 1
           noteCommittedRoot(root)

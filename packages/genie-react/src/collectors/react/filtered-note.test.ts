@@ -160,7 +160,7 @@ describe('buildTree filteredNote', () => {
     expect(result.filteredNote).toBeUndefined()
   })
 
-  it('bounds source classification so large trees still return', async () => {
+  it('bounds in-call source classification so large trees still return, then warms the rest off-call', async () => {
     const children = Array.from({ length: 130 }, (_, index) =>
       treeFiber(`Lib${index}`, NODE_MODULES),
     )
@@ -177,8 +177,11 @@ describe('buildTree filteredNote', () => {
       appOnly: true,
     })
 
-    expect(getSource).toHaveBeenCalledTimes(120)
+    // The partial note proves the call itself stopped at the 120 budget; the off-call warmup then finishes the remaining fibers.
     expect(result.filteredNote).toContain('source classification budget reached')
     expect(result.nodes.length).toBeGreaterThan(0)
+    await vi.waitFor(() => {
+      expect(getSource.mock.calls.length).toBe(131)
+    })
   })
 })
