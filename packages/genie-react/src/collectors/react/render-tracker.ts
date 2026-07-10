@@ -15,11 +15,11 @@ import {
   secure,
   traverseRenderedFibers,
 } from 'bippy'
-import type { ToolOutput } from '../../protocol'
+import { dehydrate, type ToolOutput } from '../../protocol'
 import type { reactRendersDiffContract } from './contracts'
 import { clearEffects, recordEffect } from './effect-tracker'
 import { clearErrorState, recordErrorState } from './error-tracker'
-import { nameOf, noteCommit, noteCommittedRoot } from './fiber'
+import { classifyHook, isStatefulHook, nameOf, noteCommit, noteCommittedRoot } from './fiber'
 import {
   classifyFibersWithinBudget,
   clearSourceCache,
@@ -28,11 +28,37 @@ import {
   sourceLabel,
 } from './source'
 
-export interface RenderChange {
+export interface PropRenderChange {
   name: string
-  kind: 'props' | 'state'
+  kind: 'props'
   unstable: boolean
 }
+
+interface StateRenderChangeBase {
+  name: string
+  kind: 'state'
+  unstable: false
+  /** Depth- and size-bounded values safe for the agent-facing wire. */
+  before: unknown
+  after: unknown
+}
+
+export interface HookStateRenderChange extends StateRenderChangeBase {
+  hook: {
+    /** Flat position in the component's complete hook chain. */
+    index: number
+    /** Position among useState/useReducer hooks only; matches react_override_hook_state. */
+    stateIndex: number
+    kind: 'state' | 'reducer'
+  }
+}
+
+export interface ClassStateRenderChange extends StateRenderChangeBase {
+  name: 'class state'
+}
+
+export type StateRenderChange = HookStateRenderChange | ClassStateRenderChange
+export type RenderChange = PropRenderChange | StateRenderChange
 
 export interface RenderRecord {
   id: number
@@ -503,14 +529,10 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
 
   record.updates += 1
   const propChanges = diffProps(fiber)
-  const stateDidChange = stateChanged(fiber)
+  const stateChanges = diffStateChanges(fiber)
+  const stateDidChange = stateChanges.length > 0
   const childrenDidChange = childrenChanged(fiber)
-  const changes = stateDidChange
-    ? [
-        ...propChanges,
-        { name: '(state/hooks)', kind: 'state', unstable: false } satisfies RenderChange,
-      ]
-    : propChanges
+  const changes: RenderChange[] = [...propChanges, ...stateChanges]
   record.changes = changes
   // A render is unnecessary only when none of props/state/children/context changed — new children or context are legitimate reasons.
   if (changes.length === 0 && !childrenDidChange && !contextChanged(fiber)) {
@@ -534,12 +556,12 @@ export function childrenChanged(fiber: Fiber): boolean {
   return !Object.is(prev.children, next.children)
 }
 
-export function diffProps(fiber: Fiber): RenderChange[] {
+export function diffProps(fiber: Fiber): PropRenderChange[] {
   const next: Props | null = fiber.memoizedProps
   const prev: Props | null = fiber.alternate?.memoizedProps ?? null
   if (!next || !prev || typeof next !== 'object' || typeof prev !== 'object') return []
 
-  const changes: RenderChange[] = []
+  const changes: PropRenderChange[] = []
   for (const key of new Set([...Object.keys(prev), ...Object.keys(next)])) {
     if (key === 'children') continue
     if (!Object.is(prev[key], next[key])) {
@@ -557,13 +579,73 @@ function isUnstable(a: unknown, b: unknown): boolean {
   return (ta === 'object' || ta === 'function') && (tb === 'object' || tb === 'function')
 }
 
-export function stateChanged(fiber: Fiber): boolean {
+const STATE_VALUE_DEPTH = 2
+const STATE_VALUE_MAX_ENTRIES = 20
+const STATE_VALUE_MAX_STRING_LENGTH = 200
+
+/** Bound changed state before it enters the retained render record; commit tracking never pins an app's full state graph. */
+function stateValue(value: unknown): unknown {
+  return dehydrate(value, {
+    depth: STATE_VALUE_DEPTH,
+    maxEntries: STATE_VALUE_MAX_ENTRIES,
+    maxStringLength: STATE_VALUE_MAX_STRING_LENGTH,
+  })
+}
+
+/** Reports changed useState/useReducer slots in one guarded hook-chain pass; derived hook internals are excluded because they cannot schedule a render. */
+export function diffStateChanges(fiber: Fiber): StateRenderChange[] {
   // Class components store state directly on memoizedState (a fresh object per setState, no hook list) — compare by reference, not by walking a chain that isn't there.
+  if (fiber.tag === ClassComponentTag) {
+    const before = fiber.alternate?.memoizedState ?? null
+    const after = fiber.memoizedState
+    return Object.is(before, after)
+      ? []
+      : [
+          {
+            name: 'class state',
+            kind: 'state',
+            unstable: false,
+            before: stateValue(before),
+            after: stateValue(after),
+          },
+        ]
+  }
+
+  const changes: StateRenderChange[] = []
+  let cur: MemoizedState | null = fiber.memoizedState
+  let alt: MemoizedState | null = fiber.alternate?.memoizedState ?? null
+  let index = 0
+  let stateIndex = 0
+  while (cur && alt && index < HOOK_WALK_LIMIT) {
+    const currentStateful = isStatefulHook(cur)
+    const previousStateful = isStatefulHook(alt)
+    if (currentStateful || previousStateful) {
+      if (!Object.is(cur.memoizedState, alt.memoizedState)) {
+        const classified = classifyHook(currentStateful ? cur : alt)
+        const kind = classified === 'reducer' ? 'reducer' : 'state'
+        changes.push({
+          name: `${kind}[${stateIndex}]`,
+          kind: 'state',
+          unstable: false,
+          hook: { index, stateIndex, kind },
+          before: stateValue(alt.memoizedState),
+          after: stateValue(cur.memoizedState),
+        })
+      }
+      stateIndex += 1
+    }
+    cur = cur.next
+    alt = alt.next
+    index += 1
+  }
+  return changes
+}
+
+/** Backward-compatible "any hook internals changed" predicate; detailed reports intentionally narrow to stateful hooks. */
+export function stateChanged(fiber: Fiber): boolean {
   if (fiber.tag === ClassComponentTag) {
     return !Object.is(fiber.memoizedState, fiber.alternate?.memoizedState ?? null)
   }
-
-  // Function components: walk the hook linked-list and compare each hook's memoizedState.
   let cur: MemoizedState | null = fiber.memoizedState
   let alt: MemoizedState | null = fiber.alternate?.memoizedState ?? null
   let guard = 0

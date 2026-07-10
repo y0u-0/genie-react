@@ -192,7 +192,7 @@ describe('summarizeRenders', () => {
     expect(summarizeRenders({ summary: {}, components: 'nope' })).toBeNull()
   })
 
-  it('shows the full render cause: changed props (unstable flagged) plus a state marker', () => {
+  it('keeps the legacy generic state marker from older app clients', () => {
     const payload = {
       ...rendersPayload,
       components: [
@@ -210,7 +210,7 @@ describe('summarizeRenders', () => {
     expect(line).toContain('↻ props: style(unstable), onClick · state')
   })
 
-  it('shows a bare state marker when only state changed', () => {
+  it('shows a bare legacy state marker when only state changed', () => {
     const payload = {
       ...rendersPayload,
       components: [
@@ -221,6 +221,39 @@ describe('summarizeRenders', () => {
       ],
     }
     expect(summarizeRenders(payload)?.split('\n')[2]).toContain('↻ state')
+  })
+
+  it('shows exact state and reducer slots with compact before/after values', () => {
+    const payload = {
+      ...rendersPayload,
+      components: [
+        {
+          ...rendersPayload.components[0],
+          changes: [
+            {
+              name: 'state[0]',
+              kind: 'state',
+              unstable: false,
+              hook: { index: 0, stateIndex: 0, kind: 'state' },
+              before: false,
+              after: true,
+            },
+            {
+              name: 'reducer[1]',
+              kind: 'state',
+              unstable: false,
+              hook: { index: 2, stateIndex: 1, kind: 'reducer' },
+              before: { items: 1 },
+              after: { items: 2 },
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(summarizeRenders(payload)?.split('\n')[2]).toContain(
+      '↻ state[0] false→true · reducer[1] items=1→items=2',
+    )
   })
 })
 

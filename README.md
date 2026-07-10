@@ -96,6 +96,8 @@ npx @genie-react/cli call query_list '{}'
 npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
 ```
 
+Render reports name the exact stateful hook that changed and show a bounded value diff, for example `state[0] false→true · reducer[1] items=1→items=2`, instead of a generic state-change marker.
+
 `npx @genie-react/cli doctor` checks the wiring; `doctor --live` also probes the running hub, the served client, and a session round-trip. Stale `.genie/bridge.json` files left by a killed dev server are cleaned up automatically.
 
 ## Try a change before it ships

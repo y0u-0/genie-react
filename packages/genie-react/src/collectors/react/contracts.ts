@@ -423,6 +423,35 @@ export const reactResetOverridesContract = defineAgentToolContract({
   annotations: { destructiveHint: true, idempotentHint: true },
 })
 
+const renderPropChangeSchema = z.object({
+  name: z.string(),
+  kind: z.literal('props'),
+  unstable: z.boolean(),
+})
+
+const renderStateChangeBase = z.object({
+  name: z.string(),
+  kind: z.literal('state'),
+  unstable: z.literal(false),
+  before: z.unknown().describe('Depth- and size-bounded value before this commit.'),
+  after: z.unknown().describe('Depth- and size-bounded value after this commit.'),
+})
+
+const renderHookStateChangeSchema = renderStateChangeBase.extend({
+  hook: z.object({
+    index: z.number().int().describe("Flat position in the component's complete hook chain."),
+    stateIndex: z
+      .number()
+      .int()
+      .describe('Position among useState/useReducer hooks; accepted by react_override_hook_state.'),
+    kind: z.enum(['state', 'reducer']),
+  }),
+})
+
+const renderClassStateChangeSchema = renderStateChangeBase.extend({
+  name: z.literal('class state'),
+})
+
 const renderComponentSchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -438,7 +467,9 @@ const renderComponentSchema = z.object({
   forget: z.boolean(),
   selfTime: z.number(),
   totalTime: z.number(),
-  changes: z.array(z.object({ name: z.string(), kind: z.string(), unstable: z.boolean() })),
+  changes: z.array(
+    z.union([renderPropChangeSchema, renderHookStateChangeSchema, renderClassStateChangeSchema]),
+  ),
   source: sourceSchema,
   isLibrary: z.boolean(),
 })
@@ -459,7 +490,7 @@ export const reactGetRendersContract = defineAgentToolContract({
   name: 'react_get_renders',
   title: 'Render report (why-did-render)',
   description:
-    'Report which components re-rendered, how often, and WHY — prop/state changes with unstable-reference flags (a new object/function each render that defeats memo), how many renders were unnecessary, React Compiler ("forget") status, and self/total render time. Interact with the app first (or react_clear_renders to reset), then read this.',
+    'Report which components re-rendered, how often, and WHY — changed prop names, exact useState/useReducer slots with bounded before/after values, unstable-reference flags (a new object/function each render that defeats memo), unnecessary renders, React Compiler ("forget") status, and self/total render time. Interact with the app first (or react_clear_renders to reset), then read this.',
   group: 'react.render',
   input: z.object({
     component: z.string().optional().describe('Only components whose name contains this string.'),

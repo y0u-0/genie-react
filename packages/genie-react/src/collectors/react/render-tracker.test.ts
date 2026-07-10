@@ -6,6 +6,7 @@ import {
   clearSnapshots,
   createCommitAnalysisBudget,
   diffProps,
+  diffStateChanges,
   getRenders,
   getSkippedCommitFiberCount,
   isTracking,
@@ -150,6 +151,56 @@ describe('stateChanged', () => {
   })
 })
 
+describe('diffStateChanges safety bounds', () => {
+  type HookNode = {
+    memoizedState: unknown
+    queue: { dispatch: () => void; lastRenderedReducer: () => void }
+    next: HookNode | null
+  }
+  function basicStateReducer(): void {}
+  const chain = (values: unknown[]): HookNode | null => {
+    let head: HookNode | null = null
+    for (let i = values.length - 1; i >= 0; i--) {
+      head = {
+        memoizedState: values[i],
+        queue: { dispatch: () => {}, lastRenderedReducer: basicStateReducer },
+        next: head,
+      }
+    }
+    return head
+  }
+  const stateFiber = (cur: unknown[], alt: unknown[]) =>
+    asFiber({ tag: 0, memoizedState: chain(cur), alternate: { memoizedState: chain(alt) } })
+
+  it('stops collecting at the hook-walk limit', () => {
+    const before = Array.from({ length: 1_100 }, () => 0)
+    const afterLimit = before.slice()
+    afterLimit[1_050] = 1
+    expect(diffStateChanges(stateFiber(afterLimit, before))).toEqual([])
+
+    const withinLimit = before.slice()
+    withinLimit[50] = 1
+    expect(diffStateChanges(stateFiber(withinLimit, before))).toMatchObject([
+      { name: 'state[50]', hook: { index: 50, stateIndex: 50 } },
+    ])
+  })
+
+  it('dehydrates circular and deep values before retaining them', () => {
+    const before = { nested: { value: { count: 1 } } } as Record<string, unknown>
+    before.self = before
+    const after = { nested: { value: { count: 2 } } } as Record<string, unknown>
+    after.self = after
+
+    const [change] = diffStateChanges(stateFiber([after], [before]))
+    expect(change?.before).not.toBe(before)
+    expect(change?.after).not.toBe(after)
+    expect(change?.before).toMatchObject({
+      nested: { value: { __genie_dehydrated__: true, preview: '{…}' } },
+      self: { __genie_dehydrated__: true, preview: '[Circular]' },
+    })
+  })
+})
+
 describe('component naming through memo/forwardRef wrappers', () => {
   const record = async (fiber: Fiber) => {
     render(fiber, 'mount')
@@ -222,6 +273,151 @@ describe('component naming through memo/forwardRef wrappers', () => {
 describe('recordRender unnecessary accounting', () => {
   const byName = async () =>
     new Map((await getRenders({ sort: 'renders', limit: 50 })).map((r) => [r.name, r]))
+
+  it('reports the exact state hook slot and bounded before/after values that changed', async () => {
+    function basicStateReducer(): void {}
+    const hook = (value: unknown) => ({
+      memoizedState: value,
+      queue: { dispatch: () => {}, lastRenderedReducer: basicStateReducer },
+      next: null,
+    })
+    const type = (): null => null
+    Object.assign(type, { displayName: 'Counter' })
+
+    render(
+      asFiber({
+        tag: 0,
+        type,
+        memoizedProps: {},
+        memoizedState: hook({ count: 2 }),
+        actualDuration: 0,
+        selfBaseDuration: 0,
+        child: null,
+        alternate: { memoizedProps: {}, memoizedState: hook({ count: 1 }) },
+      }),
+      'update',
+    )
+
+    expect((await byName()).get('Counter')?.changes).toEqual([
+      {
+        name: 'state[0]',
+        kind: 'state',
+        unstable: false,
+        hook: { index: 0, stateIndex: 0, kind: 'state' },
+        before: { count: 1 },
+        after: { count: 2 },
+      },
+    ])
+  })
+
+  it('reports changed class state without pretending it is a hook', async () => {
+    const type = function Counter(): null {
+      return null
+    }
+    render(
+      asFiber({
+        tag: 1,
+        type,
+        memoizedProps: {},
+        memoizedState: { count: 2 },
+        actualDuration: 0,
+        selfBaseDuration: 0,
+        child: null,
+        alternate: { memoizedProps: {}, memoizedState: { count: 1 } },
+      }),
+      'update',
+    )
+
+    expect((await byName()).get('Counter')?.changes).toEqual([
+      {
+        name: 'class state',
+        kind: 'state',
+        unstable: false,
+        before: { count: 1 },
+        after: { count: 2 },
+      },
+    ])
+  })
+
+  it('numbers reducer slots independently from non-state hooks and ignores derived memo changes', async () => {
+    function basicStateReducer(): void {}
+    function cartReducer(): void {}
+    const stateHook = (value: unknown, reducer: () => void) => ({
+      memoizedState: value,
+      queue: { dispatch: () => {}, lastRenderedReducer: reducer },
+      next: null as unknown,
+    })
+    const memoHook = (value: unknown) => ({
+      memoizedState: [value, []],
+      next: null as unknown,
+    })
+    const chain = (nodes: Array<{ next: unknown }>) => {
+      nodes.forEach((node, index) => {
+        node.next = nodes[index + 1] ?? null
+      })
+      return nodes[0]
+    }
+    const type = (): null => null
+    Object.assign(type, { displayName: 'Cart' })
+
+    render(
+      asFiber({
+        tag: 0,
+        type,
+        memoizedProps: {},
+        memoizedState: chain([
+          stateHook(false, basicStateReducer),
+          memoHook({ derived: 2 }),
+          stateHook({ items: 2 }, cartReducer),
+        ]),
+        actualDuration: 0,
+        selfBaseDuration: 0,
+        child: null,
+        alternate: {
+          memoizedProps: {},
+          memoizedState: chain([
+            stateHook(false, basicStateReducer),
+            memoHook({ derived: 1 }),
+            stateHook({ items: 1 }, cartReducer),
+          ]),
+        },
+      }),
+      'update',
+    )
+
+    expect((await byName()).get('Cart')?.changes).toEqual([
+      {
+        name: 'reducer[1]',
+        kind: 'state',
+        unstable: false,
+        hook: { index: 2, stateIndex: 1, kind: 'reducer' },
+        before: { items: 1 },
+        after: { items: 2 },
+      },
+    ])
+  })
+
+  it('does not misreport a changed memo value as the cause of a render', async () => {
+    const memoHook = (value: unknown) => ({ memoizedState: [value, []], next: null })
+    const type = (): null => null
+    Object.assign(type, { displayName: 'DerivedOnly' })
+
+    render(
+      asFiber({
+        tag: 0,
+        type,
+        memoizedProps: {},
+        memoizedState: memoHook({ derived: 2 }),
+        actualDuration: 0,
+        selfBaseDuration: 0,
+        child: null,
+        alternate: { memoizedProps: {}, memoizedState: memoHook({ derived: 1 }) },
+      }),
+      'update',
+    )
+
+    expect((await byName()).get('DerivedOnly')).toMatchObject({ changes: [], unnecessary: 1 })
+  })
 
   it('counts an update unnecessary only when nothing changed and children held', async () => {
     const shared = { node: true }
@@ -323,6 +519,12 @@ describe('recordRender unstable-render accounting', () => {
   })
 
   it('does not flag when state also changed', async () => {
+    function basicStateReducer(): void {}
+    const stateHook = (value: unknown) => ({
+      memoizedState: value,
+      queue: { dispatch: () => {}, lastRenderedReducer: basicStateReducer },
+      next: null,
+    })
     const type = (): null => null
     Object.assign(type, { displayName: 'WithState' })
     render(
@@ -330,13 +532,13 @@ describe('recordRender unstable-render accounting', () => {
         tag: 0,
         type,
         memoizedProps: { onClick: () => {} },
-        memoizedState: { memoizedState: 2, next: null },
+        memoizedState: stateHook(2),
         actualDuration: 0,
         selfBaseDuration: 0,
         child: null,
         alternate: {
           memoizedProps: { onClick: () => {} },
-          memoizedState: { memoizedState: 1, next: null },
+          memoizedState: stateHook(1),
         },
       }),
       'update',

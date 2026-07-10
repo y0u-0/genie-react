@@ -273,7 +273,7 @@ function depthOf(
   return depth
 }
 
-/** Compact render cause from a component's `changes[]`: changed props (unstable ones flagged) plus a `state` marker, e.g. `props: style(unstable), onClick · state`. */
+/** Compact render cause from a component's `changes[]`: changed props plus exact state slots and bounded before→after previews when available. */
 function renderCause(changes: unknown): string | null {
   if (!Array.isArray(changes)) return null
   const records = changes.filter(isRecord)
@@ -282,12 +282,30 @@ function renderCause(changes: unknown): string | null {
   const propNames = records
     .filter((change) => change.kind === 'props')
     .map((change) => `${String(change.name)}${change.unstable === true ? '(unstable)' : ''}`)
-  const hasState = records.some((change) => change.kind === 'state')
+  const stateChanges = records.filter((change) => change.kind === 'state')
 
   const segments: string[] = []
   if (propNames.length > 0) segments.push(`props: ${propNames.join(', ')}`)
-  if (hasState) segments.push('state')
+  for (const change of stateChanges) {
+    if ('before' in change && 'after' in change) {
+      segments.push(
+        `${String(change.name)} ${renderChangeValue(change.before)}→${renderChangeValue(change.after)}`,
+      )
+    } else if (!segments.includes('state')) {
+      // Backward compatibility with older app clients that only emitted the generic marker.
+      segments.push('state')
+    }
+  }
   return segments.length > 0 ? segments.join(' · ') : null
+}
+
+function renderChangeValue(value: unknown): string {
+  if (isRecord(value) && value.__genie_dehydrated__ === true && typeof value.preview === 'string') {
+    return value.preview
+  }
+  if (Array.isArray(value) || isRecord(value)) return recordPreview(value)
+  if (value === undefined) return 'undefined'
+  return bounded(JSON.stringify(value))
 }
 
 const GENERIC_BASENAMES = /^(index|main|app|page|layout|route)\.[jt]sx?$/i
