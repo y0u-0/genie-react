@@ -1,6 +1,6 @@
 {
   "name": "@genie-react/cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Genie CLI: wire the Vite plugin, then drive your app's live DevTools tools from a shell (status, tools, call).",
   "license": "MIT",
   "repository": {

@@ -1,5 +1,15 @@
 # genie-react
 
+## 0.5.0
+
+### Minor Changes
+
+- 3413d52: Make render causes actionable: `react_get_renders` now identifies each changed `useState`/`useReducer` slot, its flat and stateful hook positions, and bounded before/after values. Class state is reported separately, non-state hook internals are excluded, and the CLI prints compact value diffs while remaining compatible with older generic state markers.
+
+### Patch Changes
+
+- 922b635: Faster tools on large React trees: tree reads cached between commits, O(depth) fiber lookups instead of full-tree scans, LRU id registry (no more clear-all overflow), and source classification that skips cached fibers and warms in the background.
+
 ## 0.4.0
 
 ### Minor Changes
