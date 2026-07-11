@@ -2,7 +2,7 @@
 
 Give your coding agent DevTools for the running React app.
 
-The CLI lets an agent inspect, test, optimize, and verify the app from the terminal. Results are short for humans and structured for agents.
+The CLI lets the agent inspect, optimize, test, and verify the app from the terminal.
 
 ## Start
 
@@ -10,102 +10,92 @@ The CLI lets an agent inspect, test, optimize, and verify the app from the termi
 pnpm add -D genie-react
 npx @genie-react/cli init
 pnpm dev
-```
-
-Check the connection:
-
-```bash
 npx @genie-react/cli status
 ```
 
-```text
-connected · shop · react 19.2.0 · 64 tools
-```
-
-## Useful tools
-
-### See why components rendered
+## Find wasted renders
 
 ```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Drive one flow in the app.
 npx @genie-react/cli call react_get_renders '{"sort":"selfTime","limit":3}'
 ```
 
+Real demo output:
+
 ```text
-3 commits · 2 components · 8 renders · 7 updates · 1 unstable · 3 unnecessary
-unstable props: filters×3
-  ProductGrid #18 4× (1m 3u) · 3 unnec · 3 unstable · self 18.4ms · ↻ props: filters(unstable) (ProductGrid.tsx:24)
+4 commits · 6 components · 24 renders · 24 updates · 4 unstable · 2 unnecessary
+unstable props: onClick×4
+  Button #81 4× (0m 4u) · 4 unstable · self 0.2ms · ↻ props: onClick(unstable) (button.tsx:50)
 ```
 
-The agent gets the component, source line, cost, and render cause.
+The agent gets the component, source line, render cost, and cause. It knows what to optimize.
 
-### Inspect live queries
+## Inspect live hooks
 
 ```bash
-npx @genie-react/cli call query_list '{}'
+npx @genie-react/cli call react_find_components '{"name":"App"}'
+# Use the id returned above. The demo returned App #65.
+npx @genie-react/cli call react_inspect_component '{"id":65}'
 ```
+
+Excerpt from the demo:
 
 ```text
-3 queries · 1 stale · ! 1 orphaned (churn)
-  ["products"] · success · fresh · 2 obs
-  ["cart"] · success · stale · 1 obs · ! 6 fetches/10s
+App #65 · function
+  props: {}
+  hooks: 12
+    [0] effect
+    [1] state stateIndex 0 = listeners, subscribe, options, refetch
+    [3] other = status="success", fetchStatus="idle", isPending=false, isSuccess=true, isError=false, data, +18 more
 ```
 
-The agent can spot stale data, refetch storms, and cache churn.
+The agent can read the mounted component's real props, state, and hooks instead of guessing from source.
 
-### Find a blank or stuck screen
-
-```bash
-npx @genie-react/cli call react_error_state '{}'
-```
-
-```text
-1 caught · 0 suspended
-  RouteErrorBoundary #42 caught "Cannot read properties of undefined" from Checkout (checkout.tsx:51)
-```
-
-The agent sees errors caught by React even when the console or page does not explain them.
-
-### Test loading and error UI
+## Test a TanStack state
 
 ```bash
 npx @genie-react/cli call query_simulate_state \
-  '{"queryKey":["products"],"state":"pending"}'
+  '{"queryKey":["demo","greeting"],"state":"pending"}'
 ```
 
 ```text
-ok=true · queryHash="[\"products\"]" · simulatedState="pending" · originalStatus="success"
+ok=true · queryHash="[\"demo\",\"greeting\"]" · simulatedState="pending" · originalStatus="success"
 ```
 
-Drive and inspect the loading UI, then restore it:
+The agent can drive and verify the real loading UI, then restore the exact query state:
 
 ```bash
-npx @genie-react/cli call query_restore_state '{"queryKey":["products"]}'
+npx @genie-react/cli call query_restore_state '{"queryKey":["demo","greeting"]}'
 ```
 
-## Agent output
+```text
+ok=true · restored=1
+```
 
-Use `--json` for one JSON value or `--fields` for JSONL:
+## Output for agents
+
+Common read tools print short text by default. Add `--json` for the full compact JSON result:
 
 ```bash
-npx @genie-react/cli call query_list '{}' --json
-npx @genie-react/cli call react_find_components '{"name":"Product"}' \
-  --fields id,name,path
+npx @genie-react/cli call react_inspect_component '{"id":65}' --json
 ```
 
-Errors are structured too:
+Use `--fields` when the agent only needs a few fields:
+
+```bash
+npx @genie-react/cli call query_list '{}' --fields queryHash,status,fetchStatus
+```
 
 ```json
-{"status":"error","reason":"not_connected","message":"No app session is connected.","userActionRequired":true}
+{"queryHash":"[\"demo\",\"greeting\"]","status":"success","fetchStatus":"idle"}
 ```
 
-This gives the agent a stable interface it can call, filter, and verify without scraping terminal text.
-
-## Discover more
+Every tool includes its input schema and a runnable example:
 
 ```bash
 npx @genie-react/cli tools
-npx @genie-react/cli tools react
-npx @genie-react/cli tools react_get_renders
+npx @genie-react/cli tools react_inspect_component
 ```
 
-Each tool includes its input schema and a runnable example. See the [full setup and tool list](https://github.com/Genie-sa/genie-react#readme).
+See the [full setup and tool list](https://github.com/Genie-sa/genie-react#readme).

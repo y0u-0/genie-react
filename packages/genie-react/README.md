@@ -2,12 +2,7 @@
 
 Give your coding agent live access to your React app.
 
-Genie helps an agent:
-
-- find slow and wasted renders
-- inspect props, state, hooks, effects, queries, and routes
-- test loading, error, and Suspense states
-- verify a fix in the running app from end to end
+Genie helps the agent find performance problems, inspect real app state, test hard-to-reach UI, and verify its work end to end.
 
 Source code shows what *should* happen. Genie shows what *did* happen.
 
@@ -19,88 +14,88 @@ npx @genie-react/cli init
 pnpm dev
 ```
 
-Open the app. The agent can now use the live DevTools:
+Open the app, then check the connection:
 
 ```bash
 npx @genie-react/cli status
-npx @genie-react/cli tools
 ```
 
-Genie is active in development only. It does not ship in your production build.
+Genie runs in development only. It does not ship in your production build.
 
-## What the agent can do
+## Find wasted renders
 
-### Find performance problems
+Clear the counters, drive one flow, then read the result:
 
 ```bash
-npx @genie-react/cli call react_profile_start '{}'
-# Drive the flow you want to measure.
-npx @genie-react/cli call react_profile_report '{"limit":3}'
+npx @genie-react/cli call react_clear_renders '{}'
+# Click, type, or navigate in the app.
+npx @genie-react/cli call react_get_renders '{"sort":"selfTime","limit":3}'
 ```
 
-Example output:
+Real demo output:
 
 ```text
-4 commits
-slowest: ProductGrid 18.4ms×4, Cart 5.2ms×2
-re-rendered: ProductGrid 4×, ProductCard 12×
-unnecessary: ProductCard 8/12
+4 commits · 6 components · 24 renders · 24 updates · 4 unstable · 2 unnecessary
+unstable props: onClick×4
+  Button #81 4× (0m 4u) · 4 unstable · self 0.2ms · ↻ props: onClick(unstable) (button.tsx:50)
 ```
 
-The agent knows where time was spent and what to optimize.
+The agent gets the component, source line, render cost, and cause. It knows what to optimize.
 
-### Prove the fix
-
-Measure the same flow before and after the change:
+## Inspect live hooks
 
 ```bash
-npx @genie-react/cli call react_profile_snapshot '{"label":"before"}'
-# Apply the fix, then clear the profile.
-npx @genie-react/cli call react_profile_start '{}'
-# Drive the same flow.
-npx @genie-react/cli call react_renders_diff '{"baseline":"before"}'
+npx @genie-react/cli call react_find_components '{"name":"App"}'
+# Use the id returned above. The demo returned App #65.
+npx @genie-react/cli call react_inspect_component '{"id":65}'
 ```
 
-Example output:
+Excerpt from the demo:
 
 ```text
-18.4ms → 7.1ms (-61.4%) · commits 4→3 · 0 regressed · 2 improved
-  ProductGrid -9.8ms
-  ProductCard -1.5ms
+App #65 · function
+  props: {}
+  hooks: 12
+    [0] effect
+    [1] state stateIndex 0 = listeners, subscribe, options, refetch
+    [3] other = status="success", fetchStatus="idle", isPending=false, isSuccess=true, isError=false, data, +18 more
 ```
 
-The result is measured, not guessed.
+The agent can read the mounted component's real props, state, and hooks instead of guessing from source.
 
-### Test states without changing app code
+## Test a TanStack state
+
+Hold a real query in its pending state:
 
 ```bash
 npx @genie-react/cli call query_simulate_state \
-  '{"queryKey":["products"],"state":"error","errorMessage":"Request failed"}'
-
-# Inspect the real error UI, then restore the exact query state.
-npx @genie-react/cli call query_restore_state '{"queryKey":["products"]}'
+  '{"queryKey":["demo","greeting"],"state":"pending"}'
 ```
 
-The agent can also hold a Suspense fallback open, force an error boundary, navigate routes, inspect the query cache, and map DOM elements back to React components.
+```text
+ok=true · queryHash="[\"demo\",\"greeting\"]" · simulatedState="pending" · originalStatus="success"
+```
+
+The agent can now drive and verify the real loading UI. Restore the exact query state when done:
+
+```bash
+npx @genie-react/cli call query_restore_state '{"queryKey":["demo","greeting"]}'
+```
+
+```text
+ok=true · restored=1
+```
 
 ## Close the loop
 
-Pair Genie with a browser or device tool:
-
 1. Make a change.
 2. Drive the real app.
-3. Read React and TanStack state.
+3. Read its live state.
 4. Fix or optimize the issue.
-5. Repeat the same flow and verify the result.
+5. Repeat the flow and verify the result.
 
-The agent can extract the runtime details it needs instead of asking you for screenshots, logs, or guesses.
+The agent can extract what it needs without asking you for screenshots, logs, or guesses.
 
-## Works with
-
-- React 18 and 19
-- Vite and TanStack Start
-- Next.js
-- React Native and Expo
-- TanStack Query and TanStack Router
+Works with React 18 and 19, Vite, TanStack Start, Next.js, React Native, Expo, TanStack Query, and TanStack Router.
 
 See the [full setup and tool list](https://github.com/Genie-sa/genie-react#readme).
