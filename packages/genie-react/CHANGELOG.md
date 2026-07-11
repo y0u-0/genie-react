@@ -1,5 +1,11 @@
 # genie-react
 
+## 0.5.1
+
+### Patch Changes
+
+- 32edfea: Pack releases with pnpm before publishing through npm so internal workspace dependencies resolve to installable versions.
+
 ## 0.5.0
 
 ### Minor Changes
