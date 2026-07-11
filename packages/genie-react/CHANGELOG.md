@@ -1,5 +1,12 @@
 # genie-react
 
+## 0.6.0
+
+### Minor Changes
+
+- 006dc90: Upgrade to Bippy 0.6 and add `react_refresh_events` with state-preservation/remount details, source-cache invalidation, HMR-safe instrumentation teardown, and refresh-aware profiling.
+- 006dc90: Add reversible `query_simulate_state` and `query_restore_state` tools for inspecting TanStack Query pending and error UI without editing application code.
+
 ## 0.5.2
 
 ### Patch Changes

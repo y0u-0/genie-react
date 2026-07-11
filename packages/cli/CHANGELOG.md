@@ -1,5 +1,17 @@
 # @genie-react/cli
 
+## 0.6.0
+
+### Minor Changes
+
+- 006dc90: Harden agent-facing CLI contracts with stdout-clean structured failures, strict option and field validation, safe bridge URLs, bounded error copy, and consistent completion output.
+
+### Patch Changes
+
+- Updated dependencies [006dc90]
+- Updated dependencies [006dc90]
+  - genie-react@0.6.0
+
 ## 0.5.2
 
 ### Patch Changes
