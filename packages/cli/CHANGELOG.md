@@ -1,5 +1,13 @@
 # @genie-react/cli
 
+## 0.6.1
+
+### Patch Changes
+
+- 156b50c: Add concise package READMEs, clearer npm descriptions, and focused search keywords.
+- Updated dependencies [156b50c]
+  - genie-react@0.6.1
+
 ## 0.6.0
 
 ### Minor Changes
