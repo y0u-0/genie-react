@@ -64,7 +64,7 @@
   },
   "dependencies": {
     "@jridgewell/sourcemap-codec": "^1.5.5",
-    "bippy": "^0.5.43",
+    "bippy": "^0.6.0",
     "superjson": "^2.2.6",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
