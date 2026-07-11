@@ -19,6 +19,7 @@ import {
   nameOf,
   registerFiber,
 } from './fiber'
+import { safeUnmountHandler } from './safe-instrumentation'
 
 // Dev-only live overrides via the dev-renderer contract React DevTools uses; context has no renderer override, so it edits the nearest Provider's `value` prop; forced-fiber membership is always checked against both double-buffer fibers.
 
@@ -301,14 +302,23 @@ const forcedSuspense = new Set<Fiber>()
 const forcedErrors = new Map<Fiber, boolean>()
 
 let unmountPruningInstalled = false
+let unmountPruningDispose: (() => void) | null = null
 
 export function ensureUnmountPruning(): void {
   if (unmountPruningInstalled) return
   unmountPruningInstalled = true
-  instrument({
+  unmountPruningDispose = instrument({
     name: 'genie-overrides',
-    onCommitFiberUnmount: (_rendererId, fiber) => pruneUnmountedOverrides(fiber),
+    onCommitFiberUnmount: safeUnmountHandler((_rendererId, fiber) =>
+      pruneUnmountedOverrides(fiber),
+    ),
   })
+}
+
+export function disposeUnmountPruning(): void {
+  unmountPruningDispose?.()
+  unmountPruningDispose = null
+  unmountPruningInstalled = false
 }
 
 /** Unmount teardown: forced sets drop the fiber; registry entries keep their row (mounted:false until reset) but release the fiber and restore closure so the dead subtree is not pinned. */

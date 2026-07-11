@@ -33,7 +33,13 @@ function App() {
             Query <code>["demo","greeting"]</code>: <strong>{greeting.status}</strong> (
             {greeting.fetchStatus})
           </p>
-          <p>{greeting.data ? greeting.data.message : "loading…"}</p>
+          <p role={greeting.isError ? "alert" : undefined}>
+            {greeting.isError
+              ? `Error: ${greeting.error.message}`
+              : greeting.data
+                ? greeting.data.message
+                : "loading…"}
+          </p>
           {echo.data ? <p>Mutation result: {echo.data}</p> : null}
           <div className="mt-2 flex flex-wrap gap-2">
             <Button onClick={() => greeting.refetch()}>Refetch</Button>

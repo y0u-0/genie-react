@@ -52,6 +52,7 @@ const querySummarySchema = z.object({
   observerCount: z.number(),
   dataUpdatedAt: z.number(),
   recentFetches: z.number().describe('Fetches recorded for this query in the last 10s.'),
+  simulatedState: z.enum(['pending', 'error']).optional(),
   error: z.string().optional(),
 })
 
@@ -131,6 +132,10 @@ const queryGetContract = defineAgentToolContract({
     fetchFailureCount: z.number(),
     fetchCount: z.number().describe('Total settled fetches (dataUpdateCount + errorUpdateCount).'),
     recentFetches: z.number().describe('Fetches recorded for this query in the last 10s.'),
+    simulatedState: z
+      .enum(['pending', 'error'])
+      .optional()
+      .describe('Present when query_simulate_state currently controls this cache entry.'),
     fetchMeta: z.unknown(),
     error: z.string().optional(),
     data: z.unknown(),
@@ -301,6 +306,51 @@ const querySetDataContract = defineAgentToolContract({
   annotations: { destructiveHint: true },
 })
 
+const querySimulateStateContract = defineAgentToolContract({
+  name: 'query_simulate_state',
+  title: 'Simulate query pending or error state',
+  description:
+    'Hold one existing query in a synthetic pending/loading or error state so its mounted UI can be inspected without changing app code or the server. Cancels a real in-flight fetch first, captures the stable state once, and notifies normal TanStack observers. A later query action can supersede the visible simulation; query_restore_state still restores the captured state. Always restore when finished.',
+  group: 'action',
+  input: z
+    .object({
+      ...queryIdentifierFields,
+      state: z.enum(['pending', 'error']),
+      errorMessage: z
+        .string()
+        .min(1)
+        .default('Simulated query error')
+        .describe('Error message used when state=error; ignored for pending.'),
+    })
+    .refine((value) => hasQueryIdentifier(value), requireQueryIdentifier),
+  output: z.object({
+    ok: z.boolean(),
+    queryHash: z.string(),
+    simulatedState: z.enum(['pending', 'error']),
+    originalStatus: z.string(),
+  }),
+  annotations: { destructiveHint: true },
+})
+
+const queryRestoreStateContract = defineAgentToolContract({
+  name: 'query_restore_state',
+  title: 'Restore simulated query state',
+  description:
+    'Restore the exact stable state captured by query_simulate_state. Target one query by queryHash/queryKey, or pass all=true to clean up every query simulation. Returns the number actually restored.',
+  group: 'action',
+  input: z
+    .object({
+      ...queryIdentifierFields,
+      all: z.boolean().default(false),
+    })
+    .refine(
+      (value) => (value.all ? !hasQueryIdentifier(value) : hasQueryIdentifier(value)),
+      'Provide exactly one query identifier, or all=true without an identifier.',
+    ),
+  output: z.object({ ok: z.boolean(), restored: z.number().int().nonnegative() }),
+  annotations: { idempotentHint: true },
+})
+
 const queryFetchContract = defineAgentToolContract({
   name: 'query_fetch',
   title: 'Fetch a query and return data',
@@ -381,6 +431,14 @@ interface FetchActivity {
   awaitingSettle: boolean
 }
 
+type SimulatedState = 'pending' | 'error'
+
+interface QuerySimulation {
+  query: CachedQuery
+  originalState: CachedQuery['state']
+  simulatedState: SimulatedState
+}
+
 /** Drops a normalized family key for a queryKey: JSON of the key minus its last element. */
 function familyKey(queryKey: unknown): string {
   if (!Array.isArray(queryKey) || queryKey.length === 0) return JSON.stringify(queryKey)
@@ -393,6 +451,28 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
   const mutationCache = () => queryClient.getMutationCache()
 
   const fetchActivity = new Map<string, FetchActivity>()
+  const querySimulations = new Map<string, QuerySimulation>()
+
+  const simulationFor = (query: CachedQuery): QuerySimulation | undefined => {
+    const simulation = querySimulations.get(query.queryHash)
+    return simulation?.query === query ? simulation : undefined
+  }
+
+  const restoreSimulation = (simulation: QuerySimulation): boolean => {
+    if (queryCache().get(simulation.query.queryHash) !== simulation.query) return false
+    simulation.query.setState({ ...simulation.originalState })
+    querySimulations.delete(simulation.query.queryHash)
+    return true
+  }
+
+  const restoreAllSimulations = (): number => {
+    let restored = 0
+    for (const simulation of [...querySimulations.values()]) {
+      if (restoreSimulation(simulation)) restored += 1
+      else querySimulations.delete(simulation.query.queryHash)
+    }
+    return restored
+  }
 
   const recordFetchActivity = (query: CachedQuery): void => {
     const now = Date.now()
@@ -467,6 +547,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
     observerCount: query.getObserversCount(),
     dataUpdatedAt: query.state.dataUpdatedAt,
     recentFetches: recentFetches(query.queryHash),
+    simulatedState: simulationFor(query)?.simulatedState,
     error: formatError(query.state.error),
   })
 
@@ -520,8 +601,12 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
         })
       }
       const offQuery = queryCache().subscribe((event) => {
-        if (event.type === 'removed') fetchActivity.delete(event.query.queryHash)
-        else recordFetchActivity(event.query)
+        if (event.type === 'removed') {
+          fetchActivity.delete(event.query.queryHash)
+          if (simulationFor(event.query)) querySimulations.delete(event.query.queryHash)
+        } else if (!simulationFor(event.query)) {
+          recordFetchActivity(event.query)
+        }
         push()
       })
       const offMutation = mutationCache().subscribe(push)
@@ -529,6 +614,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
       return () => {
         offQuery()
         offMutation()
+        restoreAllSimulations()
       }
     },
     tools: [
@@ -572,6 +658,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
             fetchFailureCount: query.state.fetchFailureCount,
             fetchCount: query.state.dataUpdateCount + query.state.errorUpdateCount,
             recentFetches: recentFetches(query.queryHash),
+            simulatedState: simulationFor(query)?.simulatedState,
             fetchMeta: dehydrate(query.state.fetchMeta, { depth: 2 }),
             error: formatError(query.state.error),
             data: dehydrate(query.state.data, { depth, path }),
@@ -662,6 +749,9 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
       defineCollectorTool({
         contract: queryRemoveContract,
         handler: ({ queryKey, exact }) => {
+          for (const query of queryCache().findAll({ queryKey, exact })) {
+            querySimulations.delete(query.queryHash)
+          }
           const matched = countMatched(queryKey, exact)
           queryClient.removeQueries({ queryKey, exact })
           return { ok: true, matched }
@@ -672,6 +762,7 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
         handler: () => {
           const queriesCleared = queryCache().getAll().length
           const mutationsCleared = mutationCache().getAll().length
+          querySimulations.clear()
           queryClient.clear()
           return { ok: true, queriesCleared, mutationsCleared }
         },
@@ -681,6 +772,74 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
         handler: ({ queryKey, data }) => {
           queryClient.setQueryData(queryKey, () => data)
           return { ok: true }
+        },
+      }),
+      defineCollectorTool({
+        contract: querySimulateStateContract,
+        handler: async ({ queryHash, queryKey, state, errorMessage }) => {
+          let query = findQueryByIdentifier(queryCache(), { queryHash, queryKey })
+          if (!query) {
+            throw new Error(
+              `Query not found for ${describeQueryIdentifier({ queryHash, queryKey })}.`,
+            )
+          }
+
+          await queryClient.cancelQueries({ queryKey: query.queryKey, exact: true })
+          query = findQueryByIdentifier(queryCache(), { queryHash, queryKey })
+          if (!query) throw new Error('Query was removed while its in-flight fetch was cancelled.')
+
+          const existing = simulationFor(query)
+          const simulation: QuerySimulation = existing ?? {
+            query,
+            originalState: { ...query.state },
+            simulatedState: state,
+          }
+          simulation.simulatedState = state
+          querySimulations.set(query.queryHash, simulation)
+
+          if (state === 'pending') {
+            query.setState({
+              data: undefined,
+              error: null,
+              fetchFailureReason: null,
+              fetchMeta: null,
+              fetchStatus: 'fetching',
+              status: 'pending',
+            })
+          } else {
+            const error = new Error(errorMessage)
+            query.setState({
+              data: undefined,
+              error,
+              errorUpdatedAt: Date.now(),
+              fetchFailureReason: error,
+              fetchMeta: null,
+              fetchStatus: 'idle',
+              status: 'error',
+            })
+          }
+
+          return {
+            ok: true,
+            queryHash: query.queryHash,
+            simulatedState: state,
+            originalStatus: simulation.originalState.status,
+          }
+        },
+      }),
+      defineCollectorTool({
+        contract: queryRestoreStateContract,
+        handler: ({ queryHash, queryKey, all }) => {
+          if (all) return { ok: true, restored: restoreAllSimulations() }
+
+          const query = findQueryByIdentifier(queryCache(), { queryHash, queryKey })
+          const simulation = query && simulationFor(query)
+          if (!simulation) {
+            throw new Error(
+              `No simulated state exists for ${describeQueryIdentifier({ queryHash, queryKey })}.`,
+            )
+          }
+          return { ok: true, restored: restoreSimulation(simulation) ? 1 : 0 }
         },
       }),
       defineCollectorTool({

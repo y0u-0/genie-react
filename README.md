@@ -145,6 +145,7 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 
 - navigate, preload, and invalidate routes
 - invalidate / refetch / reset / remove / setData / cancel / fetch / ensure queries
+- simulate a query's pending or error state, then restore its exact prior state
 - re-run a mutation
 - override a component's props, hook state, or a context value
 - force a Suspense fallback or an error boundary — hold loading / error UI open to inspect it, no code edits
@@ -153,11 +154,11 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 
 ## Tools
 
-61 tools in 7 groups. `read` tools are safe to call freely; `action` tools mutate the running app. Each tool documents itself — `tools <group>` lists a group, `tools <tool>` prints the full schema — so here are just the names:
+64 tools in 7 groups. `read` tools are safe to call freely; `action` tools mutate the running app. Each tool documents itself — `tools <group>` lists a group, `tools <tool>` prints the full schema — so here are just the names:
 
-**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_clear_renders`, `react_effect_audit`, `react_error_state`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
+**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_clear_renders`, `react_effect_audit`, `react_error_state`, `react_refresh_events`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
 
-**Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_fetch`, `query_ensure`, `mutation_rerun`.
+**Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_simulate_state`, `query_restore_state`, `query_fetch`, `query_ensure`, `mutation_rerun`.
 
 **Router** — read: `router_get_state`, `router_list_matches`, `router_list_routes`, `router_build_location`, `router_match_route`. action: `router_navigate`, `router_preload`, `router_load`, `router_invalidate`, `router_clear_cache`, `router_history`.
 

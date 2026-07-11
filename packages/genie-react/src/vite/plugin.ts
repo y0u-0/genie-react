@@ -25,6 +25,7 @@ export interface GenieViteOptions {
 
 // Bare specifiers on purpose: the injected module executes in the app, so these resolve through the app's own genie-react install — the same copy <Genie /> imports.
 const HOOK_MODULE = 'genie-react/hook'
+const HOOK_HMR_MODULE = 'genie-react/hook-hmr'
 const CLIENT_MODULE = 'genie-react/client'
 const MISSING_HOOK_WARNING =
   '[genie] genie-react/hook could not be resolved — render tracking/profiling are disabled. Make genie-react a direct dependency of your app, or pass react:false to silence this.'
@@ -152,7 +153,10 @@ export function genie(options: GenieViteOptions = {}): Plugin[] {
       // Skip gracefully when the hook module isn't installed, so a minimal setup doesn't break the build.
       if (!(await resolveHook(this))) return undefined
       // Hoisted above the entry's React import, so the DevTools hook installs before React loads.
-      return { code: `import ${JSON.stringify(HOOK_MODULE)};\n${code}`, map: null }
+      return {
+        code: `import ${JSON.stringify(HOOK_MODULE)};\nimport ${JSON.stringify(HOOK_HMR_MODULE)};\n${code}`,
+        map: null,
+      }
     },
 
     async configureServer(server) {
@@ -239,7 +243,9 @@ function generateClientModule(
   const url = wsUrl ? JSON.stringify(wsUrl) : 'undefined'
   const lines: string[] = []
   // Hook import first so the DevTools commit hook installs before React registers its renderer.
-  if (reactAvailable) lines.push(`import ${JSON.stringify(HOOK_MODULE)}`)
+  if (reactAvailable) {
+    lines.push(`import ${JSON.stringify(HOOK_MODULE)}`, `import ${JSON.stringify(HOOK_HMR_MODULE)}`)
+  }
   const clientImports = reactAvailable
     ? 'createGenieClient, reactCollector, sessionCollector'
     : 'createGenieClient, sessionCollector'

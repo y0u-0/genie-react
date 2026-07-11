@@ -42,7 +42,7 @@ export function runLink(opts: LinkOptions = {}): number {
     rmSync(linkPath, { recursive: true, force: true })
     symlinkSync(target, linkPath, 'dir')
     linked++
-    out(`✓  ${pkg.name} -> ${target}`)
+    out(`  Package  ${pkg.name} -> ${target}`)
   }
 
   if (linked === 0) {
@@ -51,9 +51,10 @@ export function runLink(opts: LinkOptions = {}): number {
   }
 
   const binPath = missingDist ? null : dropGenieBin(cwd, packagesDir)
-  if (binPath) out(`✓  bin -> ${binPath}`)
+  out(`✓ Linked ${linked} package${linked === 1 ? '' : 's'}`)
+  if (binPath) out(`  Binary   ${binPath}`)
   if (missingDist) {
-    out('\n!  some packages have no dist/ — run `pnpm -r build` in the genie repo first')
+    err('! Some packages have no dist/. Run `pnpm -r build` in the Genie checkout.')
   }
 
   out('\nNext:')

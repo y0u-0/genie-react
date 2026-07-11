@@ -1,16 +1,16 @@
 type CommitHandler = (...args: unknown[]) => void
 
 /** Traps later assignments to onCommitFiberRoot ONLY (the handler Next's embedded react-devtools backend assigns over); other handlers stay plain properties so bippy wrappers that self-check `hook[key] === wrapper` keep firing. */
-export function guardCommitStream(): void {
+export function guardCommitStream(): () => void {
   const hook = (globalThis as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: unknown })
     .__REACT_DEVTOOLS_GLOBAL_HOOK__
-  if (typeof hook !== 'object' || hook === null) return
-  trapHandler(hook as Record<string, unknown>, 'onCommitFiberRoot')
+  if (typeof hook !== 'object' || hook === null) return () => {}
+  return trapHandler(hook as Record<string, unknown>, 'onCommitFiberRoot')
 }
 
-export function trapHandler(hook: Record<string, unknown>, key: string): void {
+export function trapHandler(hook: Record<string, unknown>, key: string): () => void {
   const upstream = hook[key]
-  if (typeof upstream !== 'function') return
+  if (typeof upstream !== 'function') return () => {}
   let downstream: unknown
   let running = false
   const chained: CommitHandler = (...args) => {
@@ -24,15 +24,32 @@ export function trapHandler(hook: Record<string, unknown>, key: string): void {
       running = false
     }
   }
+  const getChained = () => chained
+  const setDownstream = (value: unknown) => {
+    downstream = value
+  }
   try {
     Object.defineProperty(hook, key, {
       configurable: true,
-      get: () => chained,
-      set: (value) => {
-        downstream = value
-      },
+      get: getChained,
+      set: setDownstream,
     })
+    return () => {
+      const descriptor = Object.getOwnPropertyDescriptor(hook, key)
+      if (descriptor?.get !== getChained || descriptor.set !== setDownstream) return
+      try {
+        Object.defineProperty(hook, key, {
+          configurable: true,
+          enumerable: descriptor.enumerable,
+          writable: true,
+          value: typeof downstream === 'function' ? downstream : upstream,
+        })
+      } catch {
+        // Best-effort teardown; a non-configurable replacement belongs to its installer.
+      }
+    }
   } catch {
     // property not configurable — leave the original handler in place
+    return () => {}
   }
 }

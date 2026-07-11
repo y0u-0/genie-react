@@ -1,6 +1,7 @@
 import type { BridgeStatusMessage } from 'genie-react/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  formatAgentFailure,
   formatGroupIndex,
   formatToolDetail,
   formatToolsListing,
@@ -298,7 +299,7 @@ describe('summarizeEffects', () => {
     const lines = summarizeEffects(effectsPayload)?.split('\n')
     expect(lines?.[0]).toBe('4 commits · 1 components with effects')
     expect(lines?.[1]).toBe(
-      '  Search #7 [0] effect deps=list(2) fired 4/4 EVERY no-cleanup · ⚠ refetch on every keystroke',
+      '  Search #7 [0] effect deps=list(2) fired 4/4 EVERY no-cleanup · ! refetch on every keystroke',
     )
     expect(lines?.[2]).toBe('  Search #7 [1] layout deps=empty(0) fired 0/4 cleanup')
   })
@@ -530,8 +531,8 @@ describe('new summarizers', () => {
         },
       ],
     })
-    expect(outText).toContain('2 queries (showing 1) · 1 stale · ⚠ 1 orphaned (churn)')
-    expect(outText).toContain('["a"] · success · stale · 1 obs · ⚠ 3 fetches/10s')
+    expect(outText).toContain('2 queries (showing 1) · 1 stale · ! 1 orphaned (churn)')
+    expect(outText).toContain('["a"] · success · stale · 1 obs · ! 3 fetches/10s')
     expect(summarizeQueryList({ queries: 'nope' })).toBeNull()
   })
 
@@ -614,7 +615,7 @@ describe('new summarizers', () => {
       hidden: true,
       verdict: 'janky',
     })
-    expect(outText).toContain('⚠ tab was hidden — unreliable')
+    expect(outText).toContain('! tab was hidden — unreliable')
   })
 
   it('summarizeRouterRoutes: total + one line per route with loader flags', () => {
@@ -793,9 +794,14 @@ describe('renderResult: --fields projection', () => {
   it('projects the top-level object when there is no array-of-records', () => {
     const outText = renderResult('devtools_status', { connected: true, toolCount: 51 }, false, [
       'connected',
-      'missing',
     ])
     expect(outText).toBe('{"connected":true}')
+  })
+
+  it('rejects unknown --fields and lists the available schema discovered from the result', () => {
+    expect(() =>
+      projectFields({ matches: [{ id: 1, name: 'Button' }] }, ['id', 'missing']),
+    ).toThrow('Unknown field "missing". Available fields: id, name.')
   })
 
   it('--fields wins over --json and over summarizers', () => {
@@ -845,8 +851,8 @@ describe('parseBatchItems', () => {
   })
 
   it('rejects non-arrays, missing tool, and non-object args', () => {
-    expect(parseBatchItems('not json')).toMatchObject({
-      error: expect.stringContaining('invalid JSON'),
+    expect(parseBatchItems('not json')).toEqual({
+      error: 'Batch input must be a valid JSON array.',
     })
     expect(parseBatchItems('{}')).toMatchObject({
       error: expect.stringContaining('must be a JSON array'),
@@ -857,6 +863,24 @@ describe('parseBatchItems', () => {
     expect(parseBatchItems('[{"tool":"a","args":5}]')).toMatchObject({
       error: expect.stringContaining('args must be an object'),
     })
+  })
+})
+
+describe('agent failure output', () => {
+  it('emits a stable, actionable, ANSI-free JSON contract', () => {
+    const text = formatAgentFailure('not_connected', 'No app is connected.', {
+      userActionRequired: true,
+      next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+    })
+
+    expect(JSON.parse(text)).toEqual({
+      status: 'error',
+      reason: 'not_connected',
+      message: 'No app is connected.',
+      userActionRequired: true,
+      next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+    })
+    expect(text).not.toContain(String.fromCharCode(27))
   })
 })
 

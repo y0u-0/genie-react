@@ -21,6 +21,7 @@ import {
   reactProfileSnapshotContract,
   reactProfileStartContract,
   reactProfileStopContract,
+  reactRefreshEventsContract,
   reactRendersDiffContract,
   reactResetOverridesContract,
   reactToggleSuspenseFallbackContract,
@@ -50,6 +51,7 @@ import {
   overrideFiberProps,
   resetOverrides,
 } from './overrides'
+import { getRefreshEvents, startRefreshTracking } from './refresh-tracker'
 import {
   clearRenders,
   getCommitCount,
@@ -90,6 +92,7 @@ export function reactCollector(): GenieCollector {
     },
     start: (ctx) => {
       // Fallback for setups that did not load the hook early — captures future commits only.
+      startRefreshTracking()
       startRenderTracking()
       // Ride the commit loop with a throttled heartbeat so an animation- or list-saturated thread stays live.
       setCommitListener(ctx.markActivity)
@@ -285,6 +288,11 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactErrorStateContract,
         handler: ({ includeSource, limit }) => getErrorState({ includeSource, limit }),
+      }),
+      defineCollectorTool({
+        contract: reactRefreshEventsContract,
+        handler: ({ afterSequence, limit, includeSource }) =>
+          getRefreshEvents({ afterSequence, limit, includeSource }),
       }),
       defineCollectorTool({
         contract: reactClearRendersContract,

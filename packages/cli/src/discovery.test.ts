@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { GENIE_DISCOVERY_FILE, GENIE_WS_PATH } from 'genie-react/protocol'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { isPidAlive, resolveBridge, resolveBridgeUrl } from './discovery'
+import { isPidAlive, normalizeBridgeUrl, resolveBridge, resolveBridgeUrl } from './discovery'
 
 const ENV_KEYS = ['GENIE_BRIDGE_URL', 'GENIE_BRIDGE_PORT'] as const
 
@@ -116,5 +116,16 @@ describe('isPidAlive', () => {
   it('reports the current process as alive and a bogus pid as gone', () => {
     expect(isPidAlive(process.pid)).toBe(true)
     expect(isPidAlive(999_999)).toBe(false)
+  })
+})
+
+describe('normalizeBridgeUrl', () => {
+  it('accepts ws/wss URLs and rejects unsafe or ambiguous command input', () => {
+    expect(normalizeBridgeUrl('ws://localhost:4390/__genie/ws')).toBe(
+      'ws://localhost:4390/__genie/ws',
+    )
+    expect(() => normalizeBridgeUrl('https://example.com')).toThrow(/ws:\/\/ or wss:\/\//)
+    expect(() => normalizeBridgeUrl('ws://user:secret@localhost/socket')).toThrow(/credentials/)
+    expect(() => normalizeBridgeUrl('ws://localhost/socket?role=app')).toThrow(/query or fragment/)
   })
 })

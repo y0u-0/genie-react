@@ -12,14 +12,16 @@ import {
   type Props,
   type RenderPhase,
   SuspenseComponentTag,
-  secure,
   traverseRenderedFibers,
+  type Unsubscribe,
 } from 'bippy'
 import { dehydrate, type ToolOutput } from '../../protocol'
 import type { reactRendersDiffContract } from './contracts'
 import { clearEffects, recordEffect } from './effect-tracker'
 import { clearErrorState, recordErrorState } from './error-tracker'
 import { classifyHook, isStatefulHook, nameOf, noteCommit, noteCommittedRoot } from './fiber'
+import { isRefreshCommit, noteExcludedRefreshCommit } from './refresh-tracker'
+import { safeCommitHandler } from './safe-instrumentation'
 import {
   classifyFibersWithinBudget,
   clearSourceCache,
@@ -95,7 +97,8 @@ export interface RenderSummary {
 const records = new Map<number, RenderRecord>()
 let commits = 0
 let installed = false
-// bippy's instrument() can't be uninstalled, so stop is a soft flag: the commit handler stays wired but ignores commits while paused.
+let instrumentation: Unsubscribe | null = null
+// Stop is intentionally a soft flag: the commit handler stays wired so the client's liveness heartbeat continues while profiling is paused.
 let paused = false
 let skippedCommitFibers = 0
 
@@ -129,27 +132,37 @@ export function startRenderTracking(): boolean {
   paused = false
   if (installed) return true
   try {
-    instrument(
-      secure({
-        name: 'genie-react',
-        onCommitFiberRoot: (_rendererId: number, root: FiberRoot) => {
-          commitListener?.()
-          noteCommit()
-          if (paused) return
-          commits += 1
-          noteCommittedRoot(root)
-          const budget = createCommitAnalysisBudget()
-          traverseRenderedFibers(root, (fiber, phase) => {
-            recordCommitFiber(fiber, phase, budget)
-          })
-        },
+    instrumentation = instrument({
+      name: 'genie-react',
+      onCommitFiberRoot: safeCommitHandler((_rendererId: number, root: FiberRoot) => {
+        commitListener?.()
+        noteCommit()
+        noteCommittedRoot(root)
+        if (isRefreshCommit()) {
+          noteExcludedRefreshCommit()
+          return
+        }
+        if (paused) return
+        commits += 1
+        const budget = createCommitAnalysisBudget()
+        traverseRenderedFibers(root, (fiber, phase) => {
+          recordCommitFiber(fiber, phase, budget)
+        })
       }),
-    )
+    })
     installed = true
   } catch {
     installed = false
   }
   return installed
+}
+
+/** Module/HMR teardown only. Profiling stop must keep the lightweight commit heartbeat installed. */
+export function disposeRenderTracking(): void {
+  instrumentation?.()
+  instrumentation = null
+  installed = false
+  paused = false
 }
 
 /** Pause commit recording without uninstalling instrumentation; isTracking() reports false until startRenderTracking() resumes. */

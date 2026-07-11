@@ -124,6 +124,7 @@ describe('client-entry hook hoisting', () => {
       '/app/.tanstack-start/client-entry.tsx?v=abc123',
     )
     expect(out?.code.startsWith('import "genie-react/hook";')).toBe(true)
+    expect(out?.code).toContain('import "genie-react/hook-hmr";')
     expect(out?.code).toContain('import "react"')
   })
 

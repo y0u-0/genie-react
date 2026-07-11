@@ -639,6 +639,71 @@ export const reactErrorStateContract = defineAgentToolContract({
   annotations: { readOnlyHint: true },
 })
 
+const refreshFiberSchema = z.object({
+  id: nodeIdSchema.describe(
+    'Fiber id captured at refresh time; it can become stale if the component later unmounts.',
+  ),
+  name: z.string(),
+  source: sourceSchema,
+  isLibrary: z.boolean(),
+})
+
+export const reactRefreshEventsContract = defineAgentToolContract({
+  name: 'react_refresh_events',
+  title: 'Fast Refresh events (state preserved vs remounted)',
+  description:
+    'Report recent React Fast Refresh/HMR updates: changed files, components that preserved state, components that remounted and lost state, and their live fiber ids/source locations. Genie excludes the associated refresh commits from render profiling and clears stale source caches automatically. filePaths is best-effort and can be empty when the bundler does not expose its HMR transport (notably Turbopack). Use afterSequence to poll incrementally.',
+  group: 'react.render',
+  input: z.object({
+    afterSequence: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Return only events newer than this sequence number.'),
+    limit: z.number().int().min(1).max(50).default(10),
+    includeSource: z
+      .boolean()
+      .default(true)
+      .describe('Resolve file:line for affected mounted fibers.'),
+  }),
+  output: z.object({
+    events: z.array(
+      z.object({
+        sequence: z.number().int(),
+        timestamp: z.number().int().describe('Unix timestamp in milliseconds.'),
+        filePaths: z.array(z.string()),
+        updatedComponents: z.array(z.string()).describe('Component types that preserved state.'),
+        remountedComponents: z
+          .array(z.string())
+          .describe('Component types that remounted and lost state.'),
+        preservedState: z.array(refreshFiberSchema),
+        remounted: z.array(refreshFiberSchema),
+        counts: z.object({
+          updatedComponents: z.number().int(),
+          remountedComponents: z.number().int(),
+          updatedFibers: z.number().int(),
+          remountedFibers: z.number().int(),
+        }),
+        profileCommitsExcluded: z
+          .number()
+          .int()
+          .describe('React commits from this refresh omitted from profiling aggregates.'),
+        truncated: z.boolean(),
+      }),
+    ),
+    latestSequence: z.number().int(),
+    droppedEvents: z
+      .number()
+      .int()
+      .describe('Old events evicted from the bounded in-browser history.'),
+    partialSources: z
+      .boolean()
+      .describe('True when source resolution hit its time/work budget; retry to warm caches.'),
+  }),
+  annotations: { readOnlyHint: true },
+})
+
 export const reactClearRendersContract = defineAgentToolContract({
   name: 'react_clear_renders',
   title: 'Clear render data',

@@ -4,7 +4,7 @@ import {
   getFiberId,
   getLatestFiber,
   SuspenseComponentTag,
-  traverseFiberSync,
+  traverseFiber,
 } from 'bippy'
 import { nameOf } from './fiber'
 import { forcedErrorBoundaries, forcedSuspenseBoundaries } from './overrides'
@@ -35,6 +35,8 @@ const caught = new Map<number, CaughtEntry>()
 const suspended = new Map<number, SuspendedEntry>()
 const errorLog: ErrorLog[] = []
 let captureInstalled = false
+let originalConsoleError: typeof console.error | null = null
+let captureConsoleError: typeof console.error | null = null
 
 export function clearErrorState(): void {
   caught.clear()
@@ -69,7 +71,7 @@ function suspenseShowsFallback(fiber: Fiber): boolean {
 function isMounted(fiber: Fiber): boolean {
   const latest = getLatestFiber(fiber) ?? fiber
   for (const root of _fiberRoots) {
-    if (traverseFiberSync(root.current, (node) => node === latest)) return true
+    if (traverseFiber(root.current, (node) => node === latest)) return true
   }
   return false
 }
@@ -78,8 +80,8 @@ function isMounted(fiber: Fiber): boolean {
 export function installErrorCapture(): void {
   if (captureInstalled || typeof console === 'undefined') return
   captureInstalled = true
-  const original = console.error.bind(console)
-  console.error = (...args: unknown[]): void => {
+  originalConsoleError = console.error
+  captureConsoleError = (...args: unknown[]): void => {
     try {
       const parsed = parseBoundaryError(args)
       if (parsed) {
@@ -89,8 +91,19 @@ export function installErrorCapture(): void {
     } catch {
       // never let capture break the app's logging
     }
-    original(...args)
+    originalConsoleError?.apply(console, args)
   }
+  console.error = captureConsoleError
+}
+
+/** Restore console.error during module/HMR teardown without clobbering a later patch. */
+export function uninstallErrorCapture(): void {
+  if (captureConsoleError && console.error === captureConsoleError && originalConsoleError) {
+    console.error = originalConsoleError
+  }
+  captureInstalled = false
+  captureConsoleError = null
+  originalConsoleError = null
 }
 
 export function parseBoundaryError(args: unknown[]): ErrorLog | null {

@@ -69,6 +69,7 @@ const NEXT_INSTRUMENTATION_TEMPLATE = `export async function register(): Promise
 const OK = '✓'
 const FAIL = '✗'
 const WARN = '!'
+const PREVIEW = '  '
 
 /** Host shape, which decides wiring: Vite hosts get the plugin; Next.js gets the standalone hub + `<GenieScript />`. */
 export type Framework = 'react-vite' | 'tanstack-router' | 'tanstack-start' | 'nextjs' | 'unknown'
@@ -157,7 +158,7 @@ export function runInit(options: InitOptions = {}): InitResult {
   applyRootRouteOutcome(rootRoute, ctx)
   if (readPackageDeps(cwd).has('@cloudflare/vite-plugin')) {
     log.info(
-      `${OK} @cloudflare/vite-plugin detected — genie() will run its bridge on a standalone hub (workerd owns this port's WebSocket upgrades)`,
+      `${PREVIEW}@cloudflare/vite-plugin detected — genie() will run its bridge on a standalone hub (workerd owns this port's WebSocket upgrades)`,
     )
   }
   ensureGenieIgnored(ctx)
@@ -651,14 +652,14 @@ function applyViteOutcome(outcome: ViteConfigOutcome, ctx: ApplyContext): void {
   const { dryRun, log } = ctx
   switch (outcome.action) {
     case 'skip':
-      log.info(`${OK} ${outcome.reason}`)
+      log.info(`${PREVIEW}${outcome.reason}`)
       return
     case 'missing':
       log.info(`${WARN} no Vite config found (looked for ${VITE_CONFIG_FILES.join(', ')})`)
       printViteManual(log)
       return
     case 'already':
-      log.info(`${OK} ${rel(ctx, outcome.path)} already wires ${VITE_PLUGIN_SPECIFIER}`)
+      log.info(`${PREVIEW}${rel(ctx, outcome.path)} already wires ${VITE_PLUGIN_SPECIFIER}`)
       return
     case 'manual':
       log.info(`${WARN} could not edit ${rel(ctx, outcome.path)}: ${outcome.reason}`)
@@ -667,7 +668,7 @@ function applyViteOutcome(outcome: ViteConfigOutcome, ctx: ApplyContext): void {
     case 'edit': {
       const label = rel(ctx, outcome.path)
       if (dryRun) {
-        log.info(`${OK} would add the genie() plugin and its import to ${label}`)
+        log.info(`${PREVIEW}Would add the genie() plugin and its import to ${label}`)
       } else {
         writeFileSync(outcome.path, outcome.contents)
         log.info(`${OK} added the genie() plugin and its import to ${label}`)
@@ -684,10 +685,10 @@ function applyRootRouteOutcome(outcome: RootRouteOutcome, ctx: ApplyContext): vo
       log.info(`${WARN} no root route found (looked for ${ROOT_ROUTE_FILES.join(', ')})`)
       return
     case 'skip':
-      log.info(`${OK} ${outcome.reason}`)
+      log.info(`${PREVIEW}${outcome.reason}`)
       return
     case 'already':
-      log.info(`${OK} ${rel(ctx, outcome.path)} already renders <Genie />`)
+      log.info(`${PREVIEW}${rel(ctx, outcome.path)} already renders <Genie />`)
       return
     case 'manual':
       log.info(`${WARN} could not edit ${rel(ctx, outcome.path)}: ${outcome.reason}`)
@@ -695,7 +696,7 @@ function applyRootRouteOutcome(outcome: RootRouteOutcome, ctx: ApplyContext): vo
     case 'edit': {
       const label = rel(ctx, outcome.path)
       if (dryRun) {
-        log.info(`${OK} would render <Genie /> (dev-only) in ${label}`)
+        log.info(`${PREVIEW}Would render <Genie /> (dev-only) in ${label}`)
       } else {
         writeFileSync(outcome.path, outcome.contents)
         log.info(`${OK} added <Genie /> (dev-only) and its import to ${label}`)
@@ -830,10 +831,10 @@ function applyNextLayoutOutcome(outcome: RootRouteOutcome, ctx: ApplyContext): v
       log.info(`${WARN} no root layout found (looked for ${NEXT_LAYOUT_FILES.join(', ')})`)
       return
     case 'skip':
-      log.info(`${OK} ${outcome.reason}`)
+      log.info(`${PREVIEW}${outcome.reason}`)
       return
     case 'already':
-      log.info(`${OK} ${rel(ctx, outcome.path)} already renders <GenieScript />`)
+      log.info(`${PREVIEW}${rel(ctx, outcome.path)} already renders <GenieScript />`)
       return
     case 'manual':
       log.info(`${WARN} could not edit ${rel(ctx, outcome.path)}: ${outcome.reason}`)
@@ -841,7 +842,7 @@ function applyNextLayoutOutcome(outcome: RootRouteOutcome, ctx: ApplyContext): v
     case 'edit': {
       const label = rel(ctx, outcome.path)
       if (dryRun) {
-        log.info(`${OK} would render <GenieScript /> (dev-only) in ${label}`)
+        log.info(`${PREVIEW}Would render <GenieScript /> (dev-only) in ${label}`)
       } else {
         writeFileSync(outcome.path, outcome.contents)
         log.info(`${OK} added <GenieScript /> (dev-only) and its import to ${label}`)
@@ -855,7 +856,7 @@ function applyInstrumentationOutcome(outcome: RootRouteOutcome, ctx: ApplyContex
   const { dryRun, log } = ctx
   switch (outcome.action) {
     case 'already':
-      log.info(`${OK} ${rel(ctx, outcome.path)} already calls registerGenie()`)
+      log.info(`${PREVIEW}${rel(ctx, outcome.path)} already calls registerGenie()`)
       return
     case 'manual':
       log.info(`${WARN} ${rel(ctx, outcome.path)}: ${outcome.reason}`)
@@ -863,7 +864,7 @@ function applyInstrumentationOutcome(outcome: RootRouteOutcome, ctx: ApplyContex
     case 'edit': {
       const label = rel(ctx, outcome.path)
       if (dryRun) {
-        log.info(`${OK} would create ${label} (starts the genie-react hub with next dev)`)
+        log.info(`${PREVIEW}Would create ${label} (starts the genie-react hub with next dev)`)
       } else {
         writeFileSync(outcome.path, outcome.contents)
         log.info(`${OK} created ${label} (starts the genie-react hub with next dev)`)
@@ -891,7 +892,7 @@ function printNextStepsForNext(log: Logger, pm: PackageManagerHints): void {
 }
 
 function printUniversalSetup(log: Logger): void {
-  log.info(`${OK} no Vite config or Next.js detected — universal setup for any React app:`)
+  log.info(`${PREVIEW}No Vite config or Next.js detected — universal setup for any React app:`)
   log.info(`  1. run the hub: npx ${CLI_PACKAGE} hub`)
   log.info(
     `  2. add first in <head>: <script src="http://localhost:${GENIE_DEFAULT_HUB_PORT}${GENIE_CLIENT_PATH}"></script>`,
@@ -953,7 +954,7 @@ function ensureGenieIgnored(ctx: ApplyContext): void {
   const current = readFileSafe(path)
   if (/^\.genie\/?\s*$/m.test(current)) return
   if (dryRun) {
-    log.info(`${OK} would add .genie/ to .gitignore`)
+    log.info(`${PREVIEW}Would add .genie/ to .gitignore`)
     return
   }
   const base = current === '' || current.endsWith('\n') ? current : `${current}\n`

@@ -38,4 +38,34 @@ describe('trapHandler', () => {
     trapHandler(hook, 'onCommitFiberRoot')
     expect(hook.onCommitFiberRoot).toBeUndefined()
   })
+
+  it('restores the latest assigned handler on teardown without retaining the trap', () => {
+    const hook = hookWith(vi.fn())
+    const dispose = trapHandler(hook, 'onCommitFiberRoot')
+    const laterWriter = vi.fn()
+    hook.onCommitFiberRoot = laterWriter
+
+    dispose()
+
+    expect(hook.onCommitFiberRoot).toBe(laterWriter)
+    const descriptor = Object.getOwnPropertyDescriptor(hook, 'onCommitFiberRoot')
+    expect(descriptor).toMatchObject({ value: laterWriter, writable: true })
+    expect(descriptor).not.toHaveProperty('get')
+    expect(descriptor).not.toHaveProperty('set')
+  })
+
+  it('does not clobber a property another tool redefined before teardown', () => {
+    const hook = hookWith(vi.fn())
+    const dispose = trapHandler(hook, 'onCommitFiberRoot')
+    const replacement = vi.fn()
+    Object.defineProperty(hook, 'onCommitFiberRoot', {
+      configurable: true,
+      writable: true,
+      value: replacement,
+    })
+
+    dispose()
+
+    expect(hook.onCommitFiberRoot).toBe(replacement)
+  })
 })

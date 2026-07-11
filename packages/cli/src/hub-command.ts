@@ -1,4 +1,4 @@
-import { GENIE_DEFAULT_HUB_PORT } from 'genie-react/protocol'
+import { errorMessage, GENIE_DEFAULT_HUB_PORT } from 'genie-react/protocol'
 
 export interface HubOptions {
   port?: number
@@ -19,13 +19,14 @@ export async function runHub(options: HubOptions = {}): Promise<number> {
       strictPort: options.port !== undefined,
     })
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+    process.stderr.write(`Failed to start the Genie hub: ${errorMessage(error)}\n`)
     return 1
   }
 
   if (result.status === 'reused') {
-    out(`[genie] hub for this app is already running at ${result.url}`)
-    out(`[genie] browser client at ${result.clientUrl}`)
+    out('Hub already running')
+    out(`  WebSocket  ${result.url}`)
+    out(`  Client     ${result.clientUrl}`)
     return 0
   }
 
@@ -33,17 +34,16 @@ export async function runHub(options: HubOptions = {}): Promise<number> {
     result.port === GENIE_DEFAULT_HUB_PORT
       ? '<GenieScript />'
       : `<GenieScript port={${result.port}} />`
-  out(`[genie] hub ready at ${result.url}`)
-  out(`[genie] browser client at ${result.clientUrl}`)
+  out('✓ Hub ready')
+  out(`  WebSocket  ${result.url}`)
+  out(`  Client     ${result.clientUrl}`)
   out('')
   out('Attach your app (dev only):')
   out("  Next.js / any SSR React root layout:   import { GenieScript } from 'genie-react/next'")
   out(`                                         ${scriptTag}`)
   out(`  anything else, first in <head>:        <script src="${result.clientUrl}"></script>`)
   out('')
-  out(
-    'Then drive it: genie-react status | genie-react tools | genie-react call <tool> … (Ctrl-C stops the hub)',
-  )
+  out('Next: run `genie-react status`. Ctrl-C stops this local hub.')
 
   const { handle } = result
   return new Promise<number>((resolve) => {

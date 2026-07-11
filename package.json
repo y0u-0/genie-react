@@ -20,7 +20,7 @@
     "typecheck": "pnpm -r --filter \"./packages/**\" typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "biome check . && node scripts/check-comments.mjs",
+    "lint": "biome check . && node scripts/check-comments.mjs && node scripts/check-cli-ux.mjs",
     "check:release": "node scripts/prepare-release.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm build && pnpm check:release && pnpm test",
     "format": "biome format --write .",

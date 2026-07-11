@@ -5,7 +5,7 @@ import {
   errorMessage,
 } from 'genie-react/protocol'
 import { BridgeCallError, GenieAgentLink, INVOKE_GRACE_MS } from './agent-link'
-import { resolveBridge } from './discovery'
+import { normalizeBridgeUrl, resolveBridge } from './discovery'
 import { isRecord, isRecordArray } from './guards'
 
 // The CLI's tool-calling surface: connects to the bridge as the `agent` role — straight from a shell, no separate server.
@@ -28,6 +28,39 @@ export interface AgentOptions {
   fields?: string[]
 }
 
+type AgentFailureReason =
+  | 'invalid_input'
+  | 'not_connected'
+  | 'operational_failure'
+  | 'busy'
+  | 'timeout'
+  | 'not-connected'
+  | 'unknown-session'
+  | 'invalid-args'
+  | 'tool-error'
+
+interface AgentFailureOptions {
+  userActionRequired?: boolean
+  retryInMs?: number
+  next?: { command: string; argv: string[] }
+}
+
+/** Stable, stdout-clean failure payload for --json/--fields and inherently machine-readable commands. */
+export function formatAgentFailure(
+  reason: AgentFailureReason,
+  message: string,
+  options: AgentFailureOptions = {},
+): string {
+  return JSON.stringify({
+    status: 'error',
+    reason,
+    message,
+    userActionRequired: options.userActionRequired ?? false,
+    ...(options.retryInMs === undefined ? {} : { retryInMs: options.retryInMs }),
+    ...(options.next === undefined ? {} : { next: options.next }),
+  })
+}
+
 /** Priority: --session flag → GENIE_SESSION env, so a same-app agent pins its own tab once per shell instead of repeating the flag. */
 export function resolveSession(explicit?: string): string | undefined {
   return explicit ?? process.env.GENIE_SESSION ?? undefined
@@ -36,6 +69,19 @@ export function resolveSession(explicit?: string): string | undefined {
 const out = (message: string): void => void process.stdout.write(`${message}\n`)
 const err = (message: string): void => void process.stderr.write(`${message}\n`)
 
+const isMachineMode = (opts: AgentOptions): boolean =>
+  opts.json === true || (opts.fields !== undefined && opts.fields.length > 0)
+
+function emitFailure(
+  opts: AgentOptions,
+  reason: AgentFailureReason,
+  message: string,
+  options?: AgentFailureOptions,
+): void {
+  if (isMachineMode(opts)) out(formatAgentFailure(reason, message, options))
+  else err(message)
+}
+
 async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url: string }> {
   const cwd = opts.cwd ?? process.cwd()
   let url = opts.url
@@ -43,11 +89,13 @@ async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url:
     const bridge = await resolveBridge(cwd)
     url = bridge.url
     if (bridge.source === 'fallback') {
-      err(
-        `genie-react: no .genie/bridge.json found from ${cwd} upward — trying ${url}. Start your dev server (Vite: genie() plugin) or \`genie-react hub\`, or set GENIE_BRIDGE_URL.`,
-      )
+      if (!isMachineMode(opts))
+        err(
+          `genie-react: no .genie/bridge.json found from ${cwd} upward — trying ${url}. Start your dev server (Vite: genie() plugin) or \`genie-react hub\`, or set GENIE_BRIDGE_URL.`,
+        )
     }
   }
+  url = normalizeBridgeUrl(url)
   const link = new GenieAgentLink({
     url,
     connectTimeoutMs: 8_000,
@@ -106,11 +154,24 @@ function withFilteredNote(text: string, result: unknown): string {
 
 /** `--fields` output: the top-level object projected when any requested key exists on it; otherwise one JSONL row per record in the FIRST array-of-records field (key order, empty → zero rows). Deterministic — the projected source never depends on which array happens to have rows. */
 export function projectFields(result: unknown, fields: string[]): string {
-  if (!isRecord(result)) return JSON.stringify(pickFields(result, fields))
-  if (fields.some((field) => field in result)) return JSON.stringify(pickFields(result, fields))
-  const rows = firstRecordArray(result)
-  if (rows) return rows.map((row) => JSON.stringify(pickFields(row, fields))).join('\n')
-  return JSON.stringify(pickFields(result, fields))
+  if (!isRecord(result)) throw new FieldSelectionError(fields, [])
+  const rows = fields.some((field) => field in result) ? [result] : firstRecordArray(result)
+  if (rows?.length === 0) return ''
+  const source = rows ?? [result]
+  const available = [...new Set(source.flatMap((row) => Object.keys(row)))].sort()
+  const unknown = fields.filter((field) => !available.includes(field))
+  if (unknown.length > 0) throw new FieldSelectionError(unknown, available)
+  return source.map((row) => JSON.stringify(pickFields(row, fields))).join('\n')
+}
+
+class FieldSelectionError extends Error {
+  constructor(unknown: string[], available: string[]) {
+    const fieldLabel = unknown.length === 1 ? 'field' : 'fields'
+    const names = unknown.map((field) => JSON.stringify(field)).join(', ')
+    const choices = available.length > 0 ? available.join(', ') : '(none)'
+    super(`Unknown ${fieldLabel} ${names}. Available fields: ${choices}.`)
+    this.name = 'FieldSelectionError'
+  }
 }
 
 function firstRecordArray(result: Record<string, unknown>): Record<string, unknown>[] | null {
@@ -154,7 +215,7 @@ export function summarizeRenders(result: unknown): string | null {
   const { summary, components } = result
   if (!isRecord(summary) || !Array.isArray(components)) return null
 
-  const trackingOff = result.tracking === false ? ' · ⚠ tracking OFF (run react_profile_start)' : ''
+  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
   const lines = [
     `${num(summary.commits)} commits · ${num(summary.trackedComponents)} components · ${num(summary.totalRenders)} renders · ${num(summary.totalUpdates)} updates · ${num(summary.unstableComponents)} unstable · ${num(summary.unnecessaryComponents)} unnecessary${trackingOff}`,
   ]
@@ -191,7 +252,7 @@ export function summarizeEffects(result: unknown): string | null {
   const { components } = result
   if (!Array.isArray(components)) return null
 
-  const trackingOff = result.tracking === false ? ' · ⚠ tracking OFF (run react_profile_start)' : ''
+  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
   const lines = [
     `${num(result.commits)} commits · ${components.length} components with effects${trackingOff}`,
   ]
@@ -206,7 +267,7 @@ export function summarizeEffects(result: unknown): string | null {
       if (effect.firesEveryUpdate === true) parts.push('EVERY')
       parts.push(effect.hasCleanup === true ? 'cleanup' : 'no-cleanup')
       if (typeof effect.note === 'string' && effect.note.length > 0)
-        parts.push(`· ⚠ ${effect.note}`)
+        parts.push(`· ! ${effect.note}`)
       if (effect.isLibrary === true) parts.push('· lib')
       lines.push(parts.join(' ') + sourceSuffix(effect))
     }
@@ -357,7 +418,7 @@ export function summarizeStatus(result: unknown): string | null {
 export function summarizeFindComponents(result: unknown): string | null {
   if (!isRecord(result) || !Array.isArray(result.matches)) return null
   const matches = result.matches.filter(isRecord)
-  if (matches.length === 0) return '0 matches'
+  if (matches.length === 0) return 'No components found.'
   const lines = [`${matches.length} match${matches.length === 1 ? '' : 'es'}`]
   for (const match of matches) {
     lines.push(`  ${String(match.name)} #${num(match.id)} — ${String(match.path)}`)
@@ -434,7 +495,7 @@ export function summarizeErrorState(result: unknown): string | null {
 
 export function summarizeProfile(result: unknown): string | null {
   if (!isRecord(result) || !Array.isArray(result.slowest)) return null
-  const trackingOff = result.tracking === false ? ' · ⚠ tracking OFF (run react_profile_start)' : ''
+  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
   const lines = [`${num(result.commits)} commits${trackingOff}`]
   const row = (
     label: string,
@@ -529,7 +590,7 @@ export function summarizeFps(result: unknown): string | null {
   if (num(result.droppedFrames) > 0) parts.push(`${num(result.droppedFrames)} dropped`)
   if (num(result.longFrames) > 0)
     parts.push(`${num(result.longFrames)} long (>50ms), worst ${round(num(result.worstFrameMs))}ms`)
-  if (result.hidden === true) parts.push('⚠ tab was hidden — unreliable')
+  if (result.hidden === true) parts.push('! tab was hidden — unreliable')
   return parts.join(' · ')
 }
 
@@ -544,7 +605,7 @@ export function summarizeQueryList(result: unknown): string | null {
   if (queries.length < total) head.push(`(showing ${queries.length})`)
   if (stale > 0) head.push(`· ${stale} stale`)
   if (fetching > 0) head.push(`· ${fetching} fetching`)
-  if (orphaned > 0) head.push(`· ⚠ ${orphaned} orphaned (churn)`)
+  if (orphaned > 0) head.push(`· ! ${orphaned} orphaned (churn)`)
   const lines = [head.join(' ')]
   for (const query of queries) {
     const parts = [
@@ -554,7 +615,7 @@ export function summarizeQueryList(result: unknown): string | null {
     ]
     if (query.fetchStatus !== 'idle') parts.push(String(query.fetchStatus))
     parts.push(`${num(query.observerCount)} obs`)
-    if (num(query.recentFetches) > 0) parts.push(`⚠ ${num(query.recentFetches)} fetches/10s`)
+    if (num(query.recentFetches) > 0) parts.push(`! ${num(query.recentFetches)} fetches/10s`)
     if (typeof query.error === 'string') parts.push(`error: ${query.error}`)
     lines.push(parts.join(' · '))
   }
@@ -577,7 +638,7 @@ export function summarizeQueryGet(result: unknown): string | null {
     parts.push(result.fetchStatus)
   if (typeof result.observerCount === 'number') parts.push(`${result.observerCount} obs`)
   if (typeof result.fetchCount === 'number') parts.push(`${result.fetchCount} fetches`)
-  if (num(result.recentFetches) > 0) parts.push(`⚠ ${num(result.recentFetches)}/10s`)
+  if (num(result.recentFetches) > 0) parts.push(`! ${num(result.recentFetches)}/10s`)
   if (result.hasQueryFn === false) parts.push('no queryFn')
   const lines = [parts.join(' · ')]
   if ('data' in result) lines.push(`  data: ${recordPreview(result.data)}`)
@@ -667,6 +728,10 @@ function bounded(raw: string | undefined): string {
   return raw.length > 120 ? `${raw.slice(0, 120)}…` : raw
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
 const prettyJson = (result: unknown): string => JSON.stringify(result, null, 2)
 const num = (value: unknown): number => (typeof value === 'number' ? value : 0)
 const round = (value: number): number => Math.round(value * 10) / 10
@@ -678,7 +743,15 @@ export async function runCall(
   opts: AgentOptions = {},
 ): Promise<number> {
   if (!tool) {
-    err("usage: genie-react call <tool> '<json-args>'")
+    emitFailure(
+      opts,
+      'invalid_input',
+      'Provide a tool name. Discover tools with `genie-react tools`.',
+      {
+        userActionRequired: true,
+        next: { command: 'genie-react tools', argv: ['genie-react', 'tools'] },
+      },
+    )
     return 1
   }
   let args: unknown = {}
@@ -686,7 +759,12 @@ export async function runCall(
     try {
       args = JSON.parse(argsJson)
     } catch {
-      err(`invalid JSON args: ${argsJson}`)
+      emitFailure(
+        opts,
+        'invalid_input',
+        'Tool arguments must be one valid JSON object. Run `genie-react tools <tool>` for its schema.',
+        { userActionRequired: true },
+      )
       return 1
     }
   }
@@ -702,8 +780,14 @@ export async function runCall(
         })
         .catch(() => null)
       if (!ready?.ok) {
-        err(
-          'no app connected — start your dev server (Vite: genie() plugin; Next.js/other: genie-react hub) and open the app in a browser',
+        emitFailure(
+          opts,
+          'not_connected',
+          'No app is connected. Start the dev server and open the app in a browser.',
+          {
+            userActionRequired: true,
+            next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+          },
         )
         return 1
       }
@@ -713,7 +797,13 @@ export async function runCall(
     if (rendered !== '') out(rendered)
     return 0
   } catch (error) {
-    err(`genie-react call ${tool}${callErrorSuffix(error)}`)
+    const code = error instanceof BridgeCallError ? error.errorCode : undefined
+    const reason: AgentFailureReason =
+      error instanceof FieldSelectionError ? 'invalid_input' : (code ?? 'operational_failure')
+    emitFailure(opts, reason, `Call to ${tool} failed${callErrorSuffix(error)}`, {
+      retryInMs: error instanceof BridgeCallError ? error.retryInMs : undefined,
+      userActionRequired: reason === 'invalid_input' || reason === 'unknown-session',
+    })
     return 1
   } finally {
     link.close()
@@ -742,7 +832,7 @@ export function parseBatchItems(raw: string): { items: BatchItem[] } | { error: 
   try {
     parsed = JSON.parse(raw)
   } catch {
-    return { error: `invalid JSON batch: ${raw}` }
+    return { error: 'Batch input must be a valid JSON array.' }
   }
   if (!Array.isArray(parsed))
     return { error: 'batch must be a JSON array of {tool, args?} objects' }
@@ -766,12 +856,16 @@ export async function runBatch(
 ): Promise<number> {
   const raw = batchJson ?? (await readStdin())
   if (!raw.trim()) {
-    err("usage: genie-react batch '<json-array>'  (or pipe the JSON array on stdin)")
+    out(
+      formatAgentFailure('invalid_input', 'Provide a JSON array argument or pipe one on stdin.', {
+        userActionRequired: true,
+      }),
+    )
     return 1
   }
   const parsed = parseBatchItems(raw)
   if ('error' in parsed) {
-    err(parsed.error)
+    out(formatAgentFailure('invalid_input', parsed.error, { userActionRequired: true }))
     return 1
   }
 
@@ -785,8 +879,15 @@ export async function runBatch(
       })
       .catch(() => null)
     if (!ready?.ok) {
-      err(
-        'no app connected — start your dev server (Vite: genie() plugin; Next.js/other: genie-react hub) and open the app in a browser',
+      out(
+        formatAgentFailure(
+          'not_connected',
+          'No app is connected. Start the dev server and open the app in a browser.',
+          {
+            userActionRequired: true,
+            next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+          },
+        ),
       )
       return 1
     }
@@ -795,7 +896,7 @@ export async function runBatch(
         const result = await link.invoke(item.tool, item.args, undefined, {
           timeoutMs: opts.timeoutMs,
         })
-        out(JSON.stringify({ tool: item.tool, ok: true, result }))
+        out(JSON.stringify({ tool: item.tool, ok: true, status: 'ok', result }))
       } catch (error) {
         anyFailed = true
         const errorCode = error instanceof BridgeCallError ? error.errorCode : undefined
@@ -803,6 +904,9 @@ export async function runBatch(
           JSON.stringify({
             tool: item.tool,
             ok: false,
+            status: 'error',
+            reason: errorCode ?? 'operational_failure',
+            message: errorMessage(error),
             error: errorMessage(error),
             ...(errorCode ? { errorCode } : {}),
           }),
@@ -838,19 +942,21 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
     // A 0.1.0 bridge predates the `sessions` field; the typed contract can't see that skew.
     const sessions = Array.isArray(status.sessions) ? status.sessions : []
     // Preamble on stderr so stdout stays pure (parseable) — important for `--json` and piping.
-    err(`bridge: ${url}`)
-    err(
-      `run from any dir: genie-react --url ${url} call react_get_renders '{"sort":"unnecessary"}'`,
-    )
-    if (sessions.length > 1)
+    if (!opts.json) {
+      err(`bridge: ${url}`)
       err(
-        `${sessions.length} sessions connected — calls hit the most recent; target one with --session <id>`,
+        `run from any dir: genie-react --url ${shellQuote(url)} call react_get_renders '{"sort":"unnecessary"}'`,
       )
-    err('')
+      if (sessions.length > 1)
+        err(
+          `${sessions.length} sessions connected — calls hit the most recent; target one with --session <id>`,
+        )
+      err('')
+    }
     out(renderResult('devtools_status', status, opts.json))
     return 0
   } catch (error) {
-    err(`genie-react status: ${errorMessage(error)}`)
+    emitFailure(opts, 'operational_failure', `Status check failed: ${errorMessage(error)}`)
     return 1
   } finally {
     link.close()
@@ -870,7 +976,15 @@ export async function runTools(
       : await waitForTools(link, opts.waitMs ?? 12_000)
     const tools = status?.tools ?? []
     if (!status || tools.length === 0) {
-      err('no tools advertised — start your dev server and open the app in a browser')
+      emitFailure(
+        opts,
+        'not_connected',
+        'No tools are advertised. Start the dev server and open the app in a browser.',
+        {
+          userActionRequired: true,
+          next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+        },
+      )
       return 1
     }
 
@@ -915,7 +1029,7 @@ export async function runTools(
     )
     return 0
   } catch (error) {
-    err(`genie-react tools: ${errorMessage(error)}`)
+    emitFailure(opts, 'operational_failure', `Tool discovery failed: ${errorMessage(error)}`)
     return 1
   } finally {
     link.close()

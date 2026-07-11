@@ -134,6 +134,118 @@ describe('queryCollector', () => {
     expect(read.data).toEqual({ theme: 'dark', count: 3 })
   })
 
+  it('query_simulate_state exposes pending and error states, then restores the original', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['greeting'], { message: 'hello' })
+    const collector = queryCollector(client)
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+
+    const pending = await call(collector, 'query_simulate_state', {
+      queryHash,
+      state: 'pending',
+      errorMessage: 'ignored',
+    })
+    expect(pending).toEqual({
+      ok: true,
+      queryHash,
+      simulatedState: 'pending',
+      originalStatus: 'success',
+    })
+    expect(client.getQueryState(['greeting'])).toMatchObject({
+      data: undefined,
+      error: null,
+      status: 'pending',
+      fetchStatus: 'fetching',
+    })
+
+    await call(collector, 'query_simulate_state', {
+      queryKey: ['greeting'],
+      state: 'error',
+      errorMessage: 'Demo failed',
+    })
+    const forced = client.getQueryState(['greeting'])
+    expect(forced).toMatchObject({
+      data: undefined,
+      status: 'error',
+      fetchStatus: 'idle',
+    })
+    expect(forced?.error).toEqual(new Error('Demo failed'))
+
+    const read = (await call(collector, 'query_get', { queryHash, depth: 3 })) as {
+      status: string
+      simulatedState?: string
+      error?: string
+    }
+    expect(read).toMatchObject({
+      status: 'error',
+      simulatedState: 'error',
+      error: 'Demo failed',
+    })
+
+    const restored = await call(collector, 'query_restore_state', { queryHash, all: false })
+    expect(restored).toEqual({ ok: true, restored: 1 })
+    expect(client.getQueryState(['greeting'])).toMatchObject({
+      data: { message: 'hello' },
+      error: null,
+      status: 'success',
+      fetchStatus: 'idle',
+    })
+  })
+
+  it('query_restore_state restores every simulated query and rejects missing targets', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['one'], 1)
+    client.setQueryData(['two'], 2)
+    const collector = queryCollector(client)
+
+    await call(collector, 'query_simulate_state', { queryKey: ['one'], state: 'pending' })
+    await call(collector, 'query_simulate_state', { queryKey: ['two'], state: 'error' })
+
+    expect(await call(collector, 'query_restore_state', { all: true })).toEqual({
+      ok: true,
+      restored: 2,
+    })
+    expect(client.getQueryData(['one'])).toBe(1)
+    expect(client.getQueryData(['two'])).toBe(2)
+    expect(() =>
+      call(collector, 'query_restore_state', { queryKey: ['missing'], all: false }),
+    ).toThrow(/No simulated state/)
+  })
+
+  it('restores simulations when collector instrumentation is disposed', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['greeting'], 'hello')
+    const collector = queryCollector(client)
+    const stop = collector.start?.(ctx)
+
+    await call(collector, 'query_simulate_state', {
+      queryKey: ['greeting'],
+      state: 'pending',
+    })
+    expect(client.getQueryState(['greeting'])?.status).toBe('pending')
+
+    stop?.()
+    expect(client.getQueryState(['greeting'])).toMatchObject({
+      data: 'hello',
+      status: 'success',
+      fetchStatus: 'idle',
+    })
+  })
+
+  it('query simulation contracts require an exact target and restoration target or all=true', () => {
+    const collector = queryCollector(new QueryClient())
+    const simulate = collector.tools?.find((tool) => tool.contract.name === 'query_simulate_state')
+      ?.contract.input
+    const restore = collector.tools?.find((tool) => tool.contract.name === 'query_restore_state')
+      ?.contract.input
+
+    expect(simulate?.safeParse({ state: 'pending' }).success).toBe(false)
+    expect(simulate?.safeParse({ queryKey: ['x'], state: 'pending' }).success).toBe(true)
+    expect(restore?.safeParse({ all: false }).success).toBe(false)
+    expect(restore?.safeParse({ all: true }).success).toBe(true)
+    expect(restore?.safeParse({ all: true, queryKey: ['x'] }).success).toBe(false)
+  })
+
   it('query_list_mutations is empty for a fresh client', async () => {
     const collector = queryCollector(new QueryClient())
     const result = (await call(collector, 'query_list_mutations', {})) as { mutations: unknown[] }

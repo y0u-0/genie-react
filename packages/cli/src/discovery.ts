@@ -18,6 +18,22 @@ export interface BridgeDiscovery {
   pid?: number
 }
 
+/** Validate the WebSocket endpoint before it reaches ws or a paste-ready shell command. */
+export function normalizeBridgeUrl(raw: string): string {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error('Bridge URL must be an absolute ws:// or wss:// URL.')
+  }
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    throw new Error('Bridge URL must use ws:// or wss://.')
+  }
+  if (url.username || url.password) throw new Error('Bridge URL cannot contain credentials.')
+  if (url.search || url.hash) throw new Error('Bridge URL cannot contain a query or fragment.')
+  return url.toString()
+}
+
 /** The single reader of a `.genie/bridge.json` payload, so the upward walk and `doctor` narrow the JSON identically. */
 export function parseBridgeDiscovery(raw: string): BridgeDiscovery | null {
   let parsed: unknown
@@ -27,8 +43,14 @@ export function parseBridgeDiscovery(raw: string): BridgeDiscovery | null {
     return null
   }
   if (!isRecord(parsed) || typeof parsed.url !== 'string') return null
+  let url: string
+  try {
+    url = normalizeBridgeUrl(parsed.url)
+  } catch {
+    return null
+  }
   return {
-    url: parsed.url,
+    url,
     pid: typeof parsed.pid === 'number' ? parsed.pid : undefined,
   }
 }
@@ -42,13 +64,13 @@ export interface ResolvedBridge {
 /** Priority: `GENIE_BRIDGE_URL` env → discovery file → localhost default (hostname, so IPv4 or IPv6 loopback both work). */
 export async function resolveBridge(cwd: string = process.cwd()): Promise<ResolvedBridge> {
   const fromEnv = process.env.GENIE_BRIDGE_URL
-  if (fromEnv) return { url: fromEnv, source: 'env' }
+  if (fromEnv) return { url: normalizeBridgeUrl(fromEnv), source: 'env' }
 
   const fromFile = await readDiscoveryUpward(cwd)
   if (fromFile) return { url: fromFile, source: 'file' }
 
   const port = process.env.GENIE_BRIDGE_PORT ?? '5173'
-  return { url: `ws://localhost:${port}${GENIE_WS_PATH}`, source: 'fallback' }
+  return { url: normalizeBridgeUrl(`ws://localhost:${port}${GENIE_WS_PATH}`), source: 'fallback' }
 }
 
 export async function resolveBridgeUrl(cwd: string = process.cwd()): Promise<string> {

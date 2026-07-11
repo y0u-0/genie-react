@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 import { errorMessage } from 'genie-react/protocol'
-import { runBatch, runCall, runStatus, runTools } from './agent'
+import { formatAgentFailure, runBatch, runCall, runStatus, runTools } from './agent'
 import { isRecord } from './guards'
 import { runHub } from './hub-command'
 import { runDoctor, runInit, runLiveDoctor } from './index'
@@ -13,32 +13,32 @@ const HELP = `genie-react — give an AI agent live DevTools on your running Rea
 Usage: npx @genie-react/cli <command> [options]
 
 Setup commands:
-  link [path]            symlink the Genie packages from a local checkout (no publish)
-  init [--dry-run]       wire Genie into your app (Vite plugin, or Next.js layout + instrumentation)
-  doctor [--live]        check that Genie is set up correctly (--live also probes the running hub, client, and a session round-trip)
-  hub [--port <n>]       run the standalone hub for Next.js / non-Vite apps (default 4390; busy ports walk upward, explicit --port is strict)
+  link [<path>]          Symlink Genie packages from a local checkout without publishing
+  init [--dry-run]       Wire Genie into a Vite or Next.js app
+  doctor [--live]        Check setup; --live also probes the hub, client, and session
+  hub [--port <n>]       Run the standalone hub (default 4390; explicit ports are strict)
 
 Tool commands (dev server must be running with the genie() plugin or hub):
-  tools [group|tool]     discover the live catalog progressively: group index → group → full contract (--all for everything)
-  status                 show bridge connection + app info
-  call <tool> '<json>'   invoke a tool, e.g. npx @genie-react/cli call react_get_renders '{"sort":"renders"}'
-  batch '<json-array>'   run many calls on one connection: [{"tool":"react_find_components","args":{"query":"Btn"}}, …] (JSON on stdin if omitted)
+  tools [<group|tool>]   Discover the catalog progressively; use --all for every contract
+  status                 Show bridge, app, session, and tool details
+  call <tool> '<json>'   Invoke one live tool
+  batch [<json-array>]   Run sequential calls as JSONL; reads JSON from stdin when omitted
 
 Run any command with --help for details and an example.
 
 Options:
-  --port <n>       (hub) port to listen on
-  --url <ws-url>   override the bridge URL (default: from .genie/bridge.json)
-  --wait <ms>      how long to wait for the app to connect (default 15000)
-  --timeout <ms>   (call/batch) per-call time budget, clamped to [1000, 120000]
-  --fields <keys>  (call) project the first array-of-records to comma-separated keys, one JSON object per line
-  --session <id>   target one app session when several tabs are connected (status lists them)
-  --json           print raw compact JSON instead of the summary
-  --all            (tools) the complete flat catalog instead of the group index
-  --dry-run        (init) print intended changes without writing files
-  --yes, -y        assume yes for any prompts
-  --help, -h       show this help
-  --version        print the version
+  --port <n>       Listen on this hub port
+  --url <ws-url>   Override the bridge URL discovered from .genie/bridge.json
+  --wait <ms>      Wait up to 1–120000ms for an app (default 15000)
+  --timeout <ms>   Bound each call; the bridge clamps to 1000–120000ms
+  --fields <keys>  Project result records to validated comma-separated keys as JSONL
+  --session <id>   Target one app session; status lists IDs
+  --json           Print compact JSON and structured failures
+  --all            Print every tool contract
+  --dry-run        Preview init changes without writing files
+  --yes, -y        Accept safe init defaults
+  --help, -h       Show help
+  --version        Print the version
   GENIE_BRIDGE_URL   env override for the bridge URL (same as --url; set once for the shell)
   GENIE_SESSION      env pin for --session (set once per agent shell, so every call targets your tab)`
 
@@ -73,8 +73,8 @@ Example:
 Usage: genie-react batch '<json-array>' [--session <id>] [--timeout <ms>]
 
 The array items are {tool, args?} objects; calls run sequentially and continue on
-error. Prints one JSON line per item ({tool, ok, result} or {tool, ok:false, error,
-errorCode?}); exits 0 only if every call succeeded. Omit the argument to read the
+error. Prints one JSON line per item ({tool, ok:true, status:"ok", result} or {tool, ok:false,
+status, reason, message, errorCode?}); exits 0 only if every call succeeded. Omit the argument to read the
 JSON array from stdin.
 
 Example:
@@ -118,6 +118,50 @@ Example:
   link: `genie-react link — symlink Genie packages from a local checkout (no publish)
 
 Usage: genie-react link [path-to-genie-checkout]`,
+}
+
+type ParsedValues = Record<string, boolean | string | undefined>
+
+const COMMAND_OPTIONS: Record<string, ReadonlySet<string>> = {
+  init: new Set(['dry-run', 'yes']),
+  doctor: new Set(['live']),
+  hub: new Set(['port']),
+  link: new Set(),
+  tools: new Set(['url', 'wait', 'session', 'json', 'all']),
+  status: new Set(['url', 'session', 'json']),
+  call: new Set(['url', 'wait', 'session', 'json', 'timeout', 'fields']),
+  batch: new Set(['url', 'wait', 'session', 'json', 'timeout']),
+}
+
+const POSITIONAL_LIMITS: Record<string, number> = {
+  init: 1,
+  doctor: 1,
+  hub: 1,
+  link: 2,
+  tools: 2,
+  status: 1,
+  call: 3,
+  batch: 2,
+}
+
+function unsupportedOption(command: string, values: ParsedValues): string | null {
+  const allowed = COMMAND_OPTIONS[command]
+  if (!allowed) return null
+  for (const [name, value] of Object.entries(values)) {
+    if (name === 'help' || name === 'version' || value === undefined || value === false) continue
+    if (!allowed.has(name)) return `Option --${name} isn't valid for ${command}.`
+  }
+  return null
+}
+
+function writeCliFailure(machine: boolean, message: string): void {
+  if (machine) {
+    process.stdout.write(
+      `${formatAgentFailure('invalid_input', message, { userActionRequired: true })}\n`,
+    )
+  } else {
+    process.stderr.write(`genie-react: ${message}\n`)
+  }
 }
 
 function parseFields(raw: string | undefined): string[] | undefined {
@@ -167,6 +211,7 @@ async function main(): Promise<number> {
   }
 
   const command = positionals[0]
+  const machine = values.json === true || values.fields !== undefined
   if (values.help && command && command in COMMAND_HELP) {
     process.stdout.write(`${COMMAND_HELP[command]}\n`)
     return 0
@@ -176,11 +221,46 @@ async function main(): Promise<number> {
     return 0
   }
 
+  if (!(command in COMMAND_HELP)) {
+    writeCliFailure(
+      machine,
+      `Unknown command "${command}". Run \`genie-react --help\` for commands.`,
+    )
+    return 1
+  }
+
+  const optionError = unsupportedOption(command, values)
+  if (optionError) {
+    writeCliFailure(machine, optionError)
+    return 1
+  }
+  const positionalLimit = POSITIONAL_LIMITS[command]
+  if (positionalLimit !== undefined && positionals.length > positionalLimit) {
+    writeCliFailure(
+      machine,
+      `Too many arguments for ${command}. Run \`genie-react ${command} --help\`.`,
+    )
+    return 1
+  }
+
   if (
     values.timeout !== undefined &&
     (!Number.isFinite(Number(values.timeout)) || Number(values.timeout) <= 0)
   ) {
-    process.stderr.write(`genie-react: invalid --timeout ${values.timeout}\n`)
+    writeCliFailure(machine, '--timeout must be a positive number of milliseconds.')
+    return 1
+  }
+  if (
+    values.wait !== undefined &&
+    (!Number.isFinite(Number(values.wait)) ||
+      Number(values.wait) < 1 ||
+      Number(values.wait) > 120_000)
+  ) {
+    writeCliFailure(machine, '--wait must be a number from 1 to 120000 milliseconds.')
+    return 1
+  }
+  if (values.fields !== undefined && parseFields(values.fields) === undefined) {
+    writeCliFailure(machine, '--fields requires at least one comma-separated field name.')
     return 1
   }
   const agentOptions = {
@@ -207,8 +287,8 @@ async function main(): Promise<number> {
     }
     case 'hub': {
       const port = values.port ? Number(values.port) : undefined
-      if (port !== undefined && (!Number.isInteger(port) || port <= 0)) {
-        process.stderr.write(`genie-react hub: invalid --port ${values.port}\n`)
+      if (port !== undefined && (!Number.isInteger(port) || port <= 0 || port > 65_535)) {
+        writeCliFailure(machine, '--port must be an integer from 1 to 65535.')
         return 1
       }
       return runHub({ port })
@@ -224,7 +304,6 @@ async function main(): Promise<number> {
     case 'batch':
       return runBatch(positionals[1], agentOptions)
     default:
-      process.stderr.write(`Unknown command: ${command}\n\n${HELP}\n`)
       return 1
   }
 }
@@ -235,6 +314,14 @@ main()
     process.exitCode = code
   })
   .catch((error) => {
-    process.stderr.write(`genie-react: ${errorMessage(error)}\n`)
+    const machine = process.argv.some(
+      (arg) => arg === '--json' || arg === '--fields' || arg.startsWith('--fields='),
+    )
+    const message = errorMessage(error)
+    if (machine) {
+      process.stdout.write(`${formatAgentFailure('invalid_input', message)}\n`)
+    } else {
+      process.stderr.write(`genie-react: ${message}\n`)
+    }
     process.exitCode = 1
   })

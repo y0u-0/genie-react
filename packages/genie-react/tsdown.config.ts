@@ -14,6 +14,7 @@ export default defineConfig([
     entry: {
       index: 'src/react/index.ts',
       hook: 'src/collectors/react/hook.ts',
+      'hook-hmr': 'src/collectors/react/hook-hmr.ts',
       client: 'src/client-entry.ts',
       collectors: 'src/collectors/index.ts',
       native: 'src/native/index.ts',
