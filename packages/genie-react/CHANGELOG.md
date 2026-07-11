@@ -1,5 +1,11 @@
 # genie-react
 
+## 0.5.2
+
+### Patch Changes
+
+- f205bb8: Pack releases with pnpm before publishing through npm so internal workspace dependencies resolve to installable versions.
+
 ## 0.5.1
 
 ### Patch Changes
