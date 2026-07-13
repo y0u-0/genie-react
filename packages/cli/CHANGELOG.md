@@ -1,5 +1,16 @@
 # @genie-react/cli
 
+## 0.9.0
+
+### Minor Changes
+
+- a6ddbd3: Add stable React observation and instance IDs, lifecycle cohorts, exact Query and external-store evidence, bounded array and known-store paths, effect schedule events, source provenance, and conservative agent-first CLI guidance. Arbitrary props and object fields stay opaque.
+
+### Patch Changes
+
+- Updated dependencies [a6ddbd3]
+  - genie-react@0.9.0
+
 ## 0.8.0
 
 ### Minor Changes
