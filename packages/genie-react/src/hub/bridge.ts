@@ -15,6 +15,7 @@ import {
   devtoolsStatusContract,
   devtoolsWaitContract,
   encodeMessage,
+  formatToolValidationError,
   GENIE_WS_PATH,
   metaToolDescriptors,
   newId,
@@ -24,7 +25,7 @@ import {
   type WaitCondition,
 } from '../protocol'
 import { CaptureManager, isCaptureTool } from './capture-manager'
-import { frameKind, matchesOf, parseQueryList, routerStateOf } from './wire-guards'
+import { frameKind, matchesOf, parseQueryList, queryStateOf, routerStateOf } from './wire-guards'
 
 type BridgeLogLevel = 'info' | 'warn' | 'error'
 type BridgeLogger = (level: BridgeLogLevel, message: string, meta?: unknown) => void
@@ -108,6 +109,38 @@ const SESSION_STALE_MS = 15_000
 const MIN_REQUEST_TIMEOUT_MS = 1_000
 const MAX_REQUEST_TIMEOUT_MS = 120_000
 const MAX_SESSION_SUCCESSORS = 256
+
+interface WaitInput {
+  condition: WaitCondition
+  name?: string
+  queryHash?: string
+  queryKey?: unknown[]
+}
+
+interface WaitCheck {
+  state: 'met' | 'pending' | 'failed'
+  reason?: string
+  query?: { queryHash: string; queryKey: unknown }
+}
+
+function queryIdentity(
+  query: Record<string, unknown>,
+): { queryHash: string; queryKey: unknown } | undefined {
+  if (typeof query.queryHash !== 'string' || !('queryKey' in query)) return undefined
+  return { queryHash: query.queryHash, queryKey: query.queryKey }
+}
+
+function legacyQueryMatches(query: Record<string, unknown>, name: string): boolean {
+  if (query.queryHash === name) return true
+  let expectedKey: unknown = [name]
+  try {
+    const parsed: unknown = JSON.parse(name)
+    if (Array.isArray(parsed)) expectedKey = parsed
+  } catch {
+    // A plain name means the exact one-item key [name].
+  }
+  return JSON.stringify(query.queryKey) === JSON.stringify(expectedKey)
+}
 
 /** A session's full catalog: its advertised tools plus the bridge-answered meta tools, so listings and toolCount agree. */
 function catalogOf(session: AppSession | null | undefined): ToolDescriptor[] {
@@ -500,9 +533,14 @@ export class GenieBridge {
     if (tool === devtoolsStatusContract.name) {
       const parsed = devtoolsStatusContract.input.safeParse(args ?? {})
       if (!parsed.success) {
-        this.result(agent, id, false, undefined, 'invalid devtools_status arguments', {
-          errorCode: 'invalid-args',
-        })
+        this.result(
+          agent,
+          id,
+          false,
+          undefined,
+          formatToolValidationError(devtoolsStatusContract.name, parsed.error.issues),
+          { errorCode: 'invalid-args' },
+        )
         return
       }
       const target = sessionId ? this.resolveSession(sessionId) : this.currentSession()
@@ -554,18 +592,26 @@ export class GenieBridge {
   ): Promise<void> {
     const parsed = devtoolsWaitContract.input.safeParse(args ?? {})
     if (!parsed.success) {
-      this.result(agent, id, false, undefined, 'invalid devtools_wait arguments', {
-        errorCode: 'invalid-args',
-      })
+      this.result(
+        agent,
+        id,
+        false,
+        undefined,
+        formatToolValidationError(devtoolsWaitContract.name, parsed.error.issues),
+        { errorCode: 'invalid-args' },
+      )
       return
     }
     const input = parsed.data
     const started = Date.now()
-    const finish = (ok: boolean, reason?: string) =>
+    const finish = (check: WaitCheck, timeoutReason = 'timeout') =>
       this.result(agent, id, true, {
-        ok,
+        ok: check.state === 'met',
         waitedMs: Date.now() - started,
-        reason,
+        ...(check.state === 'met'
+          ? {}
+          : { reason: check.state === 'failed' ? check.reason : timeoutReason }),
+        ...(check.query === undefined ? {} : { query: check.query }),
       })
 
     if (input.condition === 'connected' || input.condition === 'ready') {
@@ -574,7 +620,7 @@ export class GenieBridge {
           ? this.waitForReady.bind(this)
           : this.waitForConnection.bind(this)
       const connected = await waitFor(input.timeoutMs, sessionId)
-      finish(connected, connected ? undefined : 'timeout')
+      finish({ state: connected ? 'met' : 'pending' })
       return
     }
 
@@ -582,31 +628,33 @@ export class GenieBridge {
       !this.hasSession(sessionId) &&
       !(await this.waitForConnection(input.timeoutMs, sessionId))
     ) {
-      finish(false, 'no app connected')
+      finish({ state: 'failed', reason: 'no app connected' })
       return
     }
 
-    const ok = await this.pollCondition(input, input.timeoutMs - (Date.now() - started), sessionId)
-    finish(ok, ok ? undefined : 'timeout')
+    const check = await this.pollCondition(
+      input,
+      input.timeoutMs - (Date.now() - started),
+      sessionId,
+    )
+    finish(check)
   }
 
   private async pollCondition(
-    input: { condition: WaitCondition; name?: string },
+    input: WaitInput,
     remainingMs: number,
     sessionId?: string,
-  ): Promise<boolean> {
+  ): Promise<WaitCheck> {
     const deadline = Date.now() + Math.max(0, remainingMs)
     while (Date.now() < deadline) {
-      if (await this.checkCondition(input, sessionId)) return true
+      const check = await this.checkCondition(input, sessionId)
+      if (check.state !== 'pending') return check
       await delay(POLL_INTERVAL_MS)
     }
-    return false
+    return { state: 'pending' }
   }
 
-  private async checkCondition(
-    input: { condition: WaitCondition; name?: string },
-    sessionId?: string,
-  ): Promise<boolean> {
+  private async checkCondition(input: WaitInput, sessionId?: string): Promise<WaitCheck> {
     if (input.condition === 'component') {
       const res = await this.appRequest(
         'react_find_components',
@@ -614,25 +662,61 @@ export class GenieBridge {
         sessionId,
       )
       const matches = matchesOf(res.result)
-      return res.ok && matches !== undefined && matches.length > 0
+      return { state: res.ok && matches !== undefined && matches.length > 0 ? 'met' : 'pending' }
     }
     if (input.condition === 'query-settled') {
-      const res = await this.appRequest('query_list', {}, sessionId)
+      if (input.queryHash !== undefined || input.queryKey !== undefined) {
+        const selector =
+          input.queryHash === undefined
+            ? { queryKey: input.queryKey }
+            : { queryHash: input.queryHash }
+        const res = await this.appRequest('query_get', selector, sessionId)
+        const query = queryStateOf(res.result)
+        if (!res.ok || !query) return { state: 'pending' }
+        const match = queryIdentity(query)
+        return {
+          state: query.fetchStatus === 'idle' ? 'met' : 'pending',
+          ...(match === undefined ? {} : { query: match }),
+        }
+      }
+
+      const res = await this.appRequest('query_list', { limit: input.name ? 500 : 1 }, sessionId)
       const queries = parseQueryList(res.result)
-      if (!res.ok || !queries || queries.length === 0) return false
-      const name = input.name
-      const relevant = name
-        ? queries.filter((query) => JSON.stringify(query.queryKey ?? null).includes(name))
-        : queries
-      return relevant.length > 0 && relevant.every((query) => query.fetchStatus === 'idle')
+      if (!res.ok || !queries || queries.length === 0) return { state: 'pending' }
+      if (input.name) {
+        const relevant = queries.filter((query) => legacyQueryMatches(query, input.name ?? ''))
+        if (relevant.length > 1) {
+          return {
+            state: 'failed',
+            reason: `query selector ${JSON.stringify(input.name)} is ambiguous (${relevant.length} exact matches); use queryHash or queryKey from query_list`,
+          }
+        }
+        const query = relevant[0]
+        if (!query) return { state: 'pending' }
+        const match = queryIdentity(query)
+        return {
+          state: query.fetchStatus === 'idle' ? 'met' : 'pending',
+          ...(match === undefined ? {} : { query: match }),
+        }
+      }
+      const fetching = await this.appRequest('query_is_fetching', {}, sessionId)
+      const state = queryStateOf(fetching.result)
+      return {
+        state: fetching.ok && state?.fetching === 0 ? 'met' : 'pending',
+      }
     }
     if (input.condition === 'navigation') {
       const res = await this.appRequest('router_get_state', {}, sessionId)
       const state = routerStateOf(res.result)
-      if (!res.ok || !state) return false
-      return input.name ? state.pathname === input.name && !state.isLoading : !state.isLoading
+      if (!res.ok || !state) return { state: 'pending' }
+      return {
+        state:
+          (input.name ? state.pathname === input.name : true) && !state.isLoading
+            ? 'met'
+            : 'pending',
+      }
     }
-    return false
+    return { state: 'pending' }
   }
 
   private forwardToApp(

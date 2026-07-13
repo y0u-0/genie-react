@@ -355,6 +355,23 @@ describe('per-effect source attribution', () => {
       evidence: 'exact',
       packageName: '@tanstack/react-query',
     })
+
+    const packageReport = await getEffectAuditReport({
+      limit: 50,
+      appOnly: false,
+      packageName: '@tanstack/react-query',
+    })
+    expect(packageReport.components).toHaveLength(1)
+    expect(packageReport.components[0]?.effects).toHaveLength(1)
+    expect(packageReport.components[0]?.effects[0]?.provenance.packageName).toBe(
+      '@tanstack/react-query',
+    )
+    expect(packageReport.packageFilter).toEqual({
+      packageName: '@tanstack/react-query',
+      matchedEffects: 1,
+      excludedEffects: 1,
+      unknownPackageEffects: 1,
+    })
   })
 
   it('drops library-origin effects under appOnly (default), keeping the app effect', async () => {

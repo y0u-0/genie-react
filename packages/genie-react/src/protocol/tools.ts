@@ -319,20 +319,61 @@ export const devtoolsWaitContract = defineAgentToolContract({
   name: 'devtools_wait',
   title: 'Wait for a condition',
   description:
-    'Block until a runtime condition holds so the agent can synchronize instead of polling: the app connecting, collector startup completing, a component mounting, a query settling, or a navigation completing.',
+    'Block until a runtime condition holds so the agent can synchronize instead of polling: the app connecting, collector startup completing, a component mounting, one exact query settling, or a navigation completing. For queries, prefer queryHash or queryKey from query_list; legacy name matching is exact, never substring-based.',
   group: 'meta',
-  input: z.object({
-    condition: z.enum(WAIT_CONDITIONS).default('connected'),
-    name: z
-      .string()
-      .optional()
-      .describe('Component name, query key, or route to wait for, when relevant to the condition.'),
-    timeoutMs: z.number().int().positive().max(60_000).default(10_000),
-  }),
+  input: z
+    .object({
+      condition: z.enum(WAIT_CONDITIONS).default('connected'),
+      name: z
+        .string()
+        .optional()
+        .describe(
+          'Component name or route. For query-settled, a legacy exact queryHash, JSON array key, or one-item string key; prefer queryHash/queryKey.',
+        ),
+      queryHash: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Exact queryHash from query_list; only for condition="query-settled".'),
+      queryKey: z
+        .array(z.unknown())
+        .optional()
+        .describe('Exact structured query key; only for condition="query-settled".'),
+      timeoutMs: z.number().int().positive().max(60_000).default(10_000),
+    })
+    .strict()
+    .superRefine((input, context) => {
+      if (input.queryHash !== undefined && input.queryKey !== undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: ['queryKey'],
+          message: 'choose queryHash or queryKey, not both',
+        })
+      }
+      const hasStructuredQuery = input.queryHash !== undefined || input.queryKey !== undefined
+      if (hasStructuredQuery && input.condition !== 'query-settled') {
+        context.addIssue({
+          code: 'custom',
+          path: ['condition'],
+          message: 'queryHash/queryKey require condition="query-settled"',
+        })
+      }
+      if (hasStructuredQuery && input.name !== undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: ['name'],
+          message: 'choose name or queryHash/queryKey, not both',
+        })
+      }
+    }),
   output: z.object({
     ok: z.boolean(),
     waitedMs: z.number(),
     reason: z.string().optional(),
+    query: z
+      .object({ queryHash: z.string(), queryKey: z.unknown() })
+      .optional()
+      .describe('The exact cache entry that satisfied a targeted query wait.'),
   }),
   annotations: { readOnlyHint: true },
 })

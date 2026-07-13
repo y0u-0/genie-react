@@ -32,7 +32,7 @@ import {
   type RenderNecessity,
   stateValue,
 } from './render-causes'
-import { safeCommitHandler } from './safe-instrumentation'
+import { isSafeRenderer, supportedCommitHandler } from './safe-instrumentation'
 import {
   classifyFibersWithinBudget,
   clearSourceCache,
@@ -166,10 +166,11 @@ export function startRenderTracking(): boolean {
   try {
     instrumentation = instrument({
       name: 'genie-react',
-      onCommitFiberRoot: safeCommitHandler((_rendererId: number, root: FiberRoot) => {
+      onCommitFiberRoot: supportedCommitHandler((rendererId: number, root: FiberRoot) => {
         commitListener?.()
         noteCommit()
         noteCommittedRoot(root)
+        if (!isSafeRenderer(rendererId)) return
         if (isRefreshCommit()) {
           noteExcludedRefreshCommit()
           return

@@ -195,7 +195,7 @@ describe('GenieClient', () => {
     const response = socket.decoded().find((m) => m.kind === 'app/response' && m.id === 'r3')
     expect(response.ok).toBe(false)
     expect(response.error).toContain('Invalid arguments for "echo"')
-    expect(response.error).toContain('message')
+    expect(response.error).toContain('/message:')
     expect(response.errorCode).toBe('invalid-args')
   })
 

@@ -103,11 +103,24 @@ export function reactCollector(): GenieCollector {
     tools: [
       defineCollectorTool({
         contract: reactGetTreeContract,
-        handler: ({ depth, includeHost, maxNodes, appOnly }) => {
+        handler: ({ rootId, depth, includeHost, maxNodes, appOnly }) => {
           const root = findRootFiber()
           if (!root)
             return { rootId: null, nodes: [], total: 0, truncated: false, truncatedBy: null }
-          return buildTree(root, { depth, includeHost, maxNodes, appOnly })
+          if (rootId === undefined) {
+            return buildTree(root, { depth, includeHost, maxNodes, appOnly })
+          }
+          const subtreeRoot = findFiberById(root, rootId)
+          if (!subtreeRoot) {
+            throw new Error(`Component ${rootId} not found (it may have unmounted).`)
+          }
+          return buildTree(subtreeRoot, {
+            depth,
+            includeHost,
+            maxNodes,
+            appOnly,
+            includeRoot: true,
+          })
         },
       }),
       defineCollectorTool({
@@ -293,15 +306,25 @@ export function reactCollector(): GenieCollector {
       }),
       defineCollectorTool({
         contract: reactEffectAuditContract,
-        handler: async ({ component, onlyHot, appOnly, minUpdates, minFireRate, limit }) => {
-          const { components, libraryEffectsHidden, hotnessCriteria } = await getEffectAuditReport({
-            component,
-            onlyHot,
-            appOnly,
-            minUpdates,
-            minFireRate,
-            limit,
-          })
+        handler: async ({
+          component,
+          onlyHot,
+          appOnly,
+          packageName,
+          minUpdates,
+          minFireRate,
+          limit,
+        }) => {
+          const { components, libraryEffectsHidden, hotnessCriteria, packageFilter } =
+            await getEffectAuditReport({
+              component,
+              onlyHot,
+              appOnly,
+              packageName,
+              minUpdates,
+              minFireRate,
+              limit,
+            })
           const appEffects = components.reduce((sum, c) => sum + c.effects.length, 0)
           const filteredNote = appOnly
             ? appOnlyFilteredNote(appEffects, libraryEffectsHidden, 'effects')
@@ -312,6 +335,7 @@ export function reactCollector(): GenieCollector {
             hotnessCriteria,
             components,
             filteredNote,
+            packageFilter,
           }
         },
       }),

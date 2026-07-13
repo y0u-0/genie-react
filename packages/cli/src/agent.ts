@@ -17,6 +17,15 @@ import { normalizeBridgeUrl, resolveBridge } from './discovery'
 import { isRecord, isRecordArray } from './guards'
 import { reactSummarizers } from './react-output'
 import { summarizeSessionsOnly, summarizeStatus } from './session-output'
+import {
+  formatGroupIndex,
+  formatToolDetail,
+  formatToolsListing,
+  groupIndex,
+  relatedActions,
+  resolveToolsSelector,
+  slimDescriptor,
+} from './tool-output'
 
 export {
   summarizeCapture,
@@ -25,6 +34,13 @@ export {
 } from './capture-output'
 export * from './react-output'
 export { summarizeSessionsOnly, summarizeStatus } from './session-output'
+export {
+  formatGroupIndex,
+  formatToolDetail,
+  formatToolsListing,
+  relatedActions,
+  resolveToolsSelector,
+} from './tool-output'
 
 // The CLI's tool-calling surface: connects to the bridge as the `agent` role — straight from a shell, no separate server.
 
@@ -32,6 +48,8 @@ export interface AgentOptions {
   cwd?: string
   /** Override the bridge URL (else resolved from GENIE_BRIDGE_URL → .genie/bridge.json → default). */
   url?: string
+  /** How long to wait for the bridge WebSocket itself to open, in ms. */
+  connectTimeoutMs?: number
   /** How long to wait for an app to connect before giving up, in ms. */
   waitMs?: number
   /** Print raw JSON (compact, machine-first) instead of the per-tool summary. */
@@ -48,7 +66,13 @@ export interface AgentOptions {
   fields?: string[]
   /** Status-only projection that omits app/domain/tool metadata. */
   sessionsOnly?: boolean
+  /** Print startup and connection diagnostics to stderr. */
+  verbose?: boolean
+  /** Resolved CLI package version, supplied by the executable for diagnostics. */
+  cliVersion?: string
 }
+
+export const CLI_OUTPUT_SCHEMA_VERSION = '1.0'
 
 type AgentFailureReason =
   | 'invalid_input'
@@ -74,6 +98,7 @@ export function formatAgentFailure(
   options: AgentFailureOptions = {},
 ): string {
   return JSON.stringify({
+    schemaVersion: CLI_OUTPUT_SCHEMA_VERSION,
     status: 'error',
     reason,
     message,
@@ -119,12 +144,24 @@ function emitFailure(
   else err(message)
 }
 
+const SAFE_TOOL_NAME = /^[a-z][a-z0-9_.-]{0,127}$/
+
+function toolHelpNext(tool: string): AgentFailureOptions['next'] | undefined {
+  if (!SAFE_TOOL_NAME.test(tool)) return undefined
+  return {
+    command: `genie-react tools ${tool}`,
+    argv: ['genie-react', 'tools', tool],
+  }
+}
+
 async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url: string }> {
   const cwd = opts.cwd ?? process.cwd()
   let url = opts.url
+  let source = 'flag'
   if (!url) {
     const bridge = await resolveBridge(cwd)
     url = bridge.url
+    source = bridge.source
     if (bridge.source === 'fallback') {
       if (!isMachineMode(opts))
         err(
@@ -133,12 +170,19 @@ async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url:
     }
   }
   url = normalizeBridgeUrl(url)
+  const connectTimeoutMs = opts.connectTimeoutMs ?? 8_000
+  if (opts.verbose) {
+    err(
+      `genie-react: phase=bridge target=${url} source=${source} connectTimeoutMs=${connectTimeoutMs} appWaitMs=${opts.waitMs ?? 15_000} callTimeoutMs=${opts.timeoutMs ?? 20_000} session=${resolveSession(opts.session) ?? 'current'}`,
+    )
+  }
   const link = new GenieAgentLink({
     url,
-    connectTimeoutMs: 8_000,
+    connectTimeoutMs,
     // A per-call --timeout still wins per-invoke (timeoutMs + grace); this is the default when none is given.
     invokeTimeoutMs: opts.timeoutMs ? opts.timeoutMs + INVOKE_GRACE_MS : 20_000,
     sessionId: resolveSession(opts.session),
+    logger: opts.verbose ? (message) => err(`genie-react: phase=bridge ${message}`) : undefined,
   })
   link.start()
   return { link, url }
@@ -313,6 +357,11 @@ export function summarizeRouterState(result: unknown): string | null {
   if (result.isTransitioning === true) parts.push('transitioning')
   parts.push(`${num(result.matchCount)} matches`)
   if (num(result.pendingMatchCount) > 0) parts.push(`${num(result.pendingMatchCount)} pending`)
+  if (result.locationSync === 'mismatched' && isRecord(result.browserLocation)) {
+    parts.push(`! browser at ${JSON.stringify(String(result.browserLocation.pathname))}`)
+  } else if (result.locationSync === 'matched') {
+    parts.push('browser matched')
+  }
   return parts.join(' · ')
 }
 
@@ -458,7 +507,16 @@ export async function runCall(
       error instanceof FieldSelectionError ? 'invalid_input' : (code ?? 'operational_failure')
     emitFailure(opts, reason, `Call to ${tool} failed${callErrorSuffix(error)}`, {
       retryInMs: error instanceof BridgeCallError ? error.retryInMs : undefined,
-      userActionRequired: reason === 'invalid_input' || reason === 'unknown-session',
+      userActionRequired:
+        reason === 'invalid_input' ||
+        reason === 'invalid-args' ||
+        reason === 'unknown-session' ||
+        reason === 'operational_failure',
+      ...(reason === 'invalid-args'
+        ? { next: toolHelpNext(tool) }
+        : reason === 'unknown-session' || reason === 'operational_failure'
+          ? { next: { command: 'genie-react status', argv: ['genie-react', 'status'] } }
+          : {}),
     })
     return 1
   } finally {
@@ -525,7 +583,12 @@ interface BatchResult {
   message?: string
   error?: string
   errorCode?: string
+  userActionRequired?: boolean
+  retryInMs?: number
+  next?: AgentFailureOptions['next']
 }
+
+type VersionedBatchResult = BatchResult & { schemaVersion: typeof CLI_OUTPUT_SCHEMA_VERSION }
 
 /** `genie-react batch`: one connection, sequential calls, continue-on-error; legacy/default and --ndjson emit JSONL, while --json emits one valid array. */
 export async function runBatch(
@@ -549,10 +612,14 @@ export async function runBatch(
 
   const { link } = await connect(opts)
   let anyFailed = false
-  const results: BatchResult[] = []
+  const results: VersionedBatchResult[] = []
   const emitBatchResult = (result: BatchResult): void => {
-    if (opts.json) results.push(result)
-    else out(JSON.stringify(result))
+    const versioned: VersionedBatchResult = {
+      schemaVersion: CLI_OUTPUT_SCHEMA_VERSION,
+      ...result,
+    }
+    if (opts.json) results.push(versioned)
+    else out(JSON.stringify(versioned))
   }
   try {
     const waitMs = opts.waitMs ?? 15_000
@@ -583,6 +650,10 @@ export async function runBatch(
       } catch (error) {
         anyFailed = true
         const errorCode = error instanceof BridgeCallError ? error.errorCode : undefined
+        const userActionRequired =
+          errorCode === 'invalid-args' ||
+          errorCode === 'unknown-session' ||
+          errorCode === 'not-connected'
         emitBatchResult({
           tool: item.tool,
           ok: false,
@@ -591,6 +662,15 @@ export async function runBatch(
           message: errorMessage(error),
           error: errorMessage(error),
           ...(errorCode ? { errorCode } : {}),
+          userActionRequired,
+          ...(error instanceof BridgeCallError && error.retryInMs !== undefined
+            ? { retryInMs: error.retryInMs }
+            : {}),
+          ...(errorCode === 'invalid-args'
+            ? { next: toolHelpNext(item.tool) }
+            : errorCode === 'unknown-session' || errorCode === 'not-connected'
+              ? { next: { command: 'genie-react status', argv: ['genie-react', 'status'] } }
+              : {}),
         })
       }
     }
@@ -637,6 +717,7 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
     }
     const result = opts.sessionsOnly
       ? {
+          schemaVersion: CLI_OUTPUT_SCHEMA_VERSION,
           connected: status.connected,
           ready: status.ready,
           sessionId: status.sessionId,
@@ -662,7 +743,7 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
             ...(session.staleMs === undefined ? {} : { staleMs: session.staleMs }),
           })),
         }
-      : status
+      : { schemaVersion: CLI_OUTPUT_SCHEMA_VERSION, ...status }
     out(
       opts.sessionsOnly && !opts.json
         ? summarizeSessionsOnly(result)
@@ -670,7 +751,13 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
     )
     return 0
   } catch (error) {
-    emitFailure(opts, 'operational_failure', `Status check failed: ${errorMessage(error)}`)
+    emitFailure(opts, 'operational_failure', `Status check failed: ${errorMessage(error)}`, {
+      userActionRequired: true,
+      next: {
+        command: 'genie-react doctor --live',
+        argv: ['genie-react', 'doctor', '--live'],
+      },
+    })
     return 1
   } finally {
     link.close()
@@ -743,211 +830,14 @@ export async function runTools(
     )
     return 0
   } catch (error) {
-    emitFailure(opts, 'operational_failure', `Tool discovery failed: ${errorMessage(error)}`)
+    emitFailure(opts, 'operational_failure', `Tool discovery failed: ${errorMessage(error)}`, {
+      userActionRequired: true,
+      next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+    })
     return 1
   } finally {
     link.close()
   }
-}
-
-type ToolsSelection =
-  | { kind: 'tool'; tool: ToolDescriptor }
-  | { kind: 'group'; tools: ToolDescriptor[] }
-  | { kind: 'unknown'; message: string }
-
-/** Exact tool name → its full contract; exact group → that group's listing; else suggestions, never a full dump. */
-export function resolveToolsSelector(tools: ToolDescriptor[], selector: string): ToolsSelection {
-  const tool = tools.find((candidate) => candidate.name === selector)
-  if (tool) return { kind: 'tool', tool }
-  const inGroup = tools.filter((candidate) => candidate.group === selector)
-  if (inGroup.length > 0) return { kind: 'group', tools: inGroup }
-
-  const needle = selector.toLowerCase()
-  const near = tools
-    .map((candidate) => candidate.name)
-    .filter((name) => name.includes(needle))
-    .slice(0, 5)
-  const groups = [...new Set(tools.map((candidate) => candidate.group))].sort()
-  const hint = near.length > 0 ? `Did you mean: ${near.join(', ')}? ` : ''
-  return {
-    kind: 'unknown',
-    message: `Unknown tool or group "${selector}". ${hint}Groups: ${groups.join(', ')}`,
-  }
-}
-
-const ACTION_PREFIXES: Record<string, string[]> = {
-  router: ['router_'],
-  query: ['query_', 'mutation_'],
-  'react.render': ['react_'],
-  'react.inspect': ['react_'],
-  'react.tree': ['react_'],
-  'react.profile': ['react_'],
-  plugin: ['plugin_'],
-}
-
-/** Mutations pool in the generic "action" group; surface the domain's ones under its read group so nobody hunts (or dumps --all) for router_navigate. */
-export function relatedActions(tools: ToolDescriptor[], group: string): string[] {
-  const prefixes = ACTION_PREFIXES[group]
-  if (!prefixes) return []
-  return tools
-    .filter(
-      (tool) => tool.group === 'action' && prefixes.some((prefix) => tool.name.startsWith(prefix)),
-    )
-    .map((tool) => tool.name)
-}
-
-/** Layer 1 of the discovery ladder: groups + counts + a name preview, ~10× smaller than the flat catalog. */
-export function formatGroupIndex(appName: string | undefined, tools: ToolDescriptor[]): string {
-  const groups = groupIndex(appName, tools).groups
-  const width = Math.max(0, ...groups.map((group) => group.group.length))
-  const lines = [`${tools.length} tools from ${appName ?? 'the app'} · ${groups.length} groups`, '']
-  for (const group of groups) {
-    const preview =
-      group.tools.slice(0, 3).join(', ') +
-      (group.tools.length > 3 ? `, +${group.tools.length - 3} more` : '')
-    lines.push(`  ${group.group.padEnd(width)} ${String(group.count).padStart(2)} — ${preview}`)
-  }
-  lines.push(
-    '',
-    'drill in: genie-react tools <group> · one tool: genie-react tools <tool> · everything: genie-react tools --all',
-  )
-  return lines.join('\n')
-}
-
-function groupIndex(
-  appName: string | undefined,
-  tools: ToolDescriptor[],
-): {
-  app: string | null
-  total: number
-  groups: Array<{ group: string; count: number; tools: string[] }>
-} {
-  const byGroup = new Map<string, string[]>()
-  for (const tool of tools) {
-    const list = byGroup.get(tool.group) ?? []
-    list.push(tool.name)
-    byGroup.set(tool.group, list)
-  }
-  return {
-    app: appName ?? null,
-    total: tools.length,
-    groups: [...byGroup]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([group, names]) => ({ group, count: names.length, tools: names })),
-  }
-}
-
-/** Layer 3: one tool's full contract — the long description lives here instead of in a 100KB catalog dump. */
-export function formatToolDetail(tool: ToolDescriptor): string {
-  const lines = [
-    `${tool.name} — ${tool.title} [${tool.group}]`,
-    '',
-    tool.description,
-    '',
-    'params:',
-  ]
-  const object = objectSchema(tool.inputJsonSchema)
-  const properties = object && isRecord(object.properties) ? object.properties : {}
-  const required = new Set(Array.isArray(object?.required) ? object.required : [])
-  const names = Object.keys(properties)
-  if (names.length === 0) lines.push('  (none)')
-  for (const name of names) {
-    const property = properties[name]
-    const parts = [`  ${name}${required.has(name) ? '' : '?'}: ${jsonSchemaType(property)}`]
-    if (isRecord(property)) {
-      if (property.default !== undefined)
-        parts.push(`(default ${JSON.stringify(property.default)})`)
-      if (typeof property.description === 'string') parts.push(`— ${property.description}`)
-    }
-    lines.push(parts.join(' '))
-  }
-  lines.push('', `example: genie-react call ${tool.name} '${exampleArgs(properties, required)}'`)
-  return lines.join('\n')
-}
-
-function slimDescriptor(tool: ToolDescriptor): { name: string; title: string; params: string } {
-  return { name: tool.name, title: tool.title, params: describeToolParams(tool.inputJsonSchema) }
-}
-
-function exampleArgs(properties: Record<string, unknown>, required: Set<unknown>): string {
-  const example: Record<string, unknown> = {}
-  for (const name of Object.keys(properties)) {
-    if (required.has(name)) example[name] = examplePropValue(properties[name], name)
-  }
-  return JSON.stringify(example)
-}
-
-function examplePropValue(schema: unknown, name: string): unknown {
-  if (isRecord(schema)) {
-    if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0]
-    if (schema.default !== undefined) return schema.default
-    const type = Array.isArray(schema.type) ? schema.type[0] : schema.type
-    if (type === 'number' || type === 'integer') return 1
-    if (type === 'boolean') return true
-    if (type === 'array') return []
-    if (type === 'object') return {}
-  }
-  return `<${name}>`
-}
-
-type ToolDescriptor = BridgeStatusMessage['tools'][number]
-
-/** Renders the catalog grouped by domain, params derived from each tool's advertised input schema (`?` marks optional). */
-export function formatToolsListing(status: {
-  app?: { name?: string } | null
-  tools: ToolDescriptor[]
-}): string {
-  const lines: string[] = [`${status.tools.length} tools from ${status.app?.name ?? 'the app'}:`]
-  const groups = new Map<string, ToolDescriptor[]>()
-  for (const tool of status.tools) {
-    const list = groups.get(tool.group) ?? []
-    list.push(tool)
-    groups.set(tool.group, list)
-  }
-  for (const [group, tools] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
-    lines.push('', `  ${group}`)
-    for (const tool of tools.sort((a, b) => a.name.localeCompare(b.name))) {
-      lines.push(
-        `    ${tool.name} — ${tool.title}`,
-        `      ${describeToolParams(tool.inputJsonSchema)}`,
-      )
-    }
-  }
-  return lines.join('\n')
-}
-
-function describeToolParams(schema: unknown): string {
-  const object = objectSchema(schema)
-  const properties = object && isRecord(object.properties) ? object.properties : {}
-  const names = Object.keys(properties)
-  if (names.length === 0) return '(no args)'
-  const required = new Set(Array.isArray(object?.required) ? object.required : [])
-  return names
-    .map((name) => `${name}${required.has(name) ? '' : '?'}: ${jsonSchemaType(properties[name])}`)
-    .join(', ')
-}
-
-/** Finds the object node carrying `properties`, unwrapping the `allOf` a refined schema emits. */
-function objectSchema(schema: unknown): Record<string, unknown> | null {
-  if (!isRecord(schema)) return null
-  if (isRecord(schema.properties)) return schema
-  if (Array.isArray(schema.allOf)) {
-    for (const part of schema.allOf) {
-      const found = objectSchema(part)
-      if (found) return found
-    }
-  }
-  return null
-}
-
-function jsonSchemaType(schema: unknown): string {
-  if (!isRecord(schema)) return 'any'
-  if (Array.isArray(schema.enum))
-    return schema.enum.map((value) => JSON.stringify(value)).join(' | ')
-  if (Array.isArray(schema.anyOf)) return [...new Set(schema.anyOf.map(jsonSchemaType))].join(' | ')
-  if (typeof schema.type === 'string') return schema.type
-  if (Array.isArray(schema.type)) return schema.type.join(' | ')
-  return 'any'
 }
 
 function waitForTools(

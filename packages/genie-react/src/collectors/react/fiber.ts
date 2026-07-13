@@ -86,6 +86,8 @@ export function registerFiber(fiber: Fiber): NodeId {
 
 // Live committed roots in first-committed order: the DOM-free way to find the tree (React Native has no document to seed from).
 const committedRoots = new Map<FiberRoot, Fiber>()
+const ROOT_CANDIDATE_SCAN_LIMIT = 100
+const ROOT_SCORE_LIMIT = 2_000
 
 // DevTools semantics: a commit whose current has no child is that root unmounting, so it stops being a candidate (and stops being retained).
 export function noteCommittedRoot(root: FiberRoot): void {
@@ -119,23 +121,49 @@ interface TreeCacheEntry {
 let treeCache: TreeCacheEntry | null = null
 
 export function findRootFiber(): Fiber | null {
+  const candidates = new Set<Fiber>()
   if (typeof document !== 'undefined') {
-    const seeds: Array<Element | null> = [
-      document.getElementById('root'),
-      document.body,
-      document.documentElement,
-    ]
-    for (const seed of seeds) {
+    const explicitRoot = document.getElementById('root')
+    const explicitFiber = explicitRoot ? getFiberFromHostInstance(explicitRoot) : null
+    if (explicitFiber) return climbToRoot(explicitFiber)
+    for (const seed of [document.body, document.documentElement]) {
       const fiber = seed ? getFiberFromHostInstance(seed) : null
-      if (fiber) return climbToRoot(fiber)
+      if (fiber) candidates.add(climbToRoot(fiber))
     }
-    for (const element of Array.from(document.querySelectorAll('body *')).slice(0, 50)) {
+    for (const element of Array.from(document.querySelectorAll('body *')).slice(
+      0,
+      ROOT_CANDIDATE_SCAN_LIMIT,
+    )) {
       const fiber = getFiberFromHostInstance(element)
-      if (fiber) return climbToRoot(fiber)
+      if (fiber) candidates.add(climbToRoot(fiber))
     }
   }
-  const first = committedRoots.values().next()
-  return first.done ? null : climbToRoot(first.value)
+  for (const root of committedRoots.values()) candidates.add(climbToRoot(root))
+  let selected: Fiber | null = null
+  let selectedScore = -1
+  for (const candidate of candidates) {
+    const score = rootScore(candidate)
+    if (score > selectedScore) {
+      selected = candidate
+      selectedScore = score
+    }
+  }
+  return selected
+}
+
+function rootScore(root: Fiber): number {
+  let score = 0
+  const stack: Fiber[] = [root]
+  let visited = 0
+  while (stack.length > 0 && visited < ROOT_SCORE_LIMIT) {
+    const fiber = stack.pop()
+    if (!fiber) continue
+    visited += 1
+    if (fiber !== root && (isCompositeFiber(fiber) || isHostFiber(fiber))) score += 1
+    if (fiber.sibling) stack.push(fiber.sibling)
+    if (fiber.child) stack.push(fiber.child)
+  }
+  return score
 }
 
 function climbToRoot(fiber: Fiber): Fiber {
@@ -242,9 +270,15 @@ export function appOnlyFilteredNote(
 
 export async function buildTree(
   root: Fiber,
-  options: { depth: number; includeHost: boolean; maxNodes: number; appOnly?: boolean },
+  options: {
+    depth: number
+    includeHost: boolean
+    maxNodes: number
+    appOnly?: boolean
+    includeRoot?: boolean
+  },
 ): Promise<TreeResult> {
-  const cacheKey = `${options.depth}|${options.maxNodes}|${options.includeHost}|${options.appOnly ?? false}`
+  const cacheKey = `${options.depth}|${options.maxNodes}|${options.includeHost}|${options.appOnly ?? false}|${options.includeRoot ?? false}`
   if (
     treeCache &&
     treeCache.generation === treeGeneration &&
@@ -261,13 +295,18 @@ export async function buildTree(
   let nodeCapped = false
 
   // Past the depth/node caps the walk hands off to this tight counter, so one pass serves both the capped collection and the full-tree `total`.
-  const countOnly = (fiber: Fiber): void => {
+  const countOnly = (fiber: Fiber): number => {
+    let counted = 0
     let child: Fiber | null = fiber.child
     while (child) {
-      if (isCompositeFiber(child) || (options.includeHost && isHostFiber(child))) total += 1
-      countOnly(child)
+      if (isCompositeFiber(child) || (options.includeHost && isHostFiber(child))) {
+        total += 1
+        counted += 1
+      }
+      counted += countOnly(child)
       child = child.sibling
     }
+    return counted
   }
 
   const visit = (fiber: Fiber, parentId: NodeId | null, depth: number): void => {
@@ -294,8 +333,7 @@ export async function buildTree(
           })
           if (depth > 0) visit(child, id, depth - 1)
           else {
-            if (child.child) depthClipped = true
-            countOnly(child)
+            if (countOnly(child) > 0) depthClipped = true
           }
         }
       } else {
@@ -305,7 +343,25 @@ export async function buildTree(
     }
   }
 
-  visit(root, null, options.depth)
+  if (options.includeRoot) {
+    const id = registerFiber(root)
+    const composite = isCompositeFiber(root)
+    total += 1
+    entries.push({
+      node: {
+        id,
+        parentId: null,
+        name: nameOf(root),
+        key: root.key,
+        kind: composite ? 'component' : 'host',
+      },
+      fiber: root,
+    })
+    if (options.depth > 0) visit(root, id, options.depth - 1)
+    else if (countOnly(root) > 0) depthClipped = true
+  } else {
+    visit(root, null, options.depth)
+  }
   let nodes = entries.map((entry) => entry.node)
   let filteredNote: string | undefined
   let classificationPartial = false

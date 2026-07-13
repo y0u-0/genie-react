@@ -1,7 +1,8 @@
-import { newId } from '../protocol'
+import { newId, normalizeSessionName } from '../protocol'
 
 const LOGICAL_SESSION_KEY = 'genie-react:logical-session-id'
 const DOCUMENT_GENERATION_KEY = 'genie-react:document-generation'
+const SESSION_NAME_KEY = 'genie-react:session-name'
 const RUNTIME_IDENTITY_KEY = Symbol.for('genie-react:runtime-session-identity')
 
 interface SessionStorageLike {
@@ -14,6 +15,29 @@ export interface SessionIdentity {
   logicalSessionId: string
   /** Increases whenever that tab creates a new document. */
   documentGeneration: number
+}
+
+/** Persists a validated alias per browser tab so route changes can drop `_genie` without breaking the next reload. */
+export function createSessionName(
+  candidate: string | undefined,
+  storage?: SessionStorageLike,
+): string | undefined {
+  let sessionName = normalizeSessionName(candidate)
+  if (!sessionName && storage) {
+    try {
+      sessionName = normalizeSessionName(storage.getItem(SESSION_NAME_KEY) ?? undefined)
+    } catch {
+      // A URL/option candidate still works when storage is blocked.
+    }
+  }
+  if (sessionName && storage) {
+    try {
+      storage.setItem(SESSION_NAME_KEY, sessionName)
+    } catch {
+      // The alias remains valid for the current document when persistence is unavailable.
+    }
+  }
+  return sessionName
 }
 
 type IdentityGlobal = typeof globalThis & {
@@ -57,6 +81,10 @@ export function runtimeSessionIdentity(): SessionIdentity {
   const runtime = globalThis as IdentityGlobal
   runtime[RUNTIME_IDENTITY_KEY] ??= createSessionIdentity(readSessionStorage())
   return runtime[RUNTIME_IDENTITY_KEY]
+}
+
+export function runtimeSessionName(candidate?: string): string | undefined {
+  return createSessionName(candidate, readSessionStorage())
 }
 
 function readSessionStorage(): SessionStorageLike | undefined {

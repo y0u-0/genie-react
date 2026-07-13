@@ -77,35 +77,54 @@ export const reactEffectAuditContract = defineAgentToolContract({
   name: 'react_effect_audit',
   title: 'Effect audit (did effects fire & why)',
   description:
-    'Audit useEffect / useLayoutEffect / useInsertionEffect executions: observed firing counts, dependency mode/change, cleanup, thresholded hotness with sample evidence, and explicit implementation provenance separate from the owning component. Ownership is app/library/unknown, while evidence is exact/inferred/unknown; unknown effects are never silently filtered as application code. appOnly (default true) drops only effects attributed to libraries. Interact with the app (or react_clear_renders to reset) first, then read this.',
+    'Audit useEffect / useLayoutEffect / useInsertionEffect executions: observed firing counts, dependency mode/change, cleanup, thresholded hotness with sample evidence, and explicit implementation provenance separate from the owning component. Ownership is app/library/unknown, while evidence is exact/inferred/unknown; unknown effects are never silently filtered as application code. appOnly (default true) drops only effects attributed to libraries. To isolate one dependency, set appOnly:false plus exact packageName. Interact with the app (or react_clear_renders to reset) first, then read this.',
   group: 'react.render',
-  input: z.object({
-    component: z.string().optional().describe('Only components whose name contains this string.'),
-    onlyHot: z
-      .boolean()
-      .default(false)
-      .describe('Return only effects whose thresholded hotness label is "hot".'),
-    appOnly: z
-      .boolean()
-      .default(true)
-      .describe(
-        'Exclude library components AND library-origin effects (node_modules, incl. Vite pre-bundled deps) so your own effects surface above hook noise; set false to include them.',
-      ),
-    minUpdates: z
-      .number()
-      .int()
-      .min(1)
-      .max(1_000)
-      .default(3)
-      .describe('Minimum observed updates required before an effect can be classified hot.'),
-    minFireRate: z
-      .number()
-      .min(0.1)
-      .max(1)
-      .default(1)
-      .describe('Minimum fired/updates ratio required for hot classification.'),
-    limit: z.number().int().min(1).max(200).default(40),
-  }),
+  input: z
+    .object({
+      component: z.string().optional().describe('Only components whose name contains this string.'),
+      onlyHot: z
+        .boolean()
+        .default(false)
+        .describe('Return only effects whose thresholded hotness label is "hot".'),
+      appOnly: z
+        .boolean()
+        .default(true)
+        .describe(
+          'Exclude library components AND library-origin effects (node_modules, incl. Vite pre-bundled deps) so your own effects surface above hook noise; set false to include them.',
+        ),
+      packageName: z
+        .string()
+        .trim()
+        .min(1)
+        .max(214)
+        .optional()
+        .describe(
+          'Only effects attributed to this exact npm package, e.g. "@tanstack/react-query". Requires appOnly:false.',
+        ),
+      minUpdates: z
+        .number()
+        .int()
+        .min(1)
+        .max(1_000)
+        .default(3)
+        .describe('Minimum observed updates required before an effect can be classified hot.'),
+      minFireRate: z
+        .number()
+        .min(0.1)
+        .max(1)
+        .default(1)
+        .describe('Minimum fired/updates ratio required for hot classification.'),
+      limit: z.number().int().min(1).max(200).default(40),
+    })
+    .superRefine((input, context) => {
+      if (input.packageName !== undefined && input.appOnly) {
+        context.addIssue({
+          code: 'custom',
+          path: ['appOnly'],
+          message: 'set appOnly:false when filtering by packageName',
+        })
+      }
+    }),
   output: z.object({
     tracking: z.boolean(),
     commits: z.number(),
@@ -137,6 +156,15 @@ export const reactEffectAuditContract = defineAgentToolContract({
       .describe(
         'Present only when appOnly hid library-origin effects; distinguishes "no effects filtered" from "no effects exist".',
       ),
+    packageFilter: z
+      .object({
+        packageName: z.string(),
+        matchedEffects: z.number().int().nonnegative(),
+        excludedEffects: z.number().int().nonnegative(),
+        unknownPackageEffects: z.number().int().nonnegative(),
+      })
+      .optional()
+      .describe('Explicit accounting for an exact packageName filter.'),
   }),
   annotations: { readOnlyHint: true },
 })

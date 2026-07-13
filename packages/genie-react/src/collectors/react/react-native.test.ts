@@ -125,6 +125,19 @@ describe('findRootFiber', () => {
     expect(findRootFiber()).toBe(first)
   })
 
+  it('selects the largest mounted tree when several renderers share the page', () => {
+    const overlay = rootFiber()
+    const app = rootFiber()
+    const appComponent = componentWith([domHost('main'), domHost('button')], 'App')
+    ;(app as { child: Fiber }).child = appComponent
+    ;(appComponent as { return: Fiber }).return = app
+
+    noteCommittedRoot(asRoot(overlay))
+    noteCommittedRoot(asRoot(app))
+
+    expect(findRootFiber()).toBe(app)
+  })
+
   it('follows a recommit of the same root to its new current fiber', () => {
     const root = asRoot(rootFiber())
     const after = rootFiber()

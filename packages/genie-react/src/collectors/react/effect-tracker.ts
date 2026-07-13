@@ -136,6 +136,8 @@ export interface EffectAuditQuery {
   onlyHot?: boolean
   /** Exclude library components (node_modules, incl. Vite pre-bundled deps). Default true. */
   appOnly?: boolean
+  /** Exact library provenance package to retain; callers must disable appOnly. */
+  packageName?: string
   /** Minimum observed component updates before an effect can be classified hot. */
   minUpdates?: number
   /** Minimum observed effect fire rate across updates before it is classified hot. */
@@ -220,6 +222,12 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
   components: EffectAuditRecord[]
   libraryEffectsHidden: number
   hotnessCriteria: EffectHotnessCriteria
+  packageFilter?: {
+    packageName: string
+    matchedEffects: number
+    excludedEffects: number
+    unknownPackageEffects: number
+  }
 }> {
   let list = [...records.values()]
   if (query.component) {
@@ -269,6 +277,35 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
 
   let findings = all
   let libraryEffectsHidden = 0
+  let packageFilter:
+    | {
+        packageName: string
+        matchedEffects: number
+        excludedEffects: number
+        unknownPackageEffects: number
+      }
+    | undefined
+  if (query.packageName !== undefined) {
+    const allEffects = all.flatMap((record) => record.effects)
+    const unknownPackageEffects = allEffects.filter(
+      (effect) => effect.provenance.packageName === null,
+    ).length
+    findings = all
+      .map((record) => ({
+        ...record,
+        effects: record.effects.filter(
+          (effect) => effect.provenance.packageName === query.packageName,
+        ),
+      }))
+      .filter((record) => record.effects.length > 0)
+    const matchedEffects = totalEffects(findings)
+    packageFilter = {
+      packageName: query.packageName,
+      matchedEffects,
+      excludedEffects: allEffects.length - matchedEffects,
+      unknownPackageEffects,
+    }
+  }
   if (appOnly) {
     findings = all
       .map((record) => ({
@@ -296,6 +333,7 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
     components: findings.slice(0, query.limit),
     libraryEffectsHidden,
     hotnessCriteria,
+    ...(packageFilter === undefined ? {} : { packageFilter }),
   }
 }
 

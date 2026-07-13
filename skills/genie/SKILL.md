@@ -23,11 +23,13 @@ For another web bundler, run `npx @genie-react/cli hub` and load its client scri
 
 ## 1. Connect and pin the tab
 
-Open the app. Then run:
+Open the app. Run this from the app directory:
 
 ```bash
 genie-react status --sessions-only
 ```
+
+From a workspace root, Genie selects the only live app. If several apps are live, it stops and lists them. Move into the right app directory or pass `--url`.
 
 With several tabs or agents, give your tab a name:
 
@@ -41,9 +43,11 @@ Pin every later call to it:
 export GENIE_SESSION=my-agent
 ```
 
-The name and logical session survive reconnects. A physical session ID also works, but it is less useful for long jobs.
+The name and logical session survive navigation, reloads, and reconnects. A physical session ID also works, but it is less useful for long jobs.
 
-This step is complete when the target session says `ready=true`. Run full `genie-react status` once if you need its domain list.
+This step is complete when the named target says `ready=true`. Run full `genie-react status` once if you need its domain list.
+
+If startup hangs, rerun with `--verbose`. It prints the CLI version, chosen bridge, session, and time budgets to stderr. Use `--connect-timeout <ms>` to bound only the WebSocket connection.
 
 ## 2. Measure one exact flow
 
@@ -73,6 +77,29 @@ This step is complete when the output covers one known interaction.
 - Frame rate: `browser_fps` while the tab is visible.
 
 Effect results include ownership, the effect's own source, and `exact`, `inferred`, or `unknown` evidence. A hotness result is only strong after enough updates. Treat `insufficient-data` as unknown, not healthy or hot.
+
+For one dependency's effects, use an exact package name with `appOnly:false`:
+
+```bash
+genie-react call react_effect_audit '{"packageName":"@tanstack/react-query","appOnly":false}'
+```
+
+For a large tree, find a component and read only its subtree:
+
+```bash
+genie-react call react_find_components '{"query":"Checkout","exact":true}'
+genie-react call react_get_tree '{"rootId":42,"depth":3,"maxNodes":100}'
+```
+
+`router_get_state` reads Router state and browser history in one call. Check `locationSync` before trusting the URL.
+
+Wait for one exact Query key instead of matching text:
+
+```bash
+genie-react call devtools_wait '{"condition":"query-settled","queryKey":["cart"]}'
+```
+
+Genie can prove readiness, Query idle, and Router navigation. It cannot prove that every custom request or animation frame in an app is idle.
 
 Use `genie-react tools` to list groups. Use `genie-react tools <tool>` for the full schema and an example. Do not dump every contract unless it is needed.
 
@@ -109,9 +136,10 @@ This step is complete when the requested budgets pass and the UI behavior is sti
 
 - `--json` prints one compact JSON value to stdout.
 - `--fields id,name,renders` prints selected records as JSONL.
-- `batch` uses one connection and prints JSONL by default. `batch --json` prints one JSON array.
-- `devtools_wait` waits for a connection, component, query, or navigation. Prefer it to polling.
-- Machine-mode failures keep stdout as valid JSON and include a stable `reason`.
+- `batch` uses one connection and prints JSONL by default. `batch --ndjson` is explicit JSONL. `batch --json` prints one JSON array.
+- CLI-owned JSON envelopes include `schemaVersion`. Raw successful tool results follow that tool's advertised output schema.
+- Machine-mode failures keep stdout as valid JSON and include a stable `reason` plus a safe next command when recovery is known.
+- `devtools_wait` waits for a connection, component, exact query, or navigation. Prefer it to polling.
 - `[busy]` means the app's main thread is blocked. Wait for the returned delay and try again.
 
 The job is done only when the UI test passes, the live Genie evidence supports the result, and temporary runtime state has been restored.

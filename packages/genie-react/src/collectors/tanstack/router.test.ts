@@ -1,5 +1,5 @@
 import type { AnyRouter } from '@tanstack/react-router'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CollectorContext, GenieCollector } from '../../client'
 import { routerCollector } from './router'
 
@@ -73,6 +73,8 @@ function makeRouter(): StubRouter {
 }
 
 describe('routerCollector', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('router_get_state surfaces location, status, and match count', async () => {
     const collector = routerCollector(makeRouter().router)
     const state = (await call(collector, 'router_get_state', {})) as {
@@ -81,11 +83,37 @@ describe('routerCollector', () => {
       status: string
       isLoading: boolean
       matchCount: number
+      browserLocation: unknown
+      locationSync: string
     }
     expect(state.pathname).toBe('/')
     expect(state.status).toBe('idle')
     expect(state.isLoading).toBe(false)
     expect(state.matchCount).toBe(2)
+    expect(state.browserLocation).toBeNull()
+    expect(state.locationSync).toBe('unavailable')
+  })
+
+  it('router_get_state exposes browser and Router disagreement in one snapshot', async () => {
+    vi.stubGlobal('location', {
+      href: 'https://example.test/browser?tab=one#details',
+      pathname: '/browser',
+      search: '?tab=one',
+      hash: '#details',
+    })
+    const collector = routerCollector(makeRouter().router)
+
+    const state = (await call(collector, 'router_get_state', {})) as {
+      pathname: string
+      browserLocation: { pathname: string }
+      locationSync: string
+      snapshotAt: number
+    }
+
+    expect(state.pathname).toBe('/')
+    expect(state.browserLocation.pathname).toBe('/browser')
+    expect(state.locationSync).toBe('mismatched')
+    expect(state.snapshotAt).toBeGreaterThan(0)
   })
 
   it('router_list_matches returns each active match with dehydrated loader data', async () => {

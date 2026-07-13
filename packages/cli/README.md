@@ -15,6 +15,8 @@ npx @genie-react/cli status --sessions-only
 
 If more than one tab is open, add `?_genie=my-agent` to your app URL. Then use `--session my-agent` on each command, or set `GENIE_SESSION=my-agent` once.
 
+The alias survives navigation, reloads, and reconnects. From a workspace root, the CLI selects one live app or stops with an explicit list when several are live.
+
 ## Find wasted renders
 
 ```bash
@@ -45,7 +47,7 @@ Each effect reports its own source and whether ownership evidence is `exact`, `i
 ## Inspect live hooks
 
 ```bash
-npx @genie-react/cli call react_find_components '{"name":"App"}'
+npx @genie-react/cli call react_find_components '{"query":"App","exact":true}'
 # Use the id returned above. The demo returned App #65.
 npx @genie-react/cli call react_inspect_component '{"id":65}'
 ```
@@ -110,6 +112,19 @@ npx @genie-react/cli tools react_inspect_component
 ```
 
 `--json` prints one compact JSON value to stdout. `batch` prints JSONL by default; use `--json` for one JSON array. Errors use the same stable machine format and do not mix prose into stdout.
+
+Use `--ndjson` when you want to state JSONL explicitly. CLI-owned status, batch, and error objects include `schemaVersion`. Successful calls keep the output schema shown by `tools <tool>`.
+
+Use `--verbose` when startup is unclear. It prints the CLI version, bridge target, session, and time budgets to stderr. `--connect-timeout <ms>` bounds only the bridge connection.
+
+Wait on an exact Query key instead of sleeping:
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["demo","greeting"]}'
+```
+
+For a large component tree, call `react_find_components`, then pass its id as `rootId` to `react_get_tree`.
 
 ## Compare repeated runs
 

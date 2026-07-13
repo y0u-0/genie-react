@@ -22,6 +22,11 @@ export function parseQueryList(result: unknown): Record<string, unknown>[] | und
   return result.queries.map((entry) => (isRecord(entry) ? entry : {}))
 }
 
+/** One `query_get` result as a record, or `undefined`. */
+export function queryStateOf(result: unknown): Record<string, unknown> | undefined {
+  return isRecord(result) ? result : undefined
+}
+
 /** The `router_get_state` result as a record, or `undefined`. */
 export function routerStateOf(result: unknown): Record<string, unknown> | undefined {
   return isRecord(result) ? result : undefined

@@ -1,4 +1,3 @@
-import type { ZodError } from 'zod'
 import {
   type AgentErrorCode,
   type AppInfo,
@@ -10,6 +9,7 @@ import {
   devtoolsCaptureCreateContract,
   devtoolsCaptureListContract,
   devtoolsCaptureReadContract,
+  formatToolValidationError,
   newId,
   type ToolDescriptor,
 } from '../protocol'
@@ -362,26 +362,15 @@ export class CaptureManager<TSession extends CaptureSession> {
   }
 }
 
-function invalidArguments(tool: string, error: ZodError): CaptureInvocation {
-  const issues = error.issues.slice(0, 3).map((issue) => {
-    const path = issue.path.length > 0 ? issue.path.map(String).join('.') : 'arguments'
-    return `${safeDiagnostic(path)}: ${safeDiagnostic(issue.message)}`
-  })
+function invalidArguments(
+  tool: string,
+  error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] },
+): CaptureInvocation {
   return {
     ok: false,
-    error: `Invalid ${tool} arguments — ${issues.join('; ')}.`,
+    error: formatToolValidationError(tool, error.issues),
     errorCode: 'invalid-args',
   }
-}
-
-function safeDiagnostic(value: string): string {
-  const printable = [...value]
-    .map((character) => {
-      const point = character.codePointAt(0) ?? 0
-      return point <= 31 || point === 127 ? '?' : character
-    })
-    .join('')
-  return printable.length > 200 ? `${printable.slice(0, 200)}…` : printable
 }
 
 function commitCountOf(result: CaptureToolResult): number | null {

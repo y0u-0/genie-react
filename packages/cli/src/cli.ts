@@ -29,6 +29,7 @@ Run any command with --help for details and an example.
 Options:
   --port <n>       Listen on this hub port
   --url <ws-url>   Override the bridge URL discovered from .genie/bridge.json
+  --connect-timeout <ms> Bound bridge startup to 100–120000ms (default 8000)
   --wait <ms>      Call/tools/batch: wait up to 1–120000ms for an app (default 15000)
   --timeout <ms>   Bound each call; the bridge clamps to 1000–120000ms
   --fields <keys>  Project result records to validated comma-separated keys as JSONL
@@ -37,6 +38,7 @@ Options:
   --ndjson         Batch: explicitly print one JSON object per result line
   --sessions-only  Status: omit app, domain, and tool metadata
   --all            Print every tool contract
+  --verbose        Print bootstrap phases to stderr; machine stdout stays clean
   --dry-run        Preview init changes without writing files
   --yes, -y        Accept safe init defaults
   --help, -h       Show help
@@ -53,12 +55,13 @@ Usage:
   genie-react tools <tool>          one tool's full contract: description, params, a runnable example
   genie-react tools --all           the complete flat catalog
   genie-react tools --json          machine output at every level (slim by default, full schema per tool)
+  genie-react tools --verbose       show CLI version, bridge target, and time budgets on stderr
 
 Example:
   genie-react tools react.render && genie-react tools react_get_renders`,
   call: `genie-react call — invoke a tool on the live app
 
-Usage: genie-react call <tool> '<json-args>' [--session <id>] [--json] [--timeout <ms>] [--fields <keys>]
+Usage: genie-react call <tool> '<json-args>' [--session <id>] [--json] [--timeout <ms>] [--connect-timeout <ms>] [--fields <keys>]
 
 Args are one JSON string; discover names and params with genie-react tools.
 Output is a compact summary; --json prints the raw result.
@@ -72,7 +75,7 @@ Example:
   genie-react call react_find_components '{"query":"Button"}' --fields id,name,path`,
   batch: `genie-react batch — run many tool calls over one connection
 
-Usage: genie-react batch '<json-array>' [--session <target>] [--timeout <ms>] [--json|--ndjson]
+Usage: genie-react batch '<json-array>' [--session <target>] [--timeout <ms>] [--connect-timeout <ms>] [--json|--ndjson]
 
 The array items are {tool, args?} objects; calls run sequentially and continue on
 error. The default and --ndjson print one object per line for compatibility; --json
@@ -88,7 +91,8 @@ connected session. Target one by physical id, logical id, or unique name with
 --session <target> / GENIE_SESSION. Use --sessions-only for the smallest response.
 
 Example:
-  genie-react status --json`,
+  genie-react status --json
+  genie-react status --verbose`,
   doctor: `genie-react doctor — check that Genie is wired correctly
 
 Usage: genie-react doctor [--live]
@@ -130,10 +134,28 @@ const COMMAND_OPTIONS: Record<string, ReadonlySet<string>> = {
   doctor: new Set(['live']),
   hub: new Set(['port']),
   link: new Set(),
-  tools: new Set(['url', 'wait', 'session', 'json', 'all']),
-  status: new Set(['url', 'session', 'json', 'sessions-only']),
-  call: new Set(['url', 'wait', 'session', 'json', 'timeout', 'fields']),
-  batch: new Set(['url', 'wait', 'session', 'json', 'ndjson', 'timeout']),
+  tools: new Set(['url', 'connect-timeout', 'wait', 'session', 'json', 'all', 'verbose']),
+  status: new Set(['url', 'connect-timeout', 'session', 'json', 'sessions-only', 'verbose']),
+  call: new Set([
+    'url',
+    'connect-timeout',
+    'wait',
+    'session',
+    'json',
+    'timeout',
+    'fields',
+    'verbose',
+  ]),
+  batch: new Set([
+    'url',
+    'connect-timeout',
+    'wait',
+    'session',
+    'json',
+    'ndjson',
+    'timeout',
+    'verbose',
+  ]),
 }
 
 const POSITIONAL_LIMITS: Record<string, number> = {
@@ -198,6 +220,7 @@ async function main(): Promise<number> {
       live: { type: 'boolean' },
       yes: { type: 'boolean', short: 'y' },
       url: { type: 'string' },
+      'connect-timeout': { type: 'string' },
       wait: { type: 'string' },
       session: { type: 'string' },
       json: { type: 'boolean' },
@@ -207,6 +230,7 @@ async function main(): Promise<number> {
       port: { type: 'string' },
       timeout: { type: 'string' },
       fields: { type: 'string' },
+      verbose: { type: 'boolean' },
     },
   })
 
@@ -249,6 +273,15 @@ async function main(): Promise<number> {
   }
 
   if (
+    values['connect-timeout'] !== undefined &&
+    (!Number.isFinite(Number(values['connect-timeout'])) ||
+      Number(values['connect-timeout']) < 100 ||
+      Number(values['connect-timeout']) > 120_000)
+  ) {
+    writeCliFailure(machine, '--connect-timeout must be a number from 100 to 120000 milliseconds.')
+    return 1
+  }
+  if (
     values.timeout !== undefined &&
     (!Number.isFinite(Number(values.timeout)) || Number(values.timeout) <= 0)
   ) {
@@ -274,6 +307,7 @@ async function main(): Promise<number> {
   }
   const agentOptions = {
     url: values.url,
+    connectTimeoutMs: values['connect-timeout'] ? Number(values['connect-timeout']) : undefined,
     waitMs: values.wait ? Number(values.wait) : undefined,
     json: values.json,
     ndjson: values.ndjson,
@@ -282,6 +316,14 @@ async function main(): Promise<number> {
     timeoutMs: values.timeout ? Number(values.timeout) : undefined,
     fields: parseFields(values.fields),
     sessionsOnly: values['sessions-only'],
+    verbose: values.verbose,
+    cliVersion: readVersion(),
+  }
+
+  if (values.verbose) {
+    process.stderr.write(
+      `genie-react: phase=bootstrap version=${agentOptions.cliVersion} command=${command}\n`,
+    )
   }
 
   switch (command) {
@@ -331,7 +373,9 @@ main()
     )
     const message = errorMessage(error)
     if (machine) {
-      process.stdout.write(`${formatAgentFailure('invalid_input', message)}\n`)
+      process.stdout.write(
+        `${formatAgentFailure('invalid_input', message, { userActionRequired: true })}\n`,
+      )
     } else {
       process.stderr.write(`genie-react: ${message}\n`)
     }

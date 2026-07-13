@@ -25,9 +25,14 @@ export const reactGetTreeContract = defineAgentToolContract({
   name: 'react_get_tree',
   title: 'React component tree',
   description:
-    'Get the live React component tree as a flat node list (id, parentId, name, key, kind). Reconstruct the hierarchy from parentId; pass node ids to react_inspect_component. Framework wrappers can be deep, so raise `depth` if your own components do not appear and `truncatedBy` is "depth".',
+    'Get the live React component tree as a flat node list (id, parentId, name, key, kind). Reconstruct the hierarchy from parentId; pass node ids to react_inspect_component. For a dense tree, pass a returned node id as rootId to read that component and its descendants without dumping unrelated branches. Framework wrappers can be deep, so raise `depth` if your own components do not appear and `truncatedBy` is "depth".',
   group: 'react.tree',
   input: z.object({
+    rootId: nodeIdSchema
+      .optional()
+      .describe(
+        'Read only this mounted component/host node and its descendants. The selected node is included with parentId:null. Omit for the full root.',
+      ),
     depth: z.number().int().min(1).max(80).default(30),
     includeHost: z
       .boolean()

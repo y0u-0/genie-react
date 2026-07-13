@@ -97,6 +97,8 @@ npx @genie-react/cli call query_list '{}'
 npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
 ```
 
+Run the CLI from the app directory. From a workspace root, it selects the only live Genie bridge. If several apps are live, it stops and lists each bridge instead of guessing.
+
 Render reports name the exact cause: a prop, state hook, context, query, router update, parent render, or mount. They also show a small value diff, for example `state[0] false→true`.
 
 Give each browser tab a stable name when several agents or tabs share a hub:
@@ -105,7 +107,27 @@ Give each browser tab a stable name when several agents or tabs share a hub:
 http://localhost:3000/?_genie=my-agent
 ```
 
-Then pass `--session my-agent`, or set `GENIE_SESSION=my-agent` once. The same target keeps working after a reconnect or reload.
+Then pass `--session my-agent`, or set `GENIE_SESSION=my-agent` once. The same target keeps working after navigation, reloads, and reconnects—even when the route removes `_genie` from the URL.
+
+If connection startup is unclear, add `--verbose`. Diagnostics go to stderr, so JSON stdout stays clean. `--connect-timeout <ms>` bounds the bridge connection without changing the tool timeout.
+
+Wait for exact state instead of sleeping:
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["demo","greeting"]}'
+```
+
+Query waits accept an exact `queryHash` or structured `queryKey`. Legacy names are exact too; partial text never matches. `router_get_state` returns Router state and browser history together, with `locationSync` set to `matched`, `mismatched`, or `unavailable`.
+
+For a dense React tree, find a component and read only that mounted subtree:
+
+```bash
+npx @genie-react/cli call react_find_components '{"query":"Checkout","exact":true}'
+npx @genie-react/cli call react_get_tree '{"rootId":42,"depth":3,"maxNodes":100}'
+```
+
+Machine output is bounded and pipeable. `--json` writes one JSON value. `batch` writes JSONL by default; `--ndjson` makes that choice explicit, while `batch --json` writes one array. CLI-owned status, batch, and error envelopes include `schemaVersion`; successful tool payloads keep each tool's advertised schema.
 
 `npx @genie-react/cli doctor` checks the wiring; `doctor --live` also probes the running hub, the served client, and a session round-trip. Stale `.genie/bridge.json` files left by a killed dev server are cleaned up automatically.
 
@@ -203,7 +225,7 @@ The available tool count depends on the collectors in the running app. `read` to
 
 Collectors in the browser (React, Query, Router, plugins, memory) run tool calls against the real fibers and caches, and talk over a WebSocket to a small hub — embedded in your Vite dev server, or standalone (`genie-react hub` / Next.js `instrumentation.ts`), where it also serves the browser client as a single script. The CLI connects to that hub, runs tools, and prints JSON.
 
-Several tabs, apps, and agents coexist. Calls hit the most recent tab unless you target a physical session ID, a durable logical ID, or a unique name from `?_genie=<name>`. `genie-react status` shows readiness and every session; `--sessions-only` keeps that response small. Set `GENIE_SESSION` once to pin an agent to its tab. A reconnect keeps the logical identity and stable app name. A standalone hub identifies the app it serves, so a second app's hub walks to the next free port instead of cross-connecting, and each app's `.genie/bridge.json` pins its CLI to its own hub.
+Several tabs, apps, and agents coexist. Calls hit the most recent tab unless you target a physical session ID, a durable logical ID, or a unique name from `?_genie=<name>`. `genie-react status` shows readiness and every session; `--sessions-only` keeps that response small. Set `GENIE_SESSION` once to pin an agent to its tab. A reconnect keeps the logical identity and stable name. A standalone hub identifies the app it serves, so a second app's hub walks to the next free port instead of cross-connecting, and each app's `.genie/bridge.json` pins its CLI to its own hub.
 
 Dev-only and local: the Vite plugin is inert in production builds, the browser client only starts under `import.meta.env.DEV`, and the hub listens on `localhost` only.
 

@@ -93,6 +93,15 @@ describe('react_effect_audit contract', () => {
     })
     expect(() => reactEffectAuditContract.input.parse({ minUpdates: 0 })).toThrow()
     expect(() => reactEffectAuditContract.input.parse({ minFireRate: 1.1 })).toThrow()
+    expect(() =>
+      reactEffectAuditContract.input.parse({ packageName: '@tanstack/react-query' }),
+    ).toThrow('appOnly:false')
+    expect(
+      reactEffectAuditContract.input.parse({
+        packageName: '@tanstack/react-query',
+        appOnly: false,
+      }),
+    ).toMatchObject({ packageName: '@tanstack/react-query', appOnly: false })
   })
 })
 

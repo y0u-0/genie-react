@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createSessionIdentity } from './session-identity'
+import { createSessionIdentity, createSessionName } from './session-identity'
 
 class MemoryStorage {
   private readonly values = new Map<string, string>()
@@ -35,5 +35,19 @@ describe('session identity', () => {
     }
 
     expect(createSessionIdentity(blockedStorage)).toMatchObject({ documentGeneration: 1 })
+  })
+
+  it('keeps the tab alias after a route removes the URL marker and the document reloads', () => {
+    const storage = new MemoryStorage()
+
+    expect(createSessionName('review-router', storage)).toBe('review-router')
+    expect(createSessionName(undefined, storage)).toBe('review-router')
+  })
+
+  it('does not restore an invalid stored alias', () => {
+    const storage = new MemoryStorage()
+    storage.setItem('genie-react:session-name', 'line\nbreak')
+
+    expect(createSessionName(undefined, storage)).toBeUndefined()
   })
 })

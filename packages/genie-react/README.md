@@ -51,12 +51,12 @@ The agent gets the component, source line, render cost, and exact cause. Causes 
 npx @genie-react/cli call react_effect_audit '{"appOnly":true,"onlyHot":true}'
 ```
 
-Each effect reports its own source, whether it belongs to app or library code, and how confident that answer is. Short runs are marked `insufficient-data` instead of being called hot too early.
+Each effect reports its own source, whether it belongs to app or library code, and whether the evidence is `exact`, `inferred`, or `unknown`. Short runs are marked `insufficient-data` instead of being called hot too early.
 
 ## Inspect live hooks
 
 ```bash
-npx @genie-react/cli call react_find_components '{"name":"App"}'
+npx @genie-react/cli call react_find_components '{"query":"App","exact":true}'
 # Use the id returned above. The demo returned App #65.
 npx @genie-react/cli call react_inspect_component '{"id":65}'
 ```

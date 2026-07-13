@@ -110,6 +110,57 @@ describe('resolveBridgeUrl', () => {
     await rm(join(cwd, GENIE_DISCOVERY_FILE), { force: true })
     expect((await resolveBridge(cwd)).source).toBe('fallback')
   })
+
+  it('discovers one live descendant bridge when invoked from a monorepo root', async () => {
+    await mkdir(join(cwd, '.git'))
+    const appFile = join(cwd, 'apps', 'shop', GENIE_DISCOVERY_FILE)
+    await mkdir(dirname(appFile), { recursive: true })
+    await writeFile(
+      appFile,
+      JSON.stringify({
+        url: 'ws://127.0.0.1:4321/__genie/ws',
+        pid: process.pid,
+      }),
+    )
+
+    expect(await resolveBridge(cwd)).toEqual({
+      url: 'ws://127.0.0.1:4321/__genie/ws',
+      source: 'workspace',
+    })
+  })
+
+  it('fails with every choice when multiple descendant bridges are live', async () => {
+    await mkdir(join(cwd, '.git'))
+    for (const [name, port] of [
+      ['admin', 4321],
+      ['shop', 4322],
+    ] as const) {
+      const file = join(cwd, 'apps', name, GENIE_DISCOVERY_FILE)
+      await mkdir(dirname(file), { recursive: true })
+      await writeFile(
+        file,
+        JSON.stringify({ url: `ws://127.0.0.1:${port}/__genie/ws`, pid: process.pid }),
+      )
+    }
+
+    await expect(resolveBridge(cwd)).rejects.toThrow(
+      /Multiple live Genie bridges[\s\S]*apps\/admin[\s\S]*apps\/shop[\s\S]*--url/,
+    )
+  })
+
+  it('does not search downward from an arbitrary nested directory', async () => {
+    const appFile = join(cwd, 'sibling-app', GENIE_DISCOVERY_FILE)
+    await mkdir(dirname(appFile), { recursive: true })
+    await writeFile(
+      appFile,
+      JSON.stringify({ url: 'ws://127.0.0.1:4321/__genie/ws', pid: process.pid }),
+    )
+
+    expect(await resolveBridge(cwd)).toEqual({
+      url: `ws://localhost:5173${GENIE_WS_PATH}`,
+      source: 'fallback',
+    })
+  })
 })
 
 describe('isPidAlive', () => {

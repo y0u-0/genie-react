@@ -11,9 +11,13 @@ vi.mock('bippy', () => ({
   getRDTHook: () => ({ renderers: mocks.renderers }),
 }))
 
-const { isSafeRenderer, safeCommitHandler, safeUnmountHandler } = await import(
-  './safe-instrumentation'
-)
+const {
+  isSafeRenderer,
+  isSupportedRenderer,
+  safeCommitHandler,
+  safeUnmountHandler,
+  supportedCommitHandler,
+} = await import('./safe-instrumentation')
 
 const renderer = (version: string): ReactRenderer => ({ version, bundleType: 1 }) as ReactRenderer
 
@@ -33,6 +37,18 @@ describe('safe instrumentation', () => {
 
     mocks.detectReactBuildType.mockReturnValue('production')
     expect(isSafeRenderer(1)).toBe(false)
+    expect(isSupportedRenderer(1)).toBe(true)
+  })
+
+  it('observes roots from supported production-classified renderers without enabling safe analysis', () => {
+    mocks.renderers.set(1, renderer('19.2.0'))
+    mocks.detectReactBuildType.mockReturnValue('production')
+    const handler = vi.fn()
+
+    supportedCommitHandler(handler)(1, {} as FiberRoot)
+    safeCommitHandler(handler)(1, {} as FiberRoot)
+
+    expect(handler).toHaveBeenCalledOnce()
   })
 
   it('contains commit and unmount handler failures instead of escaping into React', () => {

@@ -103,6 +103,16 @@ function referenceCountNodes(root: Fiber, includeHost: boolean): number {
   return count
 }
 
+function referenceHasReportableDescendant(root: Fiber, includeHost: boolean): boolean {
+  let child: Fiber | null = root.child
+  while (child) {
+    if (isCompositeFiber(child) || (includeHost && isHostFiber(child))) return true
+    if (referenceHasReportableDescendant(child, includeHost)) return true
+    child = child.sibling
+  }
+  return false
+}
+
 function referenceBuildTree(
   root: Fiber,
   options: { depth: number; includeHost: boolean; maxNodes: number },
@@ -133,7 +143,7 @@ function referenceBuildTree(
           fiber: child,
         })
         if (depth > 0) visit(child, id, depth - 1)
-        else if (child.child) depthClipped = true
+        else if (referenceHasReportableDescendant(child, options.includeHost)) depthClipped = true
       } else {
         visit(child, parentId, depth)
       }
@@ -202,6 +212,40 @@ describe('optimized walkers preserve pre-optimization behavior', () => {
         }
       }
     }
+  })
+
+  it('buildTree can include one selected component as a bounded subtree root', async () => {
+    const root = makeFiber(HostRootTag, null, null)
+    const parent = makeFiber(FunctionComponentTag, namedComponent('Parent'), null)
+    const child = makeFiber(FunctionComponentTag, namedComponent('Child'), null)
+    const grandchild = makeFiber(FunctionComponentTag, namedComponent('Grandchild'), null)
+    const hostLeaf = makeFiber(HostComponentTag, 'div', null)
+    const unrelated = makeFiber(FunctionComponentTag, namedComponent('Unrelated'), null)
+    root.child = parent
+    parent.return = root
+    parent.child = child
+    parent.sibling = unrelated
+    child.return = parent
+    child.child = grandchild
+    grandchild.return = child
+    grandchild.child = hostLeaf
+    hostLeaf.return = grandchild
+    unrelated.return = root
+
+    const parentId = registerFiber(parent)
+    const subtree = await buildTree(parent, {
+      depth: 2,
+      includeHost: false,
+      maxNodes: 100,
+      includeRoot: true,
+    })
+
+    expect(subtree.rootId).toBe(parentId)
+    expect(subtree.nodes.map((node) => node.name)).toEqual(['Parent', 'Child', 'Grandchild'])
+    expect(subtree.nodes[0]?.parentId).toBeNull()
+    expect(subtree.total).toBe(3)
+    expect(subtree.truncated).toBe(false)
+    expect(subtree.truncatedBy).toBeNull()
   })
 
   it('findByName matches the reference for hits, misses, exact, and limits', () => {

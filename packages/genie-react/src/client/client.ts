@@ -6,14 +6,18 @@ import {
   decodeAppBoundMessage,
   encodeMessage,
   errorMessage,
+  formatToolValidationError,
   GENIE_PROTOCOL_VERSION,
   GENIE_WS_PATH,
   newId,
-  normalizeSessionName,
   type ToolDescriptor,
 } from '../protocol'
 import type { CollectorContext, ErasedCollectorTool, GenieCollector } from './collector'
-import { runtimeSessionIdentity, type SessionIdentity } from './session-identity'
+import {
+  runtimeSessionIdentity,
+  runtimeSessionName,
+  type SessionIdentity,
+} from './session-identity'
 
 export interface SocketLike {
   send(data: string): void
@@ -67,7 +71,7 @@ export class GenieClient {
     this.socketFactory = options.socketFactory ?? defaultSocketFactory
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1_000
     this.sessionIdentity = options.sessionIdentity ?? runtimeSessionIdentity()
-    this.sessionName = normalizeSessionName(options.sessionName ?? initialSessionName())
+    this.sessionName = runtimeSessionName(options.sessionName ?? initialSessionName())
     this.documentName = initialDocumentName()
     this.collectors.push(...options.collectors)
   }
@@ -350,10 +354,7 @@ function unknownArgKeysError(
 
 function invocationError(toolName: string, error: unknown): string {
   if (error instanceof z.ZodError) {
-    const issues = error.issues
-      .map((issue) => `${issue.path.join('.') || 'args'}: ${issue.message}`)
-      .join('; ')
-    return `Invalid arguments for "${toolName}": ${issues}`
+    return formatToolValidationError(toolName, error.issues)
   }
   return errorMessage(error)
 }

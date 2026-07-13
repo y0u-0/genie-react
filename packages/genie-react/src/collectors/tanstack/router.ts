@@ -39,7 +39,7 @@ const routerGetStateContract = defineAgentToolContract({
   name: 'router_get_state',
   title: 'Get router state',
   description:
-    'Get the TanStack Router state: current location, status, loading flags, and timing.',
+    'Get one synchronous snapshot of TanStack Router state and the browser location. `locationSync` makes history/Router disagreement explicit instead of returning one potentially stale URL.',
   group: 'router',
   input: z.object({}),
   output: z.object({
@@ -54,6 +54,16 @@ const routerGetStateContract = defineAgentToolContract({
     loadedAt: z.number().optional(),
     matchCount: z.number(),
     pendingMatchCount: z.number(),
+    browserLocation: z
+      .object({
+        href: z.string(),
+        pathname: z.string(),
+        search: z.string(),
+        hash: z.string(),
+      })
+      .nullable(),
+    locationSync: z.enum(['matched', 'mismatched', 'unavailable']),
+    snapshotAt: z.number().describe('Epoch milliseconds after both locations were read.'),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -243,6 +253,13 @@ export function routerCollector(router: AnyRouter): GenieCollector {
           const { location, status, statusCode, isLoading, isTransitioning, loadedAt, matches } =
             router.state
           const pendingMatchCount = router.stores?.pendingMatches?.get?.()?.length ?? 0
+          const browserLocation = readBrowserLocation()
+          const locationSync: LocationSync =
+            browserLocation === null
+              ? 'unavailable'
+              : sameLocation(location, browserLocation)
+                ? 'matched'
+                : 'mismatched'
           return {
             pathname: location.pathname,
             href: location.href,
@@ -255,6 +272,9 @@ export function routerCollector(router: AnyRouter): GenieCollector {
             loadedAt,
             matchCount: matches.length,
             pendingMatchCount,
+            browserLocation,
+            locationSync,
+            snapshotAt: Date.now(),
           }
         },
       }),
@@ -368,4 +388,38 @@ export function routerCollector(router: AnyRouter): GenieCollector {
       }),
     ],
   })
+}
+
+interface ComparableLocation {
+  pathname: string
+  searchStr?: string
+  search?: string
+  hash?: string
+}
+
+type LocationSync = 'matched' | 'mismatched' | 'unavailable'
+
+function readBrowserLocation(): {
+  href: string
+  pathname: string
+  search: string
+  hash: string
+} | null {
+  if (typeof globalThis.location === 'undefined') return null
+  const { href, pathname, search, hash } = globalThis.location
+  return { href, pathname, search, hash }
+}
+
+function sameLocation(router: ComparableLocation, browser: ComparableLocation): boolean {
+  const routerSearch = router.searchStr ?? router.search ?? ''
+  return (
+    router.pathname === browser.pathname &&
+    normalizePrefix(routerSearch, '?') === normalizePrefix(browser.search ?? '', '?') &&
+    normalizePrefix(router.hash ?? '', '#') === normalizePrefix(browser.hash ?? '', '#')
+  )
+}
+
+function normalizePrefix(value: string, prefix: '?' | '#'): string {
+  if (value === '') return ''
+  return value.startsWith(prefix) ? value : `${prefix}${value}`
 }
