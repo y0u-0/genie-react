@@ -1,12 +1,30 @@
 import {
   type BridgeStatusMessage,
+  devtoolsCaptureCompareContract,
+  devtoolsCaptureListContract,
+  devtoolsCaptureReadContract,
   devtoolsStatusContract,
   devtoolsWaitContract,
   errorMessage,
 } from 'genie-react/protocol'
 import { BridgeCallError, GenieAgentLink, INVOKE_GRACE_MS } from './agent-link'
+import {
+  summarizeCapture,
+  summarizeCaptureComparison,
+  summarizeCaptureList,
+} from './capture-output'
 import { normalizeBridgeUrl, resolveBridge } from './discovery'
 import { isRecord, isRecordArray } from './guards'
+import { reactSummarizers } from './react-output'
+import { summarizeSessionsOnly, summarizeStatus } from './session-output'
+
+export {
+  summarizeCapture,
+  summarizeCaptureComparison,
+  summarizeCaptureList,
+} from './capture-output'
+export * from './react-output'
+export { summarizeSessionsOnly, summarizeStatus } from './session-output'
 
 // The CLI's tool-calling surface: connects to the bridge as the `agent` role — straight from a shell, no separate server.
 
@@ -18,6 +36,8 @@ export interface AgentOptions {
   waitMs?: number
   /** Print raw JSON (compact, machine-first) instead of the per-tool summary. */
   json?: boolean
+  /** Batch-only explicit JSON Lines mode; the no-flag default remains JSONL for compatibility. */
+  ndjson?: boolean
   /** Target a specific app session when several tabs are connected (see `genie-react status`). */
   session?: string
   /** `genie-react tools --all`: the complete flat catalog instead of the progressive group index. */
@@ -26,6 +46,8 @@ export interface AgentOptions {
   timeoutMs?: number
   /** `--fields id,name,…`: project the first array-of-records to these keys as JSONL (implies machine output). */
   fields?: string[]
+  /** Status-only projection that omits app/domain/tool metadata. */
+  sessionsOnly?: boolean
 }
 
 type AgentFailureReason =
@@ -70,7 +92,22 @@ const out = (message: string): void => void process.stdout.write(`${message}\n`)
 const err = (message: string): void => void process.stderr.write(`${message}\n`)
 
 const isMachineMode = (opts: AgentOptions): boolean =>
-  opts.json === true || (opts.fields !== undefined && opts.fields.length > 0)
+  opts.json === true ||
+  opts.ndjson === true ||
+  (opts.fields !== undefined && opts.fields.length > 0)
+
+const BRIDGE_LOCAL_TOOLS = new Set([
+  devtoolsStatusContract.name,
+  devtoolsWaitContract.name,
+  devtoolsCaptureListContract.name,
+  devtoolsCaptureReadContract.name,
+  devtoolsCaptureCompareContract.name,
+])
+
+/** Bridge-local reads do not need a ready browser session. */
+export function requiresReadySession(tool: string): boolean {
+  return !BRIDGE_LOCAL_TOOLS.has(tool)
+}
 
 function emitFailure(
   opts: AgentOptions,
@@ -108,20 +145,12 @@ async function connect(opts: AgentOptions): Promise<{ link: GenieAgentLink; url:
 }
 
 const summarizers: Record<string, (result: unknown) => string | null> = {
+  ...reactSummarizers,
   devtools_status: summarizeStatus,
-  react_get_renders: summarizeRenders,
-  react_effect_audit: summarizeEffects,
-  react_get_tree: summarizeTree,
-  react_dom_for_component: summarizeDom,
-  react_component_for_dom: summarizeComponentForDom,
-  react_find_components: summarizeFindComponents,
-  react_inspect_component: summarizeInspect,
-  react_error_state: summarizeErrorState,
-  react_profile_report: summarizeProfile,
-  react_list_overrides: summarizeListOverrides,
-  react_reset_overrides: summarizeResetOverrides,
-  react_renders_diff: summarizeRendersDiff,
-  react_profile_snapshot: summarizeProfileSnapshot,
+  devtools_capture_create: summarizeCapture,
+  devtools_capture_compare: summarizeCaptureComparison,
+  devtools_capture_list: summarizeCaptureList,
+  devtools_capture_read: summarizeCapture,
   browser_fps: summarizeFps,
   query_list: summarizeQueryList,
   query_get: summarizeQueryGet,
@@ -208,378 +237,6 @@ function smallResultLine(result: unknown): string | null {
     parts.push(`${key}=${JSON.stringify(value)}`)
   }
   return parts.join(' · ')
-}
-
-export function summarizeRenders(result: unknown): string | null {
-  if (!isRecord(result)) return null
-  const { summary, components } = result
-  if (!isRecord(summary) || !Array.isArray(components)) return null
-
-  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
-  const lines = [
-    `${num(summary.commits)} commits · ${num(summary.trackedComponents)} components · ${num(summary.totalRenders)} renders · ${num(summary.totalUpdates)} updates · ${num(summary.unstableComponents)} unstable · ${num(summary.unnecessaryComponents)} unnecessary${trackingOff}`,
-  ]
-
-  const topUnstableProps = summary.topUnstableProps
-  if (Array.isArray(topUnstableProps) && topUnstableProps.length > 0) {
-    const props = topUnstableProps
-      .filter(isRecord)
-      .map((prop) => `${String(prop.name)}×${num(prop.count)}`)
-      .join(', ')
-    lines.push(`unstable props: ${props}`)
-  }
-
-  const records = components.filter(isRecord)
-  const width = Math.max(0, ...records.map((component) => String(component.name).length))
-  for (const component of records) {
-    const parts = [
-      `  ${String(component.name).padEnd(width)} #${num(component.id)} ${num(component.renders)}× (${num(component.mounts)}m ${num(component.updates)}u)`,
-    ]
-    if (num(component.unnecessary) > 0) parts.push(`· ${num(component.unnecessary)} unnec`)
-    if (num(component.unstableRenders) > 0)
-      parts.push(`· ${num(component.unstableRenders)} unstable`)
-    if (component.forget === true) parts.push('· forget')
-    parts.push(`· self ${round(num(component.selfTime))}ms`)
-    const cause = renderCause(component.changes)
-    if (cause) parts.push(`· ↻ ${cause}`)
-    lines.push(parts.join(' ') + sourceSuffix(component))
-  }
-  return lines.join('\n')
-}
-
-export function summarizeEffects(result: unknown): string | null {
-  if (!isRecord(result)) return null
-  const { components } = result
-  if (!Array.isArray(components)) return null
-
-  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
-  const lines = [
-    `${num(result.commits)} commits · ${components.length} components with effects${trackingOff}`,
-  ]
-  for (const component of components) {
-    if (!isRecord(component) || !Array.isArray(component.effects)) continue
-    const head = `${String(component.name)} #${num(component.id)}`
-    for (const effect of component.effects) {
-      if (!isRecord(effect)) continue
-      const parts = [
-        `  ${head} [${num(effect.index)}] ${String(effect.kind)} deps=${String(effect.depsMode)}(${num(effect.depCount)}) fired ${num(effect.fired)}/${num(effect.updates)}`,
-      ]
-      if (effect.firesEveryUpdate === true) parts.push('EVERY')
-      parts.push(effect.hasCleanup === true ? 'cleanup' : 'no-cleanup')
-      if (typeof effect.note === 'string' && effect.note.length > 0)
-        parts.push(`· ! ${effect.note}`)
-      if (effect.isLibrary === true) parts.push('· lib')
-      lines.push(parts.join(' ') + sourceSuffix(effect))
-    }
-  }
-  return lines.join('\n')
-}
-
-export function summarizeDom(result: unknown): string | null {
-  if (!isRecord(result)) return null
-  const { elements, name, total } = result
-  if (!Array.isArray(elements)) return null
-
-  const count = num(total)
-  const lines = [`${String(name)} → ${count} DOM element${count === 1 ? '' : 's'}`]
-  for (const element of elements) {
-    if (!isRecord(element)) continue
-    const parts = [`  ${String(element.selector)}`]
-    if (typeof element.role === 'string') parts.push(`· role=${element.role}`)
-    if (typeof element.text === 'string' && element.text.length > 0)
-      parts.push(`· ${JSON.stringify(element.text)}`)
-    lines.push(parts.join(' '))
-  }
-  return lines.join('\n')
-}
-
-export function summarizeTree(result: unknown): string | null {
-  if (!isRecord(result)) return null
-  const { nodes } = result
-  if (!Array.isArray(nodes)) return null
-
-  const byId = new Map<number, Record<string, unknown>>()
-  for (const node of nodes) {
-    if (isRecord(node) && typeof node.id === 'number') byId.set(node.id, node)
-  }
-
-  const truncated =
-    result.truncated === true && typeof result.truncatedBy === 'string'
-      ? ` · truncated by ${result.truncatedBy}`
-      : ''
-  const root = typeof result.rootId === 'number' ? `#${result.rootId}` : '#none'
-  const lines = [`${nodes.length}/${num(result.total)} nodes · root ${root}${truncated}`]
-
-  for (const node of nodes) {
-    if (!isRecord(node)) continue
-    const label = node.kind === 'host' ? `<${String(node.name)}>` : String(node.name)
-    const key = typeof node.key === 'string' && node.key.length > 0 ? ` key=${node.key}` : ''
-    lines.push(`${'  '.repeat(depthOf(node, byId))}${label}${key}`)
-  }
-  return lines.join('\n')
-}
-
-function depthOf(
-  node: Record<string, unknown>,
-  byId: Map<number, Record<string, unknown>>,
-): number {
-  let depth = 0
-  let parentId = node.parentId
-  const seen = new Set<number>()
-  while (typeof parentId === 'number' && byId.has(parentId) && !seen.has(parentId)) {
-    seen.add(parentId)
-    depth++
-    parentId = byId.get(parentId)?.parentId
-  }
-  return depth
-}
-
-/** Compact render cause from a component's `changes[]`: changed props plus exact state slots and bounded before→after previews when available. */
-function renderCause(changes: unknown): string | null {
-  if (!Array.isArray(changes)) return null
-  const records = changes.filter(isRecord)
-  if (records.length === 0) return null
-
-  const propNames = records
-    .filter((change) => change.kind === 'props')
-    .map((change) => `${String(change.name)}${change.unstable === true ? '(unstable)' : ''}`)
-  const stateChanges = records.filter((change) => change.kind === 'state')
-
-  const segments: string[] = []
-  if (propNames.length > 0) segments.push(`props: ${propNames.join(', ')}`)
-  for (const change of stateChanges) {
-    if ('before' in change && 'after' in change) {
-      segments.push(
-        `${String(change.name)} ${renderChangeValue(change.before)}→${renderChangeValue(change.after)}`,
-      )
-    } else if (!segments.includes('state')) {
-      // Backward compatibility with older app clients that only emitted the generic marker.
-      segments.push('state')
-    }
-  }
-  return segments.length > 0 ? segments.join(' · ') : null
-}
-
-function renderChangeValue(value: unknown): string {
-  if (isRecord(value) && value.__genie_dehydrated__ === true && typeof value.preview === 'string') {
-    return value.preview
-  }
-  if (Array.isArray(value) || isRecord(value)) return recordPreview(value)
-  if (value === undefined) return 'undefined'
-  return bounded(JSON.stringify(value))
-}
-
-const GENERIC_BASENAMES = /^(index|main|app|page|layout|route)\.[jt]sx?$/i
-
-/** Renders a `(file:line)` suffix from an optional resolved `source` field; generic basenames keep one parent segment so `index.tsx` stays unambiguous. */
-function sourceSuffix(record: Record<string, unknown>): string {
-  const { source } = record
-  if (!isRecord(source) || typeof source.file !== 'string') return ''
-  const segments = source.file.split('/').filter(Boolean)
-  const base = segments.pop() || source.file
-  const parent = GENERIC_BASENAMES.test(base) ? segments.pop() : undefined
-  const label = parent ? `${parent}/${base}` : base
-  return typeof source.line === 'number' ? ` (${label}:${source.line})` : ` (${label})`
-}
-
-export function summarizeStatus(result: unknown): string | null {
-  if (!isRecord(result) || typeof result.connected !== 'boolean') return null
-  if (!result.connected) {
-    return 'not connected — open the app in a browser (devtools_wait blocks until it connects)'
-  }
-  const app = isRecord(result.app) ? result.app : {}
-  const head = [
-    'connected',
-    typeof app.name === 'string' ? app.name : null,
-    typeof app.reactVersion === 'string' ? `react ${app.reactVersion}` : null,
-    `${num(result.toolCount)} tools`,
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  const sessions = Array.isArray(result.sessions) ? result.sessions.filter(isRecord) : []
-  if (sessions.length <= 1) return head
-  const lines = [`${head} · ${sessions.length} sessions`]
-  for (const session of sessions) {
-    const sessionApp = isRecord(session.app) ? session.app : {}
-    const parts = [`  ${String(session.sessionId)}`]
-    if (typeof sessionApp.name === 'string') parts.push(sessionApp.name)
-    if (typeof sessionApp.url === 'string') parts.push(sessionApp.url)
-    if (session.current === true) parts.push('(current)')
-    if (typeof session.staleMs === 'number')
-      parts.push(
-        `(stale — no heartbeat for ${Math.round(session.staleMs / 1000)}s, likely a dead tab)`,
-      )
-    lines.push(parts.join(' · '))
-  }
-  lines.push('target one: --session <id> (or set GENIE_SESSION once per shell)')
-  return lines.join('\n')
-}
-
-export function summarizeFindComponents(result: unknown): string | null {
-  if (!isRecord(result) || !Array.isArray(result.matches)) return null
-  const matches = result.matches.filter(isRecord)
-  if (matches.length === 0) return 'No components found.'
-  const lines = [`${matches.length} match${matches.length === 1 ? '' : 'es'}`]
-  for (const match of matches) {
-    lines.push(`  ${String(match.name)} #${num(match.id)} — ${String(match.path)}`)
-  }
-  return lines.join('\n')
-}
-
-export function summarizeComponentForDom(result: unknown): string | null {
-  if (!isRecord(result) || !Array.isArray(result.components)) return null
-  const matched = num(result.matched)
-  const components = result.components.filter(isRecord)
-  const lines = [
-    `${JSON.stringify(String(result.selector))} → ${matched} element${matched === 1 ? '' : 's'} · ${components.length} component${components.length === 1 ? '' : 's'}`,
-  ]
-  for (const component of components) {
-    const parts = [
-      `  ${String(component.name)} #${num(component.id)} (${String(component.kind)}) <${String(component.tag)}>`,
-    ]
-    if (component.isLibrary === true) parts.push('· lib')
-    lines.push(parts.join(' ') + sourceSuffix(component))
-  }
-  return lines.join('\n')
-}
-
-const MAX_HOOK_LINES = 16
-
-export function summarizeInspect(result: unknown): string | null {
-  if (!isRecord(result) || typeof result.name !== 'string' || !('props' in result)) return null
-  const lines = [`${result.name} #${num(result.id)} · ${String(result.kind)}`]
-  lines.push(`  props: ${recordPreview(result.props)}`)
-  if (result.state !== undefined) lines.push(`  state: ${recordPreview(result.state)}`)
-  if (Array.isArray(result.hooks)) {
-    const hooks = result.hooks.filter(isRecord)
-    lines.push(`  hooks: ${hooks.length}`)
-    for (const hook of hooks.slice(0, MAX_HOOK_LINES)) {
-      const ordinal = typeof hook.stateIndex === 'number' ? ` stateIndex ${hook.stateIndex}` : ''
-      const value = 'value' in hook ? ` = ${recordPreview(hook.value)}` : ''
-      lines.push(`    [${num(hook.index)}] ${String(hook.kind)}${ordinal}${value}`)
-    }
-    if (hooks.length > MAX_HOOK_LINES) lines.push(`    +${hooks.length - MAX_HOOK_LINES} more`)
-  }
-  return lines.join('\n')
-}
-
-export function summarizeErrorState(result: unknown): string | null {
-  if (!isRecord(result) || !Array.isArray(result.caughtErrors) || !Array.isArray(result.suspended))
-    return null
-  const caught = result.caughtErrors.filter(isRecord)
-  const suspended = result.suspended.filter(isRecord)
-  if (caught.length === 0 && suspended.length === 0) {
-    return 'no caught errors · nothing suspended'
-  }
-  const lines = [`${caught.length} caught · ${suspended.length} suspended`]
-  for (const entry of caught) {
-    const parts = [
-      `  ${String(entry.boundaryName)} #${num(entry.boundaryId)} caught ${entry.message == null ? '(no message)' : JSON.stringify(entry.message)}`,
-    ]
-    if (typeof entry.throwingComponent === 'string') parts.push(`from ${entry.throwingComponent}`)
-    if (entry.isLibraryBoundary === true) parts.push('· lib boundary')
-    lines.push(parts.join(' ') + sourceSuffix({ source: entry.boundarySource }))
-  }
-  for (const entry of suspended) {
-    const state =
-      entry.isFallbackShowing === true ? 'fallback SHOWING' : 'suspended (fallback hidden)'
-    lines.push(
-      `  ${String(entry.boundaryName)} #${num(entry.boundaryId)} ${state}${sourceSuffix(entry)}`,
-    )
-  }
-  if (typeof result.blankTreeHint === 'string' && result.blankTreeHint.length > 0) {
-    lines.push(`hint: ${result.blankTreeHint}`)
-  }
-  return lines.join('\n')
-}
-
-export function summarizeProfile(result: unknown): string | null {
-  if (!isRecord(result) || !Array.isArray(result.slowest)) return null
-  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
-  const lines = [`${num(result.commits)} commits${trackingOff}`]
-  const row = (
-    label: string,
-    items: unknown,
-    format: (record: Record<string, unknown>) => string,
-  ): void => {
-    if (!Array.isArray(items) || items.length === 0) return
-    lines.push(`${label}: ${items.filter(isRecord).slice(0, 5).map(format).join(', ')}`)
-  }
-  row(
-    'slowest',
-    result.slowest,
-    (r) => `${String(r.name)} ${round(num(r.selfTime))}ms×${num(r.renders)}`,
-  )
-  row('re-rendered', result.mostRerendered, (r) => `${String(r.name)} ${num(r.renders)}×`)
-  row(
-    'unnecessary',
-    result.mostUnnecessary,
-    (r) => `${String(r.name)} ${num(r.unnecessary)}/${num(r.renders)}`,
-  )
-  row(
-    'unstable',
-    result.mostUnstable,
-    (r) => `${String(r.name)} ${num(r.unstableRenders)}/${num(r.renders)}`,
-  )
-  return lines.join('\n')
-}
-
-export function summarizeListOverrides(result: unknown): string | null {
-  if (!isRecord(result) || !Array.isArray(result.overrides)) return null
-  const overrides = result.overrides.filter(isRecord)
-  const total = num(result.total)
-  if (total === 0 && overrides.length === 0) return 'no active overrides'
-  const lines = [`${total} active override${total === 1 ? '' : 's'}`]
-  for (const override of overrides) {
-    const id = override.componentId == null ? '' : ` #${num(override.componentId)}`
-    const unmounted = override.mounted === false ? ' (unmounted)' : ''
-    lines.push(
-      `  [${String(override.kind)}] ${String(override.componentName)}${id} — ${String(override.detail)}${unmounted}`,
-    )
-  }
-  return lines.join('\n')
-}
-
-export function summarizeResetOverrides(result: unknown): string | null {
-  if (!isRecord(result) || !Array.isArray(result.cleared)) return null
-  const cleared = result.cleared.filter(isRecord)
-  const lines = [
-    `cleared ${cleared.length} override${cleared.length === 1 ? '' : 's'} · ${num(result.remaining)} remaining`,
-  ]
-  for (const entry of cleared) {
-    lines.push(
-      `  [${String(entry.kind)}] ${String(entry.componentName)} — ${String(entry.outcome)}`,
-    )
-  }
-  return lines.join('\n')
-}
-
-export function summarizeRendersDiff(result: unknown): string | null {
-  if (!isRecord(result) || !isRecord(result.selfTimeMs) || !isRecord(result.commits)) return null
-  const self = result.selfTimeMs
-  const commits = result.commits
-  const regressed = Array.isArray(result.regressed) ? result.regressed.filter(isRecord) : []
-  const improved = Array.isArray(result.improved) ? result.improved.filter(isRecord) : []
-  // A null pct (zero baseline) must not read as "0% change".
-  const pct = self.pct === null ? 'n/a' : `${num(self.pct) > 0 ? '+' : ''}${round(num(self.pct))}%`
-  const lines = [
-    `${round(num(self.before))}ms → ${round(num(self.after))}ms (${pct}) · commits ${num(commits.before)}→${num(commits.after)} · ${regressed.length} regressed · ${improved.length} improved`,
-  ]
-  const clears = num(result.clearsSinceBaseline)
-  if (clears > 0)
-    lines.push(
-      `  counters cleared ${clears}× since baseline — session-vs-session compare; "removed" = not re-rendered since the clear`,
-    )
-  const line = (entry: Record<string, unknown>): string =>
-    `  ${String(entry.name)} ${signed(num(entry.deltaMs))}ms`
-  for (const entry of regressed.slice(0, 5)) lines.push(line(entry))
-  for (const entry of improved.slice(0, 5)) lines.push(line(entry))
-  return lines.join('\n')
-}
-
-export function summarizeProfileSnapshot(result: unknown): string | null {
-  if (!isRecord(result) || typeof result.label !== 'string') return null
-  return `snapshot "${result.label}" · ${num(result.commits)} commits · ${num(result.components)} components`
 }
 
 export function summarizeFps(result: unknown): string | null {
@@ -735,7 +392,6 @@ function shellQuote(value: string): string {
 const prettyJson = (result: unknown): string => JSON.stringify(result, null, 2)
 const num = (value: unknown): number => (typeof value === 'number' ? value : 0)
 const round = (value: number): number => Math.round(value * 10) / 10
-const signed = (value: number): string => (value > 0 ? `+${round(value)}` : String(round(value)))
 
 export async function runCall(
   tool: string | undefined,
@@ -771,11 +427,11 @@ export async function runCall(
 
   const { link } = await connect(opts)
   try {
-    if (tool !== 'devtools_status') {
+    if (requiresReadySession(tool)) {
       // Bridge-global wait (sessionId: null) so a stale --session fails fast on the real call instead of stalling here; its own timeout tracks --wait so a small --timeout can't truncate the connect window.
       const waitMs = opts.waitMs ?? 15_000
       const ready = await link
-        .invoke(devtoolsWaitContract, { condition: 'connected', timeoutMs: waitMs }, null, {
+        .invoke(devtoolsWaitContract, { condition: 'ready', timeoutMs: waitMs }, null, {
           timeoutMs: waitMs,
         })
         .catch(() => null)
@@ -835,21 +491,43 @@ export function parseBatchItems(raw: string): { items: BatchItem[] } | { error: 
     return { error: 'Batch input must be a valid JSON array.' }
   }
   if (!Array.isArray(parsed))
-    return { error: 'batch must be a JSON array of {tool, args?} objects' }
+    return { error: 'Batch input must be a JSON array of {tool, args?} objects.' }
   const items: BatchItem[] = []
   for (const [index, entry] of parsed.entries()) {
     if (!isRecord(entry) || typeof entry.tool !== 'string') {
-      return { error: `batch[${index}] must be an object with a string "tool"` }
+      return { error: `Batch item ${index} must be an object with a string "tool".` }
+    }
+    const unknownKeys = Object.keys(entry).filter((key) => key !== 'tool' && key !== 'args')
+    if (unknownKeys.length > 0) {
+      const key = unknownKeys[0]
+      const hint = key === 'input' ? ' Use "args" for tool arguments.' : ''
+      return {
+        error: `Batch item ${index} contains unknown key ${JSON.stringify(key)}.${hint}`,
+      }
+    }
+    if (entry.tool.trim().length === 0) {
+      return { error: `Batch item ${index} must have a non-empty "tool".` }
     }
     if (entry.args !== undefined && !isRecord(entry.args)) {
-      return { error: `batch[${index}].args must be an object when present` }
+      return { error: `Batch item ${index} "args" must be an object when present.` }
     }
     items.push({ tool: entry.tool, args: entry.args ?? {} })
   }
   return { items }
 }
 
-/** `genie-react batch`: one connection, sequential calls, continue-on-error; one JSON line per item, exit 1 if any failed. */
+interface BatchResult {
+  tool: string
+  ok: boolean
+  status: 'ok' | 'error'
+  result?: unknown
+  reason?: string
+  message?: string
+  error?: string
+  errorCode?: string
+}
+
+/** `genie-react batch`: one connection, sequential calls, continue-on-error; legacy/default and --ndjson emit JSONL, while --json emits one valid array. */
 export async function runBatch(
   batchJson: string | undefined,
   opts: AgentOptions = {},
@@ -871,10 +549,15 @@ export async function runBatch(
 
   const { link } = await connect(opts)
   let anyFailed = false
+  const results: BatchResult[] = []
+  const emitBatchResult = (result: BatchResult): void => {
+    if (opts.json) results.push(result)
+    else out(JSON.stringify(result))
+  }
   try {
     const waitMs = opts.waitMs ?? 15_000
     const ready = await link
-      .invoke(devtoolsWaitContract, { condition: 'connected', timeoutMs: waitMs }, null, {
+      .invoke(devtoolsWaitContract, { condition: 'ready', timeoutMs: waitMs }, null, {
         timeoutMs: waitMs,
       })
       .catch(() => null)
@@ -896,23 +579,22 @@ export async function runBatch(
         const result = await link.invoke(item.tool, item.args, undefined, {
           timeoutMs: opts.timeoutMs,
         })
-        out(JSON.stringify({ tool: item.tool, ok: true, status: 'ok', result }))
+        emitBatchResult({ tool: item.tool, ok: true, status: 'ok', result })
       } catch (error) {
         anyFailed = true
         const errorCode = error instanceof BridgeCallError ? error.errorCode : undefined
-        out(
-          JSON.stringify({
-            tool: item.tool,
-            ok: false,
-            status: 'error',
-            reason: errorCode ?? 'operational_failure',
-            message: errorMessage(error),
-            error: errorMessage(error),
-            ...(errorCode ? { errorCode } : {}),
-          }),
-        )
+        emitBatchResult({
+          tool: item.tool,
+          ok: false,
+          status: 'error',
+          reason: errorCode ?? 'operational_failure',
+          message: errorMessage(error),
+          error: errorMessage(error),
+          ...(errorCode ? { errorCode } : {}),
+        })
       }
     }
+    if (opts.json) out(JSON.stringify(results))
     return anyFailed ? 1 : 0
   } finally {
     link.close()
@@ -938,7 +620,7 @@ function readStdin(): Promise<string> {
 export async function runStatus(opts: AgentOptions = {}): Promise<number> {
   const { link, url } = await connect(opts)
   try {
-    const status = await link.invoke(devtoolsStatusContract, {})
+    const status = await link.invoke(devtoolsStatusContract, { includeTools: false })
     // A 0.1.0 bridge predates the `sessions` field; the typed contract can't see that skew.
     const sessions = Array.isArray(status.sessions) ? status.sessions : []
     // Preamble on stderr so stdout stays pure (parseable) — important for `--json` and piping.
@@ -953,7 +635,39 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
         )
       err('')
     }
-    out(renderResult('devtools_status', status, opts.json))
+    const result = opts.sessionsOnly
+      ? {
+          connected: status.connected,
+          ready: status.ready,
+          sessionId: status.sessionId,
+          sessions: sessions.map((session) => ({
+            sessionId: session.sessionId,
+            ...(session.logicalSessionId === undefined
+              ? {}
+              : { logicalSessionId: session.logicalSessionId }),
+            ...(session.documentGeneration === undefined
+              ? {}
+              : { documentGeneration: session.documentGeneration }),
+            ...(session.sessionName === undefined ? {} : { sessionName: session.sessionName }),
+            ...(session.predecessorSessionId === undefined
+              ? {}
+              : { predecessorSessionId: session.predecessorSessionId }),
+            ...(session.successorSessionId === undefined
+              ? {}
+              : { successorSessionId: session.successorSessionId }),
+            connectedAt: session.connectedAt,
+            ready: session.ready,
+            ...(session.readyAt === undefined ? {} : { readyAt: session.readyAt }),
+            current: session.current,
+            ...(session.staleMs === undefined ? {} : { staleMs: session.staleMs }),
+          })),
+        }
+      : status
+    out(
+      opts.sessionsOnly && !opts.json
+        ? summarizeSessionsOnly(result)
+        : renderResult('devtools_status', result, opts.json),
+    )
     return 0
   } catch (error) {
     emitFailure(opts, 'operational_failure', `Status check failed: ${errorMessage(error)}`)
@@ -972,7 +686,7 @@ export async function runTools(
     const pinned = resolveSession(opts.session)
     // The broadcast status only carries the current session's catalog; a pinned session must ask the bridge for its own.
     const status = pinned
-      ? await link.invoke(devtoolsStatusContract, {})
+      ? await link.invoke(devtoolsStatusContract, { includeTools: true })
       : await waitForTools(link, opts.waitMs ?? 12_000)
     const tools = status?.tools ?? []
     if (!status || tools.length === 0) {
@@ -1241,20 +955,20 @@ function waitForTools(
   timeoutMs: number,
 ): Promise<BridgeStatusMessage | null> {
   const current = link.getStatus()
-  if (current && current.tools.length > 0) return Promise.resolve(current)
+  if (current?.ready && current.tools.length > 0) return Promise.resolve(current)
   return new Promise((resolveStatus) => {
     const timer = setTimeout(() => {
       link.onStatus = null
       resolveStatus(link.getStatus())
     }, timeoutMs)
     link.onStatus = (status) => {
-      if (status.tools.length > 0) {
+      if (status.ready && status.tools.length > 0) {
         clearTimeout(timer)
         link.onStatus = null
         resolveStatus(status)
       }
     }
     // Nudge the bridge to surface a connected app (and rebroadcast its catalog).
-    void link.invoke(devtoolsWaitContract, { condition: 'connected', timeoutMs }).catch(() => {})
+    void link.invoke(devtoolsWaitContract, { condition: 'ready', timeoutMs }).catch(() => {})
   })
 }

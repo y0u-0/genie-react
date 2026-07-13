@@ -17,10 +17,12 @@ pnpm dev
 Open the app, then check the connection:
 
 ```bash
-npx @genie-react/cli status
+npx @genie-react/cli status --sessions-only
 ```
 
 Genie runs in development only. It does not ship in your production build.
+
+If more than one tab is open, add `?_genie=my-agent` to the app URL. Use `--session my-agent` on each command, or set `GENIE_SESSION=my-agent` once. The same target keeps working after a reconnect.
 
 ## Find wasted renders
 
@@ -30,6 +32,7 @@ Clear the counters, drive one flow, then read the result:
 npx @genie-react/cli call react_clear_renders '{}'
 # Click, type, or navigate in the app.
 npx @genie-react/cli call react_get_renders '{"sort":"selfTime","limit":3}'
+npx @genie-react/cli call react_render_causes '{"component":"Button","limit":3}'
 ```
 
 Real demo output:
@@ -40,7 +43,15 @@ unstable props: onClick×4
   Button #81 4× (0m 4u) · 4 unstable · self 0.2ms · ↻ props: onClick(unstable) (button.tsx:50)
 ```
 
-The agent gets the component, source line, render cost, and cause. It knows what to optimize.
+The agent gets the component, source line, render cost, and exact cause. Causes include props, state, context, Query, Router, parent renders, and mounts.
+
+## Audit an effect
+
+```bash
+npx @genie-react/cli call react_effect_audit '{"appOnly":true,"onlyHot":true}'
+```
+
+Each effect reports its own source, whether it belongs to app or library code, and how confident that answer is. Short runs are marked `insufficient-data` instead of being called hot too early.
 
 ## Inspect live hooks
 
@@ -95,6 +106,8 @@ ok=true · restored=1
 5. Repeat the flow and verify the result.
 
 The agent can extract what it needs without asking you for screenshots, logs, or guesses.
+
+For a stronger performance check, repeat the same flow at least three times before and after the change. Save each run with `devtools_capture_create`, then pass the IDs to `devtools_capture_compare`. The result reports median, p95, spread, confidence, and a typed budget verdict. Small samples are `insufficient-data`, not a false pass.
 
 Works with React 18 and 19, Vite, TanStack Start, Next.js, React Native, Expo, TanStack Query, and TanStack Router.
 

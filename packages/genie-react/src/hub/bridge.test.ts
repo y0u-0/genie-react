@@ -1,65 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
-import { decodeFrame, encodeMessage, newId } from '../protocol'
+import { decodeFrame, newId } from '../protocol'
+import { connect, delay, type Frame, isResult, open, send } from './bridge-test-harness'
 import { createStandaloneBridge, type StandaloneBridgeHandle } from './standalone'
-
-// biome-ignore lint/suspicious/noExplicitAny: test harness deals in decoded wire frames
-type Frame = any
-
-function connect(url: string): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url)
-    ws.once('open', () => resolve(ws))
-    ws.once('error', reject)
-  })
-}
-
-// Attaches the inbox listener before `open` so the bridge's immediate status push is never missed.
-async function open(url: string): Promise<{ ws: WebSocket; inbox: Inbox }> {
-  const ws = new WebSocket(url)
-  const inbox = new Inbox(ws)
-  await new Promise<void>((resolve, reject) => {
-    ws.once('open', () => resolve())
-    ws.once('error', reject)
-  })
-  return { ws, inbox }
-}
-
-class Inbox {
-  private readonly received: Frame[] = []
-  private readonly waiters: Array<{
-    match: (m: Frame) => boolean
-    resolve: (m: Frame) => void
-    timer: ReturnType<typeof setTimeout>
-  }> = []
-
-  constructor(socket: WebSocket) {
-    socket.on('message', (data) => {
-      const message = decodeFrame(data.toString()) as Frame
-      this.received.push(message)
-      for (const waiter of [...this.waiters]) {
-        if (waiter.match(message)) {
-          clearTimeout(waiter.timer)
-          this.waiters.splice(this.waiters.indexOf(waiter), 1)
-          waiter.resolve(message)
-        }
-      }
-    })
-  }
-
-  wait(match: (m: Frame) => boolean, timeoutMs = 3000): Promise<Frame> {
-    const existing = this.received.find(match)
-    if (existing) return Promise.resolve(existing)
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timed out waiting for message')), timeoutMs)
-      this.waiters.push({ match, resolve, timer })
-    })
-  }
-}
-
-const send = (socket: WebSocket, message: unknown) => socket.send(encodeMessage(message))
-const isResult = (id: string) => (m: Frame) => m.kind === 'bridge/result' && m.id === id
-const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 describe('GenieBridge', () => {
   let handle: StandaloneBridgeHandle
@@ -131,9 +74,222 @@ describe('GenieBridge', () => {
     const statusAfter = await agentInbox.wait(isResult(statusId2))
     expect(statusAfter.result.connected).toBe(true)
     expect(statusAfter.result.app.name).toBe('demo')
-    expect(statusAfter.result.toolCount).toBe(3) // 1 app tool + 2 meta tools (devtools_status/wait)
+    expect(statusAfter.result.toolCount).toBe(7) // 1 app tool + 6 bridge meta tools
     const names = statusAfter.result.tools.map((tool: { name: string }) => tool.name)
-    expect(names).toEqual(['echo', 'devtools_status', 'devtools_wait']) // catalog carries the meta tools too
+    expect(names).toEqual([
+      'echo',
+      'devtools_status',
+      'devtools_wait',
+      'devtools_capture_create',
+      'devtools_capture_list',
+      'devtools_capture_read',
+      'devtools_capture_compare',
+    ]) // catalog carries bridge meta tools too
+  })
+
+  it('creates, lists, and reads a bounded React-commit-stable capture', async () => {
+    const { ws: app } = await open(`${url}?role=app`)
+    const toolResults: Record<string, unknown> = {
+      react_get_renders: {
+        commits: 7,
+        summary: { totalRenders: 10, totalUpdates: 8 },
+        components: [],
+      },
+      react_render_causes: { commits: 7, events: [] },
+      react_profile_report: { commits: 7, components: [] },
+      react_effect_audit: { commits: 7, effects: [] },
+      query_list: { queries: [], total: 0 },
+      query_is_fetching: { fetching: 0, mutating: 0 },
+      router_get_state: { pathname: '/review', isLoading: false },
+      router_list_matches: { matches: [] },
+      browser_get_memory: { supported: true, usedJSHeapSize: 1_024 },
+    }
+    app.on('message', (data) => {
+      const message = decodeFrame(data.toString()) as Frame
+      if (message.kind !== 'bridge/request') return
+      send(app, {
+        kind: 'app/response',
+        id: message.id,
+        ok: true,
+        result: toolResults[message.tool],
+      })
+    })
+    send(app, {
+      kind: 'app/hello',
+      protocol: 1,
+      sessionId: 'capture-session',
+      logicalSessionId: 'capture-tab',
+      documentGeneration: 3,
+      sessionName: 'review',
+      app: { name: 'capture demo', url: 'http://localhost/review' },
+      capabilities: ['react', 'query', 'router', 'browser'],
+      tools: Object.keys(toolResults).map((name) => ({
+        name,
+        title: name,
+        description: `${name} test fixture`,
+        group: 'meta',
+      })),
+    })
+
+    const { ws: agent, inbox } = await open(`${url}?role=agent`)
+    const createId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: createId,
+      tool: 'devtools_capture_create',
+      args: { name: 'before optimization' },
+      sessionId: 'review',
+    })
+    const created = await inbox.wait(isResult(createId))
+
+    expect(created.ok).toBe(true)
+    expect(created.result).toMatchObject({
+      schemaVersion: '1.0',
+      name: 'before optimization',
+      include: ['react', 'effects', 'query', 'router', 'memory'],
+      consistency: {
+        kind: 'react-commit-stable',
+        attempts: 1,
+        reactCommit: 7,
+      },
+      session: {
+        sessionId: 'capture-session',
+        logicalSessionId: 'capture-tab',
+        documentGeneration: 3,
+        sessionName: 'review',
+      },
+      complete: true,
+      warnings: [],
+    })
+    expect(created.result.captureId).toMatch(/^cap_/)
+    expect(created.result.sizeBytes).toBe(Buffer.byteLength(JSON.stringify(created.result), 'utf8'))
+    expect(created.result.sections.react.tools.react_get_renders.result.commits).toBe(7)
+
+    const listId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: listId,
+      tool: 'devtools_capture_list',
+      args: {},
+    })
+    const listed = await inbox.wait(isResult(listId))
+    expect(listed.result).toMatchObject({ total: 1, maxRetained: 20 })
+    expect(listed.result.captures[0]).toMatchObject({
+      captureId: created.result.captureId,
+      name: 'before optimization',
+      complete: true,
+    })
+    expect(listed.result.captures[0].sections).toBeUndefined()
+
+    created.result.name = 'mutated response'
+    const readId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: readId,
+      tool: 'devtools_capture_read',
+      args: { captureId: created.result.captureId },
+    })
+    const read = await inbox.wait(isResult(readId))
+    expect(read.result.name).toBe('before optimization')
+    expect(read.result).toEqual(expect.objectContaining({ captureId: created.result.captureId }))
+
+    const createAfterId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: createAfterId,
+      tool: 'devtools_capture_create',
+      args: { name: 'after optimization' },
+      sessionId: 'review',
+    })
+    const createdAfter = await inbox.wait(isResult(createAfterId))
+    expect(createdAfter.ok).toBe(true)
+
+    const compareId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: compareId,
+      tool: 'devtools_capture_compare',
+      args: {
+        baselineCaptureIds: [created.result.captureId],
+        candidateCaptureIds: [createdAfter.result.captureId],
+        metrics: ['react.renders'],
+        minimumRuns: 1,
+        budgets: [{ metric: 'react.renders', maxRegressionPct: 0 }],
+      },
+    })
+    const compared = await inbox.wait(isResult(compareId))
+    expect(compared.ok).toBe(true)
+    expect(compared.result).toMatchObject({
+      schemaVersion: '1.0',
+      kind: 'capture-comparison',
+      overall: 'pass',
+      baselineCaptureIds: [created.result.captureId],
+      candidateCaptureIds: [createdAfter.result.captureId],
+      metrics: [
+        {
+          metric: 'react.renders',
+          baseline: { samples: 1, median: 10 },
+          candidate: { samples: 1, median: 10 },
+          verdict: 'pass',
+        },
+      ],
+      violations: [],
+    })
+  })
+
+  it('retries a named capture when React commits during the first attempt', async () => {
+    const { ws: app } = await open(`${url}?role=app`)
+    const probeCommits = [1, 2, 3, 3]
+    app.on('message', (data) => {
+      const message = decodeFrame(data.toString()) as Frame
+      if (message.kind !== 'bridge/request') return
+      const commits = message.tool === 'react_get_renders' ? (probeCommits.shift() ?? 3) : undefined
+      send(app, {
+        kind: 'app/response',
+        id: message.id,
+        ok: true,
+        result: commits === undefined ? { components: [] } : { commits, components: [] },
+      })
+    })
+    send(app, {
+      kind: 'app/hello',
+      protocol: 1,
+      sessionId: 'moving-session',
+      app: { name: 'moving demo' },
+      capabilities: ['react'],
+      tools: [
+        {
+          name: 'react_get_renders',
+          title: 'Renders',
+          description: 'render totals',
+          group: 'react',
+        },
+        {
+          name: 'react_profile_report',
+          title: 'Profile',
+          description: 'profile report',
+          group: 'react',
+        },
+      ],
+    })
+
+    const { ws: agent, inbox } = await open(`${url}?role=agent`)
+    const id = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id,
+      tool: 'devtools_capture_create',
+      args: { name: 'settled attempt', include: ['react'], maxAttempts: 3 },
+    })
+    const result = await inbox.wait(isResult(id))
+
+    expect(result.ok).toBe(true)
+    expect(result.result.consistency).toMatchObject({
+      kind: 'react-commit-stable',
+      attempts: 2,
+      reactCommit: 3,
+    })
+    expect(probeCommits).toEqual([])
   })
 
   it('errors when forwarding a tool with no app connected', async () => {
@@ -146,6 +302,43 @@ describe('GenieBridge', () => {
     expect(result.ok).toBe(false)
     expect(result.error).toContain('No app connected')
     expect(result.errorCode).toBe('not-connected')
+  })
+
+  it('preserves machine-readable validation errors from the app collector', async () => {
+    const { ws: app } = await open(`${url}?role=app`)
+    app.on('message', (data) => {
+      const message = decodeFrame(data.toString()) as Frame
+      if (message.kind !== 'bridge/request') return
+      send(app, {
+        kind: 'app/response',
+        id: message.id,
+        ok: false,
+        error: 'Invalid arguments for "typed_tool": value is required',
+        errorCode: 'invalid-args',
+      })
+    })
+    send(app, {
+      kind: 'app/hello',
+      protocol: 1,
+      sessionId: 'validation-session',
+      app: { name: 'validation demo' },
+      capabilities: [],
+      tools: [
+        {
+          name: 'typed_tool',
+          title: 'Typed tool',
+          description: 'requires input',
+          group: 'meta',
+        },
+      ],
+    })
+
+    const { ws: agent, inbox } = await open(`${url}?role=agent`)
+    const id = newId()
+    send(agent, { kind: 'agent/invoke', id, tool: 'typed_tool', args: {} })
+    const result = await inbox.wait(isResult(id))
+    expect(result.ok).toBe(false)
+    expect(result.errorCode).toBe('invalid-args')
   })
 
   it('routes across multiple sessions and falls back when the current one closes', async () => {
@@ -250,6 +443,100 @@ describe('GenieBridge', () => {
     const fallbackId = newId()
     send(agent, { kind: 'agent/invoke', id: fallbackId, tool: 'whoami', args: {} })
     expect((await inbox.wait(isResult(fallbackId))).result.from).toBe('A')
+  })
+
+  it('distinguishes readiness, records reload lineage, and follows stale session pins', async () => {
+    const { ws: agent, inbox } = await open(`${url}?role=agent`)
+    const firstDocument = await connect(`${url}?role=app`)
+    send(firstDocument, {
+      kind: 'app/hello',
+      protocol: 1,
+      sessionId: 'physical-1',
+      logicalSessionId: 'logical-review',
+      documentGeneration: 1,
+      sessionName: 'review',
+      app: { name: 'first document' },
+      capabilities: ['react'],
+      tools: [{ name: 'whoami', title: 'Who', description: 'identity', group: 'meta' }],
+    })
+
+    const compactStatusId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: compactStatusId,
+      tool: 'devtools_status',
+      args: { includeTools: false },
+    })
+    const initializing = await inbox.wait(isResult(compactStatusId))
+    expect(initializing.result).toMatchObject({ connected: true, ready: false })
+    expect(initializing.result.tools).toBeUndefined()
+    expect(initializing.result.sessions[0]).toMatchObject({
+      logicalSessionId: 'logical-review',
+      documentGeneration: 1,
+      sessionName: 'review',
+      ready: false,
+    })
+
+    const readyWaitId = newId()
+    send(agent, {
+      kind: 'agent/invoke',
+      id: readyWaitId,
+      tool: 'devtools_wait',
+      args: { condition: 'ready', timeoutMs: 2_000 },
+      sessionId: 'logical-review',
+    })
+    const readyWait = inbox.wait(isResult(readyWaitId))
+    send(firstDocument, { kind: 'app/ready', sessionId: 'physical-1' })
+    expect((await readyWait).result.ok).toBe(true)
+
+    // Real reload ordering commonly closes the old socket before the new document can hello.
+    firstDocument.close()
+    await expect.poll(() => handle.bridge.getStatus().sessions.length).toBe(0)
+
+    const { ws: secondDocument, inbox: secondInbox } = await open(`${url}?role=app`)
+    send(secondDocument, {
+      kind: 'app/hello',
+      protocol: 1,
+      sessionId: 'physical-2',
+      logicalSessionId: 'logical-review',
+      documentGeneration: 2,
+      sessionName: 'review',
+      app: { name: 'second document' },
+      capabilities: ['react'],
+      tools: [{ name: 'whoami', title: 'Who', description: 'identity', group: 'meta' }],
+    })
+    send(secondDocument, { kind: 'app/ready', sessionId: 'physical-2' })
+    await expect.poll(() => handle.bridge.getStatus().sessions.length).toBe(1)
+
+    for (const target of ['physical-1', 'logical-review', 'review']) {
+      const callId = newId()
+      send(agent, {
+        kind: 'agent/invoke',
+        id: callId,
+        tool: 'whoami',
+        args: {},
+        sessionId: target,
+      })
+      const request = await secondInbox.wait(
+        (frame) => frame.kind === 'bridge/request' && frame.id === callId,
+      )
+      send(secondDocument, {
+        kind: 'app/response',
+        id: request.id,
+        ok: true,
+        result: { from: 'physical-2' },
+      })
+      expect((await inbox.wait(isResult(callId))).result.from).toBe('physical-2')
+    }
+
+    const finalStatus = handle.bridge.getStatus()
+    expect(finalStatus.ready).toBe(true)
+    expect(finalStatus.sessions[0]).toMatchObject({
+      sessionId: 'physical-2',
+      predecessorSessionId: 'physical-1',
+      documentGeneration: 2,
+      ready: true,
+    })
   })
 
   it('re-hello on a new socket fails in-flight requests and refreshes session recency', async () => {

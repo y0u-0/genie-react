@@ -10,8 +10,10 @@ The CLI lets the agent inspect, optimize, test, and verify the app from the term
 pnpm add -D genie-react
 npx @genie-react/cli init
 pnpm dev
-npx @genie-react/cli status
+npx @genie-react/cli status --sessions-only
 ```
+
+If more than one tab is open, add `?_genie=my-agent` to your app URL. Then use `--session my-agent` on each command, or set `GENIE_SESSION=my-agent` once.
 
 ## Find wasted renders
 
@@ -19,6 +21,7 @@ npx @genie-react/cli status
 npx @genie-react/cli call react_clear_renders '{}'
 # Drive one flow in the app.
 npx @genie-react/cli call react_get_renders '{"sort":"selfTime","limit":3}'
+npx @genie-react/cli call react_render_causes '{"component":"Button","limit":3}'
 ```
 
 Real demo output:
@@ -29,7 +32,15 @@ unstable props: onClick×4
   Button #81 4× (0m 4u) · 4 unstable · self 0.2ms · ↻ props: onClick(unstable) (button.tsx:50)
 ```
 
-The agent gets the component, source line, render cost, and cause. It knows what to optimize.
+The agent gets the component, source line, render cost, and exact cause. Causes include props, state, context, Query, Router, parent renders, and mounts.
+
+## Audit an effect
+
+```bash
+npx @genie-react/cli call react_effect_audit '{"appOnly":true,"onlyHot":true}'
+```
+
+Each effect reports its own source, whether it belongs to app or library code, and how confident that answer is. Hotness uses a minimum sample count and a confidence interval, so a short run is marked `insufficient-data`.
 
 ## Inspect live hooks
 
@@ -97,5 +108,26 @@ Every tool includes its input schema and a runnable example:
 npx @genie-react/cli tools
 npx @genie-react/cli tools react_inspect_component
 ```
+
+`--json` prints one compact JSON value to stdout. `batch` prints JSONL by default; use `--json` for one JSON array. Errors use the same stable machine format and do not mix prose into stdout.
+
+## Compare repeated runs
+
+Clear the render data, drive one exact flow, and create a named capture:
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Drive the flow.
+npx @genie-react/cli call devtools_capture_create '{"name":"before-1"}' --json
+```
+
+Run the same flow at least three times before and after the change. Then compare the returned IDs:
+
+```bash
+npx @genie-react/cli call devtools_capture_compare \
+  '{"baselineCaptureIds":["<before-1>","<before-2>","<before-3>"],"candidateCaptureIds":["<after-1>","<after-2>","<after-3>"],"metrics":["react.renders"],"budgets":[{"metric":"react.renders","maxRegressionPct":0}]}'
+```
+
+The verdict is `pass`, `fail`, or `insufficient-data`. It also reports median, p95, spread, and confidence. The hub keeps the latest 20 captures.
 
 See the [full setup and tool list](https://github.com/Genie-sa/genie-react#readme).

@@ -9,9 +9,11 @@ import {
   GENIE_PROTOCOL_VERSION,
   GENIE_WS_PATH,
   newId,
+  normalizeSessionName,
   type ToolDescriptor,
 } from '../protocol'
 import type { CollectorContext, ErasedCollectorTool, GenieCollector } from './collector'
+import { runtimeSessionIdentity, type SessionIdentity } from './session-identity'
 
 export interface SocketLike {
   send(data: string): void
@@ -31,6 +33,10 @@ export interface GenieClientOptions {
   collectors: GenieCollector[]
   socketFactory?: SocketFactory
   reconnectDelayMs?: number
+  /** Human-readable tab marker shown in status; defaults to the initial `_genie` URL parameter. */
+  sessionName?: string
+  /** Advanced override for non-browser hosts that manage their own document lineage. */
+  sessionIdentity?: SessionIdentity
 }
 
 const SOCKET_OPEN = 1
@@ -42,6 +48,9 @@ export class GenieClient {
   private readonly socketFactory: SocketFactory
   private readonly reconnectDelayMs: number
   private readonly sessionId = newId()
+  private readonly sessionIdentity: SessionIdentity
+  private readonly sessionName: string | undefined
+  private readonly documentName: string | undefined
   private readonly collectors: GenieCollector[] = []
   private readonly tools = new Map<string, ErasedCollectorTool>()
   private readonly cleanups = new Map<string, () => void>()
@@ -57,6 +66,9 @@ export class GenieClient {
     this.appName = options.appName
     this.socketFactory = options.socketFactory ?? defaultSocketFactory
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1_000
+    this.sessionIdentity = options.sessionIdentity ?? runtimeSessionIdentity()
+    this.sessionName = normalizeSessionName(options.sessionName ?? initialSessionName())
+    this.documentName = initialDocumentName()
     this.collectors.push(...options.collectors)
   }
 
@@ -113,6 +125,7 @@ export class GenieClient {
     // Hello must precede collector start() so the bridge doesn't drop snapshots pushed before the session registers.
     this.sendHello()
     for (const collector of this.collectors) this.runCollectorStart(collector)
+    this.send({ kind: 'app/ready', sessionId: this.sessionId })
     this.startHeartbeat()
   }
 
@@ -171,6 +184,9 @@ export class GenieClient {
       kind: 'app/hello',
       protocol: GENIE_PROTOCOL_VERSION,
       sessionId: this.sessionId,
+      logicalSessionId: this.sessionIdentity.logicalSessionId,
+      documentGeneration: this.sessionIdentity.documentGeneration,
+      sessionName: this.sessionName,
       app: this.appInfo(),
       capabilities: this.capabilities(),
       tools: this.descriptors(),
@@ -181,7 +197,7 @@ export class GenieClient {
     const info: AppInfo = {}
     for (const collector of this.collectors) Object.assign(info, collector.appInfo?.() ?? {})
     if (this.appName) info.name = this.appName
-    if (!info.name && typeof document !== 'undefined' && document.title) info.name = document.title
+    if (!info.name && this.documentName) info.name = this.documentName
     if (!info.url && typeof location !== 'undefined') info.url = location.href
     return info
   }
@@ -213,13 +229,25 @@ export class GenieClient {
   private async handleRequest(id: string, toolName: string, rawArgs: unknown): Promise<void> {
     const tool = this.tools.get(toolName)
     if (!tool) {
-      this.send({ kind: 'app/response', id, ok: false, error: this.unknownToolError(toolName) })
+      this.send({
+        kind: 'app/response',
+        id,
+        ok: false,
+        error: this.unknownToolError(toolName),
+        errorCode: 'tool-error',
+      })
       return
     }
     const args = remapNameAlias(tool.contract.input, rawArgs)
     const rejectedKeys = unknownArgKeysError(toolName, tool.contract.input, args)
     if (rejectedKeys) {
-      this.send({ kind: 'app/response', id, ok: false, error: rejectedKeys })
+      this.send({
+        kind: 'app/response',
+        id,
+        ok: false,
+        error: rejectedKeys,
+        errorCode: 'invalid-args',
+      })
       return
     }
     try {
@@ -228,7 +256,13 @@ export class GenieClient {
       warnOnOutputDrift(tool.contract, result)
       this.send({ kind: 'app/response', id, ok: true, result })
     } catch (error) {
-      this.send({ kind: 'app/response', id, ok: false, error: invocationError(toolName, error) })
+      this.send({
+        kind: 'app/response',
+        id,
+        ok: false,
+        error: invocationError(toolName, error),
+        errorCode: error instanceof z.ZodError ? 'invalid-args' : 'tool-error',
+      })
     }
   }
 
@@ -250,6 +284,21 @@ export class GenieClient {
       register: (collector) => this.registerCollector(collector as GenieCollector),
     }
   }
+}
+
+function initialSessionName(): string | undefined {
+  try {
+    if (typeof location === 'undefined') return undefined
+    const name = new URL(location.href).searchParams.get('_genie')?.trim()
+    return name || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function initialDocumentName(): string | undefined {
+  const name = typeof document === 'undefined' ? '' : document.title.trim()
+  return name || undefined
 }
 
 export function createGenieClient(options: GenieClientOptions): GenieClient {

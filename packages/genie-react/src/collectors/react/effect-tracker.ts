@@ -10,10 +10,11 @@ import {
 } from 'bippy'
 import {
   classifyFibersWithinBudget,
+  type EffectSourceResolution,
   type FiberClassification,
   isLibraryFile,
   type ResolvedSource,
-  resolveEffectSourcesBeforeDeadline,
+  resolveEffectSourceResolutionBeforeDeadline,
   sourceLabel,
 } from './source'
 
@@ -26,6 +27,9 @@ const HOOK_PASSIVE = 0b1000
 const EFFECT_WALK_LIMIT = 1000
 const EFFECT_SOURCE_ATTRIBUTION_LIMIT = 80
 const EFFECT_SOURCE_ATTRIBUTION_BUDGET_MS = 500
+const DEFAULT_HOT_MIN_UPDATES = 3
+const DEFAULT_HOT_MIN_FIRE_RATE = 1
+const HOTNESS_CONFIDENCE_LEVEL = 0.95
 const UNCLASSIFIED_FIBER: FiberClassification = { source: null, isLibrary: false }
 
 // Fibers that own a hook effect list; MemoComponentTag wraps an inner fiber that carries the effects as one of these tags, so it's not listed.
@@ -132,6 +136,41 @@ export interface EffectAuditQuery {
   onlyHot?: boolean
   /** Exclude library components (node_modules, incl. Vite pre-bundled deps). Default true. */
   appOnly?: boolean
+  /** Minimum observed component updates before an effect can be classified hot. */
+  minUpdates?: number
+  /** Minimum observed effect fire rate across updates before it is classified hot. */
+  minFireRate?: number
+}
+
+export type EffectOwnership = 'app' | 'library' | 'unknown'
+export type ProvenanceConfidence = 'high' | 'medium' | 'none'
+export type EffectProvenanceReason =
+  | 'exact-hook-order'
+  | 'no-user-effect-callsite'
+  | 'library-only-hook-tree'
+  | 'hook-count-mismatch'
+  | 'hook-source-unresolved'
+  | 'hook-inspection-unavailable'
+  | 'attribution-budget-exhausted'
+
+export interface EffectProvenance {
+  ownership: EffectOwnership
+  confidence: ProvenanceConfidence
+  reason: EffectProvenanceReason
+  hookSource: ResolvedSource | null
+  packageName: string | null
+}
+
+export type EffectHotnessLabel = 'hot' | 'not-hot' | 'insufficient-data'
+
+export interface EffectHotness {
+  label: EffectHotnessLabel
+  samples: number
+  observedRate: number
+  minUpdates: number
+  minFireRate: number
+  confidenceInterval: { level: number; lower: number; upper: number }
+  reason: 'meets-threshold' | 'below-fire-rate' | 'below-minimum-updates'
 }
 
 export interface EffectFinding {
@@ -149,6 +188,8 @@ export interface EffectFinding {
   source: ResolvedSource | null
   /** True when the effect was created inside a library hook (node_modules), not your component. */
   isLibrary: boolean
+  provenance: EffectProvenance
+  hotness: EffectHotness
 }
 
 export interface EffectAuditRecord {
@@ -156,16 +197,30 @@ export interface EffectAuditRecord {
   name: string
   source: ResolvedSource | null
   isLibrary: boolean
+  componentProvenance: {
+    ownership: EffectOwnership
+    confidence: 'medium' | 'none'
+    reason: 'nearest-symbolicated-fiber' | 'source-unresolved'
+    source: ResolvedSource | null
+  }
   effects: EffectFinding[]
+}
+
+export interface EffectHotnessCriteria {
+  minUpdates: number
+  minFireRate: number
+  confidenceLevel: number
 }
 
 const totalEffects = (findings: EffectAuditRecord[]): number =>
   findings.reduce((sum, record) => sum + record.effects.length, 0)
 
 /** The audited components plus the count of library-origin effects appOnly hid — for react_effect_audit's filteredNote. */
-export async function getEffectAuditReport(
-  query: EffectAuditQuery,
-): Promise<{ components: EffectAuditRecord[]; libraryEffectsHidden: number }> {
+export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
+  components: EffectAuditRecord[]
+  libraryEffectsHidden: number
+  hotnessCriteria: EffectHotnessCriteria
+}> {
   let list = [...records.values()]
   if (query.component) {
     const needle = query.component.toLowerCase()
@@ -173,6 +228,11 @@ export async function getEffectAuditReport(
   }
 
   const appOnly = query.appOnly ?? true
+  const hotnessCriteria: EffectHotnessCriteria = {
+    minUpdates: query.minUpdates ?? DEFAULT_HOT_MIN_UPDATES,
+    minFireRate: query.minFireRate ?? DEFAULT_HOT_MIN_FIRE_RATE,
+    confidenceLevel: HOTNESS_CONFIDENCE_LEVEL,
+  }
   const { classes } = await classifyFibersWithinBudget(
     list.map((record) => record.fiber),
     { limit: EFFECT_SOURCE_ATTRIBUTION_LIMIT, budgetMs: EFFECT_SOURCE_ATTRIBUTION_BUDGET_MS },
@@ -182,23 +242,26 @@ export async function getEffectAuditReport(
     const { source, isLibrary } = classes[index] ?? UNCLASSIFIED_FIBER
     const name = record.name === 'Anonymous' ? (sourceLabel(source) ?? record.name) : record.name
     const stats = record.stats.filter(Boolean)
-    const effectSources = effectSourcesByIndex[index] ?? null
-    // Internal hooks (useSyncExternalStore, useActionState) push commit-list effects the inspector never reports: map 1:1 only when lengths match; inspected with no app effect ⇒ the whole list is library/internal noise; otherwise attribution is unsafe.
-    const aligned = effectSources !== null && effectSources.length === stats.length
-    const noAppEffect =
-      effectSources !== null &&
-      !effectSources.some((src) => src !== null && !isLibraryFile(src.file))
+    const effectSourceResolution = effectSourcesByIndex[index] ?? budgetExceededResolution()
+    const componentOwnership: EffectOwnership = source ? (isLibrary ? 'library' : 'app') : 'unknown'
     return {
       id: record.id,
       name,
       source,
       isLibrary,
+      componentProvenance: {
+        ownership: componentOwnership,
+        confidence: source ? 'medium' : 'none',
+        reason: source ? 'nearest-symbolicated-fiber' : 'source-unresolved',
+        source,
+      },
       effects: stats.map((stat, position) => {
-        const effectSource = aligned && effectSources ? effectSources[position] : null
+        const provenance = effectProvenance(effectSourceResolution, stats.length, position)
         return {
-          ...toFinding(stat),
-          source: effectSource ?? null,
-          isLibrary: effectSource ? isLibraryFile(effectSource.file) : noAppEffect,
+          ...toFinding(stat, hotnessCriteria),
+          source: provenance.hookSource,
+          isLibrary: provenance.ownership === 'library',
+          provenance,
         }
       }),
     }
@@ -208,19 +271,38 @@ export async function getEffectAuditReport(
   let libraryEffectsHidden = 0
   if (appOnly) {
     findings = all
-      .map((record) => ({ ...record, effects: record.effects.filter((e) => !e.isLibrary) }))
-      .filter((record) => !record.isLibrary && record.effects.length > 0)
+      .map((record) => ({
+        ...record,
+        effects: record.effects.filter((effect) => effect.provenance.ownership !== 'library'),
+      }))
+      .filter(
+        (record) =>
+          record.effects.length > 0 &&
+          (record.componentProvenance.ownership !== 'library' ||
+            record.effects.some((effect) => effect.provenance.ownership === 'app')),
+      )
     libraryEffectsHidden = totalEffects(all) - totalEffects(findings)
   }
-  if (query.onlyHot) findings = findings.filter((record) => record.effects.some((e) => e.note))
+  if (query.onlyHot) {
+    findings = findings
+      .map((record) => ({
+        ...record,
+        effects: record.effects.filter((effect) => effect.hotness.label === 'hot'),
+      }))
+      .filter((record) => record.effects.length > 0)
+  }
   findings.sort((a, b) => score(b) - score(a))
-  return { components: findings.slice(0, query.limit), libraryEffectsHidden }
+  return {
+    components: findings.slice(0, query.limit),
+    libraryEffectsHidden,
+    hotnessCriteria,
+  }
 }
 
 async function resolveEffectSourcesWithinBudget(
   recordsToAttribute: EffectRecord[],
-): Promise<Array<(ResolvedSource | null)[] | null>> {
-  const sources = recordsToAttribute.map(() => null as (ResolvedSource | null)[] | null)
+): Promise<EffectSourceResolution[]> {
+  const sources = recordsToAttribute.map(budgetExceededResolution)
   const startedAt = Date.now()
   const limit = Math.min(recordsToAttribute.length, EFFECT_SOURCE_ATTRIBUTION_LIMIT)
 
@@ -230,7 +312,7 @@ async function resolveEffectSourcesWithinBudget(
 
     const record = recordsToAttribute[index]
     if (!record) break
-    sources[index] = await resolveEffectSourcesBeforeDeadline(record.fiber, remaining)
+    sources[index] = await resolveEffectSourceResolutionBeforeDeadline(record.fiber, remaining)
   }
 
   return sources
@@ -240,14 +322,18 @@ async function resolveEffectSourcesWithinBudget(
 function score(record: EffectAuditRecord): number {
   let total = 0
   for (const effect of record.effects) {
-    if (effect.note) total += 1_000_000
+    if (effect.hotness.label === 'hot') total += 1_000_000
     total += effect.fired
   }
   return total
 }
 
-function toFinding(stat: EffectStat): Omit<EffectFinding, 'source' | 'isLibrary'> {
+function toFinding(
+  stat: EffectStat,
+  criteria: EffectHotnessCriteria,
+): Omit<EffectFinding, 'source' | 'isLibrary' | 'provenance'> {
   const firesEveryUpdate = stat.updates > 0 && stat.fired === stat.updates
+  const hotness = classifyHotness(stat, criteria)
   return {
     index: stat.index,
     kind: stat.kind,
@@ -258,24 +344,156 @@ function toFinding(stat: EffectStat): Omit<EffectFinding, 'source' | 'isLibrary'
     firesEveryUpdate,
     lastChangedDep: stat.lastChangedDep,
     hasCleanup: stat.hasCleanup,
-    note: noteFor(stat, firesEveryUpdate),
+    note: noteFor(stat, hotness),
+    hotness,
   }
 }
 
-function noteFor(stat: EffectStat, firesEveryUpdate: boolean): string | undefined {
+function noteFor(stat: EffectStat, hotness: EffectHotness): string | undefined {
+  if (hotness.label !== 'hot') return undefined
   const hookName = stat.kind === 'layout' ? 'useLayoutEffect' : 'useEffect'
   if (stat.depsMode === 'none' && stat.fired > 0) {
     return `no dependency array — this ${hookName} runs after every render (ran on ${stat.fired}/${stat.updates} updates); add a deps array if it should not`
   }
-  if (stat.depsMode === 'list' && firesEveryUpdate && stat.updates > 1) {
+  if (stat.depsMode === 'list') {
     const slot =
       stat.lastChangedDep === null ? 'a dependency' : `dependency [${stat.lastChangedDep}]`
     // A changed primitive is a real value change (maybe intended); only reference churn is fixable with memoization.
     return stat.lastChangedDepIsPrimitive
-      ? `re-runs on every update (${stat.fired}/${stat.updates}) — ${slot} changes value each commit; intended for state that changes per interaction, a loop smell if this effect also sets that state`
-      : `re-runs on every update (${stat.fired}/${stat.updates}) — ${slot} changes reference each commit (likely unstable); stabilize it with useMemo/useCallback or drop it from deps`
+      ? `re-runs on ${stat.fired}/${stat.updates} updates — ${slot} changes value; intended for state that changes per interaction, a loop smell if this effect also sets that state`
+      : `re-runs on ${stat.fired}/${stat.updates} updates — ${slot} changes reference (likely unstable); stabilize it with useMemo/useCallback or drop it from deps`
   }
   return undefined
+}
+
+function classifyHotness(stat: EffectStat, criteria: EffectHotnessCriteria): EffectHotness {
+  const samples = stat.updates
+  const observedRate = samples === 0 ? 0 : stat.fired / samples
+  const reason =
+    samples < criteria.minUpdates
+      ? 'below-minimum-updates'
+      : observedRate >= criteria.minFireRate
+        ? 'meets-threshold'
+        : 'below-fire-rate'
+  const label: EffectHotnessLabel =
+    reason === 'below-minimum-updates'
+      ? 'insufficient-data'
+      : reason === 'meets-threshold'
+        ? 'hot'
+        : 'not-hot'
+  const [lower, upper] = wilsonInterval(stat.fired, samples)
+  return {
+    label,
+    samples,
+    observedRate: roundRate(observedRate),
+    minUpdates: criteria.minUpdates,
+    minFireRate: criteria.minFireRate,
+    confidenceInterval: {
+      level: criteria.confidenceLevel,
+      lower: roundRate(lower),
+      upper: roundRate(upper),
+    },
+    reason,
+  }
+}
+
+/** 95% Wilson score interval for a binomial firing rate; stable even at 0/n and n/n. */
+function wilsonInterval(successes: number, samples: number): [number, number] {
+  if (samples === 0) return [0, 1]
+  const z = 1.959963984540054
+  const rate = successes / samples
+  const zSquared = z * z
+  const denominator = 1 + zSquared / samples
+  const center = (rate + zSquared / (2 * samples)) / denominator
+  const margin =
+    (z * Math.sqrt((rate * (1 - rate) + zSquared / (4 * samples)) / samples)) / denominator
+  return [Math.max(0, center - margin), Math.min(1, center + margin)]
+}
+
+function roundRate(value: number): number {
+  return Math.round(value * 10_000) / 10_000
+}
+
+function budgetExceededResolution(): EffectSourceResolution {
+  return { status: 'deadline-exceeded', sources: null }
+}
+
+function effectProvenance(
+  resolution: EffectSourceResolution,
+  effectCount: number,
+  position: number,
+): EffectProvenance {
+  if (resolution.status === 'deadline-exceeded') {
+    return unknownProvenance('attribution-budget-exhausted')
+  }
+  if (resolution.status === 'inspection-unavailable') {
+    return unknownProvenance('hook-inspection-unavailable')
+  }
+  if (resolution.status === 'no-user-effects') {
+    return {
+      ownership: 'library',
+      confidence: 'medium',
+      reason: 'no-user-effect-callsite',
+      hookSource: null,
+      packageName: null,
+    }
+  }
+
+  const sources = resolution.sources ?? []
+  if (sources.length === effectCount) {
+    const hookSource = sources[position] ?? null
+    if (!hookSource) return unknownProvenance('hook-source-unresolved')
+    const ownership: EffectOwnership = isLibraryFile(hookSource.file) ? 'library' : 'app'
+    return {
+      ownership,
+      confidence: 'high',
+      reason: 'exact-hook-order',
+      hookSource,
+      packageName: ownership === 'library' ? packageNameFromFile(hookSource.file) : null,
+    }
+  }
+
+  if (sources.length > 0 && sources.every((source) => source && isLibraryFile(source.file))) {
+    return {
+      ownership: 'library',
+      confidence: 'medium',
+      reason: 'library-only-hook-tree',
+      hookSource: null,
+      packageName: commonPackageName(sources),
+    }
+  }
+  return unknownProvenance('hook-count-mismatch')
+}
+
+function unknownProvenance(reason: EffectProvenanceReason): EffectProvenance {
+  return { ownership: 'unknown', confidence: 'none', reason, hookSource: null, packageName: null }
+}
+
+function commonPackageName(sources: (ResolvedSource | null)[]): string | null {
+  const packages = new Set(
+    sources
+      .map((source) => (source ? packageNameFromFile(source.file) : null))
+      .filter((name): name is string => name !== null),
+  )
+  return packages.size === 1 ? ([...packages][0] ?? null) : null
+}
+
+function packageNameFromFile(file: string): string | null {
+  const normalized = file.replaceAll('\\', '/')
+  const nodeModules = normalized.lastIndexOf('/node_modules/')
+  if (nodeModules < 0) return null
+  const path = normalized.slice(nodeModules + '/node_modules/'.length)
+  if (path.startsWith('.vite/deps/')) {
+    const base = path
+      .slice('.vite/deps/'.length)
+      .split('/')[0]
+      ?.replace(/\.[cm]?js.*$/, '')
+    if (!base || base.startsWith('chunk-') || /-[A-Za-z0-9_]{8}$/.test(base)) return null
+    return base.startsWith('@') ? base.replace('_', '/') : base
+  }
+  const [first, second] = path.split('/')
+  if (!first) return null
+  return first.startsWith('@') && second ? `${first}/${second}` : first
 }
 
 function listEffects(fiber: Fiber | null | undefined): Effect[] {

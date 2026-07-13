@@ -24,6 +24,17 @@ export interface FiberClassification {
   isLibrary: boolean
 }
 
+export type EffectSourceResolutionStatus =
+  | 'resolved'
+  | 'no-user-effects'
+  | 'inspection-unavailable'
+  | 'deadline-exceeded'
+
+export interface EffectSourceResolution {
+  status: EffectSourceResolutionStatus
+  sources: (ResolvedSource | null)[] | null
+}
+
 const cache = new Map<number, ResolvedSource>()
 const pendingSource = new Map<number, Promise<ResolvedSource | null>>()
 const effectSourceCache = new Map<number, (ResolvedSource | null)[]>()
@@ -51,15 +62,16 @@ export async function resolveSource(fiber: Fiber): Promise<ResolvedSource | null
     try {
       const source = await getSource(getLatestFiber(fiber) ?? fiber)
       if (!source?.fileName) return null
-      const { line, column } = await toOriginalPosition(
+      const servedFile = normalizeFileName(source.fileName)
+      const original = await toOriginalPosition(
         source.fileName,
         source.lineNumber ?? null,
         source.columnNumber ?? null,
       )
       const resolved: ResolvedSource = {
-        file: normalizeFileName(source.fileName),
-        line,
-        column,
+        file: preferOriginalAppFile(servedFile, original.file),
+        line: original.line,
+        column: original.column,
         functionName: source.functionName ?? null,
       }
       cache.set(id, resolved)
@@ -74,8 +86,9 @@ export async function resolveSource(fiber: Fiber): Promise<ResolvedSource | null
   return lookup
 }
 
-/** A file outside the project tree (under node_modules, incl. Vite's pre-bundled deps) is a library. */
+/** A file outside the project tree is a library. Turbopack can expose app fibers as unmapped dev chunks; dependencies still resolve to node_modules paths. */
 export function isLibraryFile(file: string): boolean {
+  if (file.replaceAll('\\', '/').includes('/.next/dev/server/chunks/')) return false
   return !isSourceFile(file)
 }
 
@@ -261,8 +274,7 @@ async function resolveHookSource(hook: HookSource): Promise<ResolvedSource | nul
     hook.lineNumber ?? null,
     hook.columnNumber ?? null,
   )
-  const file =
-    !isSourceFile(served) && original.file && isSourceFile(original.file) ? original.file : served
+  const file = preferOriginalAppFile(served, original.file)
   return {
     file,
     line: original.line,
@@ -271,26 +283,37 @@ async function resolveHookSource(hook: HookSource): Promise<ResolvedSource | nul
   }
 }
 
+/** Trust an app source-map target only when the served frame is an opaque/non-source chunk. */
+function preferOriginalAppFile(served: string, original: string | null): string {
+  return !isSourceFile(served) && original && isSourceFile(original) ? original : served
+}
+
 /** Each user effect's own call-site, in hook order, via bippy's hook inspector (a shadow render). null = inspection unavailable, don't attribute; [] = inspected but no user effects, so commit-list entries are internal noise; a non-empty array aligns 1:1 with the commit list only when lengths match. */
 export async function resolveEffectSources(
   fiber: Fiber,
 ): Promise<(ResolvedSource | null)[] | null> {
+  const resolution = await resolveEffectSourceResolution(fiber)
+  return resolution.sources
+}
+
+/** Detailed hook-inspection result so callers can distinguish absence, failure, and exact attribution. */
+export async function resolveEffectSourceResolution(fiber: Fiber): Promise<EffectSourceResolution> {
   const target = getLatestFiber(fiber) ?? fiber
   const id = getFiberId(target)
   const cached = effectSourceCache.get(id)
-  if (cached) return cached
+  if (cached) return { status: 'resolved', sources: cached }
 
   const callSites: HookSource[] = []
   try {
     collectEffectCallSites(getFiberHooks(target), callSites)
   } catch {
-    return null
+    return { status: 'inspection-unavailable', sources: null }
   }
-  if (callSites.length === 0) return []
+  if (callSites.length === 0) return { status: 'no-user-effects', sources: [] }
 
   const resolved = await Promise.all(callSites.map(resolveHookSource))
   if (resolved.some((source) => source !== null)) effectSourceCache.set(id, resolved)
-  return resolved
+  return { status: 'resolved', sources: resolved }
 }
 
 export async function resolveEffectSourcesBeforeDeadline(
@@ -303,6 +326,26 @@ export async function resolveEffectSourcesBeforeDeadline(
       resolveEffectSources(fiber),
       new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), Math.max(1, timeoutMs))
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+export async function resolveEffectSourceResolutionBeforeDeadline(
+  fiber: Fiber,
+  timeoutMs: number,
+): Promise<EffectSourceResolution> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      resolveEffectSourceResolution(fiber),
+      new Promise<EffectSourceResolution>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ status: 'deadline-exceeded', sources: null }),
+          Math.max(1, timeoutMs),
+        )
       }),
     ])
   } finally {

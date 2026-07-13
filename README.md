@@ -89,16 +89,44 @@ Almost everything works as on the web. The differences: `react_dom_for_component
 ## Drive it
 
 ```bash
-npx @genie-react/cli status                    # connected once a browser opens the app
+npx @genie-react/cli status --sessions-only    # connected once a browser opens the app
 npx @genie-react/cli tools                     # group index; drill in: tools <group> / tools <tool>
 npx @genie-react/cli call react_get_renders '{"sort":"renders"}'
+npx @genie-react/cli call react_render_causes '{"component":"Checkout"}'
 npx @genie-react/cli call query_list '{}'
 npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
 ```
 
-Render reports name the exact stateful hook that changed and show a bounded value diff, for example `state[0] false→true · reducer[1] items=1→items=2`, instead of a generic state-change marker.
+Render reports name the exact cause: a prop, state hook, context, query, router update, parent render, or mount. They also show a small value diff, for example `state[0] false→true`.
+
+Give each browser tab a stable name when several agents or tabs share a hub:
+
+```text
+http://localhost:3000/?_genie=my-agent
+```
+
+Then pass `--session my-agent`, or set `GENIE_SESSION=my-agent` once. The same target keeps working after a reconnect or reload.
 
 `npx @genie-react/cli doctor` checks the wiring; `doctor --live` also probes the running hub, the served client, and a session round-trip. Stale `.genie/bridge.json` files left by a killed dev server are cleaned up automatically.
+
+## Prove a change with captures
+
+A capture records one bounded view of React, effects, Query, Router, memory, and optional frame-rate data.
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Drive one exact flow.
+npx @genie-react/cli call devtools_capture_create '{"name":"before-1"}' --json
+```
+
+Repeat the same flow at least three times before and three times after the change. Compare the returned capture IDs:
+
+```bash
+npx @genie-react/cli call devtools_capture_compare \
+  '{"baselineCaptureIds":["<before-1>","<before-2>","<before-3>"],"candidateCaptureIds":["<after-1>","<after-2>","<after-3>"],"metrics":["react.renders","react.selfTimeMs"],"budgets":[{"metric":"react.renders","maxRegressionPct":0}]}'
+```
+
+The result includes median, p95, spread, confidence, and a clear budget verdict. Small or missing samples are `insufficient-data`, never a false pass. The hub keeps the latest 20 captures, so export important JSON results.
 
 ## Try a change before it ships
 
@@ -134,7 +162,8 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 - a component's props, state, hooks (each labeled: state / reducer / memo / callback / ref / effect), and the contexts it consumes
 - the DOM node(s) a component renders, each with a selector
 - what re-rendered, how often, and why — including unstable props that defeat `memo`
-- which effects fired and why — catches refetch / setState loops
+- the causal event behind each render: props, state, context, query, router, or parent
+- which effects fired, who owns them, and whether enough samples prove they are hot
 - caught errors and suspended boundaries — why a screen is blank or stuck
 - a profiler: slowest, most re-rendered, most wasted on unstable props
 - the TanStack Query cache: staleness, observers, refetch storms, cache churn
@@ -150,13 +179,13 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 - override a component's props, hook state, or a context value
 - force a Suspense fallback or an error boundary — hold loading / error UI open to inspect it, no code edits
 - list every active override and reset them all
-- snapshot render aggregates and diff later: a regressed / improved verdict that proves (or reverts) a perf fix
+- create named runtime captures and compare repeated before/after runs against typed budgets
 
 ## Tools
 
-64 tools in 7 groups. `read` tools are safe to call freely; `action` tools mutate the running app. Each tool documents itself — `tools <group>` lists a group, `tools <tool>` prints the full schema — so here are just the names:
+The available tool count depends on the collectors in the running app. `read` tools are safe to call freely; `action` tools mutate the running app. Each tool documents itself — `tools <group>` lists a group, `tools <tool>` prints the full schema — so here are just the names:
 
-**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_clear_renders`, `react_effect_audit`, `react_error_state`, `react_refresh_events`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
+**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_render_causes`, `react_clear_renders`, `react_effect_audit`, `react_error_state`, `react_refresh_events`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
 
 **Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_simulate_state`, `query_restore_state`, `query_fetch`, `query_ensure`, `mutation_rerun`.
 
@@ -168,13 +197,13 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 
 **Perf** — read: `browser_fps` (frame-rate sample with a smooth / degraded / janky verdict).
 
-**Meta** — read: `devtools_status`, `devtools_wait`.
+**Meta** — read: `devtools_status`, `devtools_wait`, `devtools_capture_create`, `devtools_capture_list`, `devtools_capture_read`, `devtools_capture_compare`.
 
 ## How it works
 
 Collectors in the browser (React, Query, Router, plugins, memory) run tool calls against the real fibers and caches, and talk over a WebSocket to a small hub — embedded in your Vite dev server, or standalone (`genie-react hub` / Next.js `instrumentation.ts`), where it also serves the browser client as a single script. The CLI connects to that hub, runs tools, and prints JSON.
 
-Several tabs, apps, and agents coexist. Calls hit the most recent tab; `genie-react status` lists every session, and `--session <id>` targets a specific tab (set `GENIE_SESSION` once per agent shell to pin an agent to its tab). A standalone hub identifies the app it serves, so a second app's hub walks to the next free port instead of cross-connecting, and each app's `.genie/bridge.json` pins its CLI to its own hub.
+Several tabs, apps, and agents coexist. Calls hit the most recent tab unless you target a physical session ID, a durable logical ID, or a unique name from `?_genie=<name>`. `genie-react status` shows readiness and every session; `--sessions-only` keeps that response small. Set `GENIE_SESSION` once to pin an agent to its tab. A reconnect keeps the logical identity and stable app name. A standalone hub identifies the app it serves, so a second app's hub walks to the next free port instead of cross-connecting, and each app's `.genie/bridge.json` pins its CLI to its own hub.
 
 Dev-only and local: the Vite plugin is inert in production builds, the browser client only starts under `import.meta.env.DEV`, and the hub listens on `localhost` only.
 

@@ -22,6 +22,7 @@ import {
   reactProfileStartContract,
   reactProfileStopContract,
   reactRefreshEventsContract,
+  reactRenderCausesContract,
   reactRendersDiffContract,
   reactResetOverridesContract,
   reactToggleSuspenseFallbackContract,
@@ -55,6 +56,7 @@ import { getRefreshEvents, startRefreshTracking } from './refresh-tracker'
 import {
   clearRenders,
   getCommitCount,
+  getRenderCauseEventsReport,
   getRenderSummary,
   getRendersLeaderboards,
   getRendersReport,
@@ -270,19 +272,47 @@ export function reactCollector(): GenieCollector {
         },
       }),
       defineCollectorTool({
+        contract: reactRenderCausesContract,
+        handler: async ({ commit, afterCommit, component, limit, appOnly }) => {
+          const { events, libraryHidden } = await getRenderCauseEventsReport({
+            commit,
+            afterCommit,
+            component,
+            limit,
+            appOnly,
+          })
+          return {
+            tracking: isTracking(),
+            commits: getCommitCount(),
+            events,
+            filteredNote: appOnly
+              ? appOnlyFilteredNote(events.length, libraryHidden, 'components')
+              : undefined,
+          }
+        },
+      }),
+      defineCollectorTool({
         contract: reactEffectAuditContract,
-        handler: async ({ component, onlyHot, appOnly, limit }) => {
-          const { components, libraryEffectsHidden } = await getEffectAuditReport({
+        handler: async ({ component, onlyHot, appOnly, minUpdates, minFireRate, limit }) => {
+          const { components, libraryEffectsHidden, hotnessCriteria } = await getEffectAuditReport({
             component,
             onlyHot,
             appOnly,
+            minUpdates,
+            minFireRate,
             limit,
           })
           const appEffects = components.reduce((sum, c) => sum + c.effects.length, 0)
           const filteredNote = appOnly
             ? appOnlyFilteredNote(appEffects, libraryEffectsHidden, 'effects')
             : undefined
-          return { tracking: isTracking(), commits: getCommitCount(), components, filteredNote }
+          return {
+            tracking: isTracking(),
+            commits: getCommitCount(),
+            hotnessCriteria,
+            components,
+            filteredNote,
+          }
         },
       }),
       defineCollectorTool({

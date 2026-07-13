@@ -23,6 +23,7 @@ import {
   type ToolDescriptor,
   type WaitCondition,
 } from '../protocol'
+import { CaptureManager, isCaptureTool } from './capture-manager'
 import { frameKind, matchesOf, parseQueryList, routerStateOf } from './wire-guards'
 
 type BridgeLogLevel = 'info' | 'warn' | 'error'
@@ -43,6 +44,7 @@ export interface GenieBridgeOptions {
 
 interface BridgeStatus {
   connected: boolean
+  ready: boolean
   sessionId: string | null
   app: AppInfo | null
   domains: string[]
@@ -53,12 +55,24 @@ interface BridgeStatus {
 interface AppSession {
   socket: WebSocket
   sessionId: string
+  logicalSessionId?: string
+  documentGeneration?: number
+  sessionName?: string
+  predecessorSessionId?: string
+  successorSessionId?: string
   app: AppInfo
   capabilities: string[]
   tools: ToolDescriptor[]
   connectedAt: number
+  readyAt?: number
   /** Last `app/heartbeat` receipt; undefined until the first beat, which is how legacy (never-beating) clients opt out of busy fast-fail. */
   lastHeartbeatAt?: number
+}
+
+interface LatestDocument {
+  sessionId: string
+  documentGeneration?: number
+  connectedAt: number
 }
 
 interface Connection {
@@ -93,6 +107,7 @@ const BUSY_RETRY_MS = 500
 const SESSION_STALE_MS = 15_000
 const MIN_REQUEST_TIMEOUT_MS = 1_000
 const MAX_REQUEST_TIMEOUT_MS = 120_000
+const MAX_SESSION_SUCCESSORS = 256
 
 /** A session's full catalog: its advertised tools plus the bridge-answered meta tools, so listings and toolCount agree. */
 function catalogOf(session: AppSession | null | undefined): ToolDescriptor[] {
@@ -102,6 +117,14 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 function toolDescriptor(session: AppSession, tool: string): ToolDescriptor | undefined {
   return catalogOf(session).find((descriptor) => descriptor.name === tool)
+}
+
+function compareSessionRecency(a: AppSession, b: AppSession): number {
+  if (a.logicalSessionId && a.logicalSessionId === b.logicalSessionId) {
+    const generationOrder = (b.documentGeneration ?? 0) - (a.documentGeneration ?? 0)
+    if (generationOrder !== 0) return generationOrder
+  }
+  return b.connectedAt - a.connectedAt
 }
 
 // Keeps a leaked bridge from pinning the process; Node-only, but typed against a possible DOM `number` timer.
@@ -121,6 +144,11 @@ export class GenieBridge {
   private readonly sessionStaleMs: number
   private readonly log: BridgeLogger
   private readonly apps = new Map<string, AppSession>()
+  /** Physical document id → its replacement; bounded so stale shell pins can survive ordinary reloads. */
+  private readonly sessionSuccessors = new Map<string, string>()
+  /** Logical tab id → latest document, retained after socket close so close-before-hello reloads keep lineage. */
+  private readonly latestDocuments = new Map<string, LatestDocument>()
+  private readonly captures: CaptureManager<AppSession>
   private readonly connections = new Set<WebSocket>()
   private readonly responsiveSockets = new WeakSet<WebSocket>()
   private readonly heartbeat: ReturnType<typeof setInterval>
@@ -132,6 +160,12 @@ export class GenieBridge {
     this.busyHeartbeatGapMs = options.busyHeartbeatGapMs ?? BUSY_HEARTBEAT_GAP_MS
     this.sessionStaleMs = options.sessionStaleMs ?? SESSION_STALE_MS
     this.log = options.logger ?? (() => {})
+    this.captures = new CaptureManager({
+      resolveSession: (target) => (target ? this.resolveSession(target) : this.currentSession()),
+      unknownSessionError: (target) => this.unknownSessionError(target),
+      isCurrentSession: (session) => this.apps.get(session.sessionId)?.socket === session.socket,
+      request: (session, tool, args) => this.appRequestForSession(tool, args, session),
+    })
     const interval = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS
     this.heartbeat = setInterval(() => this.sweepDeadConnections(), interval)
     unrefTimer(this.heartbeat)
@@ -149,6 +183,7 @@ export class GenieBridge {
     const current = this.currentSession()
     return {
       connected: this.apps.size > 0,
+      ready: current?.readyAt !== undefined,
       sessionId: current?.sessionId ?? null,
       app: current?.app ?? null,
       domains: current?.capabilities ?? [],
@@ -161,6 +196,9 @@ export class GenieBridge {
     clearInterval(this.heartbeat)
     for (const pending of this.pending.values()) this.clearPendingTimers(pending)
     this.pending.clear()
+    this.sessionSuccessors.clear()
+    this.latestDocuments.clear()
+    this.captures.clear()
     // terminate(), not close(): a graceful close handshake with a half-open peer blocks shutdown on ws's 30s timeout.
     for (const socket of this.agents) socket.terminate()
     for (const session of this.apps.values()) session.socket.terminate()
@@ -179,30 +217,68 @@ export class GenieBridge {
     if (!pinned || this.staleMsOf(pinned) === null) return pinned
     const fresh = [...this.apps.values()]
       .filter((session) => this.staleMsOf(session) === null)
-      .sort((a, b) => b.connectedAt - a.connectedAt)[0]
+      .sort(compareSessionRecency)[0]
     return fresh ?? pinned
   }
 
   private sessionSummaries(): SessionSummary[] {
     const current = this.currentSession()
-    return [...this.apps.values()]
-      .sort((a, b) => b.connectedAt - a.connectedAt)
-      .map((session) => {
-        const staleMs = this.staleMsOf(session)
-        return {
-          sessionId: session.sessionId,
-          app: session.app,
-          domains: session.capabilities,
-          toolCount: catalogOf(session).length,
-          connectedAt: session.connectedAt,
-          current: session.sessionId === current?.sessionId,
-          ...(staleMs === null ? {} : { staleMs }),
-        }
-      })
+    return [...this.apps.values()].sort(compareSessionRecency).map((session) => {
+      const staleMs = this.staleMsOf(session)
+      return {
+        sessionId: session.sessionId,
+        ...(session.logicalSessionId === undefined
+          ? {}
+          : { logicalSessionId: session.logicalSessionId }),
+        ...(session.documentGeneration === undefined
+          ? {}
+          : { documentGeneration: session.documentGeneration }),
+        ...(session.sessionName === undefined ? {} : { sessionName: session.sessionName }),
+        ...(session.predecessorSessionId === undefined
+          ? {}
+          : { predecessorSessionId: session.predecessorSessionId }),
+        ...(session.successorSessionId === undefined
+          ? {}
+          : { successorSessionId: session.successorSessionId }),
+        app: session.app,
+        domains: session.capabilities,
+        toolCount: catalogOf(session).length,
+        connectedAt: session.connectedAt,
+        ready: session.readyAt !== undefined,
+        ...(session.readyAt === undefined ? {} : { readyAt: session.readyAt }),
+        current: session.sessionId === current?.sessionId,
+        ...(staleMs === null ? {} : { staleMs }),
+      }
+    })
   }
 
   private hasSession(sessionId?: string): boolean {
-    return sessionId ? this.apps.has(sessionId) : this.apps.size > 0
+    return sessionId ? this.resolveSession(sessionId) !== null : this.apps.size > 0
+  }
+
+  private hasReadySession(sessionId?: string): boolean {
+    const session = sessionId ? this.resolveSession(sessionId) : this.currentSession()
+    return session?.readyAt !== undefined
+  }
+
+  /** Resolves physical ids, reload-stable logical ids, and unique human names. */
+  private resolveSession(target: string): AppSession | null {
+    let physicalId = target
+    const visited = new Set<string>()
+    while (this.sessionSuccessors.has(physicalId) && !visited.has(physicalId)) {
+      visited.add(physicalId)
+      physicalId = this.sessionSuccessors.get(physicalId) ?? physicalId
+    }
+    const physical = this.apps.get(physicalId)
+    if (physical) return physical
+
+    const logical = [...this.apps.values()]
+      .filter((session) => session.logicalSessionId === target)
+      .sort(compareSessionRecency)[0]
+    if (logical) return logical
+
+    const named = [...this.apps.values()].filter((session) => session.sessionName === target)
+    return named.length === 1 ? (named[0] ?? null) : null
   }
 
   private onConnection(socket: WebSocket, role: ConnectionRole | null): void {
@@ -272,18 +348,45 @@ export class GenieBridge {
           )
           existing.socket.close()
         }
+        const latest = message.logicalSessionId
+          ? this.latestDocuments.get(message.logicalSessionId)
+          : undefined
+        const replacesLatest =
+          latest === undefined ||
+          latest.sessionId === message.sessionId ||
+          (message.documentGeneration ?? 0) >= (latest.documentGeneration ?? 0)
+        const predecessorSessionId =
+          replacesLatest && latest?.sessionId !== message.sessionId ? latest?.sessionId : undefined
+        if (predecessorSessionId) {
+          const predecessor = this.apps.get(predecessorSessionId)
+          if (predecessor) predecessor.successorSessionId = message.sessionId
+          this.recordSessionSuccessor(predecessorSessionId, message.sessionId)
+        }
+        if (message.logicalSessionId && replacesLatest) {
+          this.recordLatestDocument(message.logicalSessionId, {
+            sessionId: message.sessionId,
+            documentGeneration: message.documentGeneration,
+            connectedAt: existing?.connectedAt ?? now,
+          })
+        }
         this.apps.set(message.sessionId, {
           socket,
           sessionId: message.sessionId,
+          logicalSessionId: message.logicalSessionId,
+          documentGeneration: message.documentGeneration,
+          sessionName: message.sessionName,
+          predecessorSessionId: existing?.predecessorSessionId ?? predecessorSessionId,
+          successorSessionId: existing?.successorSessionId,
           app: message.app,
           capabilities: message.capabilities,
           tools: message.tools,
           // First-connect time survives re-hellos (tool refreshes, reconnects), so a background tab can't steal recency.
           connectedAt: existing?.connectedAt ?? now,
+          readyAt: existing?.readyAt,
           // A re-hello from a once-heartbeating session is a live JS turn (reload, reconnect, or tool refresh), so clear stale/busy state immediately.
           lastHeartbeatAt: existing?.lastHeartbeatAt === undefined ? undefined : now,
         })
-        if (!existing) {
+        if (!existing && replacesLatest) {
           this.currentSessionId = message.sessionId
           this.log(
             'info',
@@ -294,17 +397,34 @@ export class GenieBridge {
         this.broadcastStatus()
         return
       }
+      case 'app/ready': {
+        const session = this.apps.get(message.sessionId)
+        if (!session || session.socket !== socket) return
+        session.readyAt ??= Date.now()
+        if (session.lastHeartbeatAt !== undefined) session.lastHeartbeatAt = Date.now()
+        for (const notify of [...this.connectionWaiters]) notify()
+        this.broadcastStatus()
+        return
+      }
       case 'app/event':
       case 'app/snapshot':
-        this.markSessionAlive(socket)
+        this.markSessionAlive(socket, true)
         return
       case 'app/heartbeat': {
         const session = this.apps.get(message.sessionId)
-        if (session) session.lastHeartbeatAt = Date.now()
+        if (session) {
+          const now = Date.now()
+          const becameReady = session.readyAt === undefined
+          session.lastHeartbeatAt = now
+          // Backward compatibility: pre-readiness clients prove collector startup by reaching their heartbeat loop.
+          session.readyAt ??= now
+          for (const notify of [...this.connectionWaiters]) notify()
+          if (becameReady) this.broadcastStatus()
+        }
         return
       }
       case 'app/response': {
-        this.markSessionAlive(socket)
+        this.markSessionAlive(socket, true)
         const pending = this.pending.get(message.id)
         if (!pending) return
         this.clearPendingTimers(pending)
@@ -313,16 +433,37 @@ export class GenieBridge {
           ok: message.ok,
           result: message.result,
           error: message.error,
-          errorCode: message.ok ? undefined : 'tool-error',
+          errorCode: message.ok ? undefined : (message.errorCode ?? 'tool-error'),
         })
         return
       }
     }
   }
 
-  private markSessionAlive(socket: WebSocket): void {
+  private markSessionAlive(socket: WebSocket, impliesReady = false): void {
     const session = [...this.apps.values()].find((candidate) => candidate.socket === socket)
+    if (session && impliesReady) session.readyAt ??= Date.now()
     if (session?.lastHeartbeatAt !== undefined) session.lastHeartbeatAt = Date.now()
+  }
+
+  private recordSessionSuccessor(predecessorId: string, successorId: string): void {
+    this.sessionSuccessors.delete(predecessorId)
+    this.sessionSuccessors.set(predecessorId, successorId)
+    while (this.sessionSuccessors.size > MAX_SESSION_SUCCESSORS) {
+      const oldest = this.sessionSuccessors.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.sessionSuccessors.delete(oldest)
+    }
+  }
+
+  private recordLatestDocument(logicalSessionId: string, document: LatestDocument): void {
+    this.latestDocuments.delete(logicalSessionId)
+    this.latestDocuments.set(logicalSessionId, document)
+    while (this.latestDocuments.size > MAX_SESSION_SUCCESSORS) {
+      const oldest = this.latestDocuments.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.latestDocuments.delete(oldest)
+    }
   }
 
   private clearPendingTimers(pending: PendingRequest): void {
@@ -357,7 +498,14 @@ export class GenieBridge {
     timeoutMs?: number,
   ): Promise<void> {
     if (tool === devtoolsStatusContract.name) {
-      const target = sessionId ? this.apps.get(sessionId) : this.currentSession()
+      const parsed = devtoolsStatusContract.input.safeParse(args ?? {})
+      if (!parsed.success) {
+        this.result(agent, id, false, undefined, 'invalid devtools_status arguments', {
+          errorCode: 'invalid-args',
+        })
+        return
+      }
+      const target = sessionId ? this.resolveSession(sessionId) : this.currentSession()
       if (sessionId && !target) {
         this.result(agent, id, false, undefined, this.unknownSessionError(sessionId), {
           errorCode: 'unknown-session',
@@ -366,13 +514,27 @@ export class GenieBridge {
       }
       this.result(agent, id, true, {
         connected: this.apps.size > 0,
+        ready: target?.readyAt !== undefined,
         sessionId: target?.sessionId ?? null,
         app: target?.app ?? null,
         domains: target?.capabilities ?? [],
         toolCount: catalogOf(target).length,
-        tools: catalogOf(target),
+        ...(parsed.data.includeTools ? { tools: catalogOf(target) } : {}),
         sessions: this.sessionSummaries(),
       })
+      return
+    }
+
+    if (isCaptureTool(tool)) {
+      const response = await this.captures.invoke(tool, args, sessionId)
+      this.result(
+        agent,
+        id,
+        response.ok,
+        response.ok ? response.result : undefined,
+        response.ok ? undefined : response.error,
+        response.ok ? undefined : { errorCode: response.errorCode },
+      )
       return
     }
 
@@ -400,10 +562,18 @@ export class GenieBridge {
     const input = parsed.data
     const started = Date.now()
     const finish = (ok: boolean, reason?: string) =>
-      this.result(agent, id, true, { ok, waitedMs: Date.now() - started, reason })
+      this.result(agent, id, true, {
+        ok,
+        waitedMs: Date.now() - started,
+        reason,
+      })
 
-    if (input.condition === 'connected') {
-      const connected = await this.waitForConnection(input.timeoutMs, sessionId)
+    if (input.condition === 'connected' || input.condition === 'ready') {
+      const waitFor =
+        input.condition === 'ready'
+          ? this.waitForReady.bind(this)
+          : this.waitForConnection.bind(this)
+      const connected = await waitFor(input.timeoutMs, sessionId)
       finish(connected, connected ? undefined : 'timeout')
       return
     }
@@ -491,6 +661,16 @@ export class GenieBridge {
     return new Promise((resolve) => this.sendAppRequest(newId(), tool, args, resolve, sessionId))
   }
 
+  private appRequestForSession(
+    tool: string,
+    args: unknown,
+    session: AppSession,
+  ): Promise<AppResponse> {
+    return new Promise((resolve) =>
+      this.sendAppRequest(newId(), tool, args, resolve, undefined, undefined, session),
+    )
+  }
+
   private clampTimeout(timeoutMs?: number): number {
     if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) return this.requestTimeoutMs
     return Math.min(MAX_REQUEST_TIMEOUT_MS, Math.max(MIN_REQUEST_TIMEOUT_MS, Math.round(timeoutMs)))
@@ -503,15 +683,25 @@ export class GenieBridge {
     settle: (response: AppResponse) => void,
     sessionId?: string,
     timeoutMs?: number,
+    exactSession?: AppSession,
   ): void {
-    const session = sessionId ? this.apps.get(sessionId) : this.currentSession()
+    const exactCurrent = exactSession ? this.apps.get(exactSession.sessionId) : undefined
+    const session = exactSession
+      ? exactCurrent?.socket === exactSession.socket
+        ? exactCurrent
+        : null
+      : sessionId
+        ? this.resolveSession(sessionId)
+        : this.currentSession()
     if (!session) {
       settle({
         ok: false,
-        errorCode: sessionId ? 'unknown-session' : 'not-connected',
-        error: sessionId
-          ? this.unknownSessionError(sessionId)
-          : 'No app connected. Run your dev server with the Genie Vite plugin.',
+        errorCode: sessionId && !exactSession ? 'unknown-session' : 'not-connected',
+        error: exactSession
+          ? 'The target app document disconnected during the request.'
+          : sessionId
+            ? this.unknownSessionError(sessionId)
+            : 'No app connected. Run your dev server with the Genie Vite plugin.',
       })
       return
     }
@@ -529,7 +719,12 @@ export class GenieBridge {
     const busyTimer = this.shouldBusyProbe(session, tool, timeoutMs)
       ? this.scheduleBusyProbe(id, session.sessionId, tool, settle)
       : null
-    this.pending.set(id, { settle, timer, busyTimer, sessionId: session.sessionId })
+    this.pending.set(id, {
+      settle,
+      timer,
+      busyTimer,
+      sessionId: session.sessionId,
+    })
     this.send(session.socket, { kind: 'bridge/request', id, tool, args })
   }
 
@@ -598,8 +793,34 @@ export class GenieBridge {
     })
   }
 
+  private waitForReady(timeoutMs: number, sessionId?: string): Promise<boolean> {
+    if (this.hasReadySession(sessionId)) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (ready: boolean) => {
+        if (settled) return
+        settled = true
+        this.connectionWaiters.delete(waiter)
+        clearTimeout(timer)
+        resolve(ready)
+      }
+      const waiter = () => {
+        if (this.hasReadySession(sessionId)) finish(true)
+      }
+      const timer = setTimeout(() => finish(false), timeoutMs)
+      this.connectionWaiters.add(waiter)
+    })
+  }
+
   private unknownSessionError(sessionId: string): string {
-    return `Unknown session "${sessionId}". Connected sessions: ${[...this.apps.keys()].join(', ') || 'none'} — run devtools_status to list them.`
+    const named = [...this.apps.values()].filter((session) => session.sessionName === sessionId)
+    if (named.length > 1) {
+      return `Session name "${sessionId}" is ambiguous (${named.length} tabs). Use a physical or logical id from devtools_status.`
+    }
+    const targets = this.sessionSummaries()
+      .flatMap((session) => [session.sessionId, session.logicalSessionId, session.sessionName])
+      .filter((target): target is string => typeof target === 'string')
+    return `Unknown session "${sessionId}". Connected targets: ${[...new Set(targets)].join(', ') || 'none'} — run devtools_status to list them.`
   }
 
   private failPendingForSession(sessionId: string, error: string): void {
@@ -619,7 +840,8 @@ export class GenieBridge {
       this.log('info', `app disconnected: ${session.app.name ?? session.sessionId}`)
       this.failPendingForSession(session.sessionId, 'app disconnected')
       if (this.currentSessionId === session.sessionId) {
-        const next = [...this.apps.values()].sort((a, b) => b.connectedAt - a.connectedAt)[0]
+        const successor = this.resolveSession(session.sessionId)
+        const next = successor ?? [...this.apps.values()].sort(compareSessionRecency)[0]
         this.currentSessionId = next?.sessionId ?? null
       }
       this.broadcastStatus()

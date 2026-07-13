@@ -8,11 +8,12 @@ const getEffectAudit = async (query: Parameters<typeof getEffectAuditReport>[0])
 
 // Fake fibers have no _debugStack: stub source lookup to null so everything classifies as app and survives appOnly; per-test getFiberHooks trees drive per-effect attribution.
 const inspector = vi.hoisted(() => ({
+  getSource: vi.fn<(fiber: unknown) => Promise<unknown>>(async () => null),
   getFiberHooks: vi.fn<(fiber: unknown) => unknown[]>(() => []),
   symbolicateStack: vi.fn<(frames: unknown[]) => Promise<unknown[]>>(async (frames) => frames),
 }))
 vi.mock('bippy/source', () => ({
-  getSource: async () => null,
+  getSource: inspector.getSource,
   isSourceFile: (file: string) => !file.includes('/node_modules/'),
   normalizeFileName: (file: string) => file,
   getFiberHooks: inspector.getFiberHooks,
@@ -97,6 +98,7 @@ beforeAll(() => {
 beforeEach(() => {
   clearEffects()
   clearSourceCache()
+  inspector.getSource.mockReset().mockResolvedValue(null)
   // Default: the inspector throws → resolveEffectSources returns null → effects stay unattributed and unfiltered; per-effect tests override getFiberHooks.
   inspector.getFiberHooks.mockReset().mockImplementation(() => {
     throw new Error('inspector unavailable in test')
@@ -121,13 +123,79 @@ describe('recordEffect dependency-mode classification', () => {
       [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
       [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
     )
+    c.commit(
+      'update',
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+    )
 
     const eff = (await byName()).get('NoDeps')?.effects[0]
     expect(eff?.depsMode).toBe('none')
-    expect(eff?.fired).toBe(2)
-    expect(eff?.updates).toBe(2)
+    expect(eff?.fired).toBe(3)
+    expect(eff?.updates).toBe(3)
     expect(eff?.firesEveryUpdate).toBe(true)
+    expect(eff?.hotness).toMatchObject({
+      label: 'hot',
+      samples: 3,
+      observedRate: 1,
+      reason: 'meets-threshold',
+    })
+    expect(eff?.hotness.confidenceInterval).toMatchObject({ level: 0.95, upper: 1 })
     expect(eff?.note).toMatch(/no dependency array/)
+  })
+
+  it('keeps 1/1 as an observation but requires enough samples for a hot diagnosis', async () => {
+    const c = makeComponent('OneOfOne')
+    c.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: null }])
+    c.commit(
+      'update',
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+    )
+
+    const defaultFinding = (await byName()).get('OneOfOne')?.effects[0]
+    expect(defaultFinding?.firesEveryUpdate).toBe(true)
+    expect(defaultFinding?.hotness).toMatchObject({
+      label: 'insufficient-data',
+      samples: 1,
+      minUpdates: 3,
+      reason: 'below-minimum-updates',
+    })
+    expect(defaultFinding?.note).toBeUndefined()
+    expect(await getEffectAudit({ limit: 50, onlyHot: true })).toEqual([])
+
+    const lowered = await getEffectAudit({ limit: 50, onlyHot: true, minUpdates: 1 })
+    expect(lowered[0]?.effects[0]?.hotness.label).toBe('hot')
+  })
+
+  it('uses the requested fire-rate threshold and reports the observed rate', async () => {
+    const c = makeComponent('TwoOfThree')
+    c.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: [0] }])
+    c.commit(
+      'update',
+      [{ tag: PASSIVE | HAS_EFFECT, deps: [1] }],
+      [{ tag: PASSIVE | HAS_EFFECT, deps: [0] }],
+    )
+    c.commit('update', [{ tag: PASSIVE, deps: [1] }], [{ tag: PASSIVE, deps: [1] }])
+    c.commit('update', [{ tag: PASSIVE | HAS_EFFECT, deps: [2] }], [{ tag: PASSIVE, deps: [1] }])
+
+    const defaultFinding = (await byName()).get('TwoOfThree')?.effects[0]
+    expect(defaultFinding?.hotness).toMatchObject({
+      label: 'not-hot',
+      observedRate: 0.6667,
+      minFireRate: 1,
+      reason: 'below-fire-rate',
+    })
+
+    const lowered = await getEffectAudit({
+      limit: 50,
+      onlyHot: true,
+      minFireRate: 0.6,
+    })
+    expect(lowered[0]?.effects[0]?.hotness).toMatchObject({
+      label: 'hot',
+      minFireRate: 0.6,
+    })
   })
 
   it('does not flag an empty-deps effect (mount only)', async () => {
@@ -161,9 +229,14 @@ describe('recordEffect dependency-change attribution', () => {
       [{ tag: PASSIVE | HAS_EFFECT, deps: [stable, c] }],
       [{ tag: PASSIVE | HAS_EFFECT, deps: [stable, b] }],
     )
+    comp.commit(
+      'update',
+      [{ tag: PASSIVE | HAS_EFFECT, deps: [stable, {}] }],
+      [{ tag: PASSIVE | HAS_EFFECT, deps: [stable, c] }],
+    )
 
     const eff = (await byName()).get('Churn')?.effects[0]
-    expect(eff?.fired).toBe(2)
+    expect(eff?.fired).toBe(3)
     expect(eff?.firesEveryUpdate).toBe(true)
     expect(eff?.lastChangedDep).toBe(1)
     expect(eff?.note).toMatch(/dependency \[1\] changes/)
@@ -229,6 +302,16 @@ describe('recordEffect tracking lifecycle', () => {
       [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
       [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
     )
+    loopy.commit(
+      'update',
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+    )
+    loopy.commit(
+      'update',
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+      [{ tag: PASSIVE | HAS_EFFECT, deps: null }],
+    )
 
     expect((await getEffectAudit({ limit: 50, onlyHot: true })).map((r) => r.name)).toEqual([
       'Loopy',
@@ -242,7 +325,7 @@ describe('per-effect source attribution', () => {
     hookNode('State', '/src/tree-search.tsx', 30),
     hookNode('Effect', '/src/tree-search.tsx', 99),
     hookNode('Translation', '/src/tree-search.tsx', 24, [
-      hookNode('Effect', '/node_modules/.vite/deps/react-i18next.js', 42),
+      hookNode('Effect', '/node_modules/@tanstack/react-query/build/index.js', 42),
     ]),
   ]
 
@@ -259,8 +342,19 @@ describe('per-effect source attribution', () => {
     )
     expect(rec?.effects[0]?.source?.line).toBe(99)
     expect(rec?.effects[0]?.isLibrary).toBe(false)
-    expect(rec?.effects[1]?.source?.file).toContain('react-i18next')
+    expect(rec?.effects[0]?.provenance).toMatchObject({
+      ownership: 'app',
+      confidence: 'high',
+      reason: 'exact-hook-order',
+      packageName: null,
+    })
+    expect(rec?.effects[1]?.source?.file).toContain('@tanstack/react-query')
     expect(rec?.effects[1]?.isLibrary).toBe(true)
+    expect(rec?.effects[1]?.provenance).toMatchObject({
+      ownership: 'library',
+      confidence: 'high',
+      packageName: '@tanstack/react-query',
+    })
   })
 
   it('drops library-origin effects under appOnly (default), keeping the app effect', async () => {
@@ -276,6 +370,29 @@ describe('per-effect source attribution', () => {
     expect(rec?.effects[0]?.source?.line).toBe(99)
   })
 
+  it('keeps an exact app effect when the component source only resolves to a library chunk', async () => {
+    inspector.getSource.mockResolvedValue({
+      fileName: '/node_modules/opaque-server-chunk.js',
+      lineNumber: 10,
+      columnNumber: 0,
+      functionName: 'EffectDemo',
+    })
+    inspector.getFiberHooks.mockReturnValue([hookNode('Effect', '/src/effect-demo.tsx', 11)])
+    const component = makeComponent('MappedEffectDemo')
+    component.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: [] }])
+
+    const record = (await getEffectAudit({ limit: 50 })).find(
+      (item) => item.name === 'MappedEffectDemo',
+    )
+
+    expect(record?.componentProvenance.ownership).toBe('library')
+    expect(record?.effects[0]?.provenance).toMatchObject({
+      ownership: 'app',
+      confidence: 'high',
+      hookSource: { file: '/src/effect-demo.tsx', line: 11 },
+    })
+  })
+
   it('omits per-effect source when the effect list carries effects the inspector cannot see', async () => {
     // Inspector sees one user effect but the commit list has two (an internal hook like useSyncExternalStore pushed one) — must not mis-attribute.
     inspector.getFiberHooks.mockReturnValue([hookNode('Effect', '/src/a.tsx', 10)])
@@ -289,6 +406,8 @@ describe('per-effect source attribution', () => {
     expect(rec?.effects).toHaveLength(2)
     expect(rec?.effects.every((e) => e.source === null)).toBe(true)
     expect(rec?.effects.every((e) => e.isLibrary === false)).toBe(true)
+    expect(rec?.effects.every((e) => e.provenance.ownership === 'unknown')).toBe(true)
+    expect(rec?.effects.every((e) => e.provenance.reason === 'hook-count-mismatch')).toBe(true)
   })
 
   it('falls back to no per-effect source when the inspector throws', async () => {
@@ -303,13 +422,18 @@ describe('per-effect source attribution', () => {
     )
     expect(rec?.effects[0]?.source).toBeNull()
     expect(rec?.effects[0]?.isLibrary).toBe(false)
+    expect(rec?.effects[0]?.provenance).toMatchObject({
+      ownership: 'unknown',
+      confidence: 'none',
+      reason: 'hook-inspection-unavailable',
+    })
   })
 
   it('marks every effect as library when no effect call-site is app code (data-only component)', async () => {
     // Every inspected call-site is library and the commit list has extra internal effects: the component wrote no useEffect, so the whole list is library noise.
     inspector.getFiberHooks.mockReturnValue([
-      hookNode('Effect', '/node_modules/.vite/deps/react-query.js', 100),
-      hookNode('Effect', '/node_modules/.vite/deps/react-query.js', 120),
+      hookNode('Effect', '/node_modules/.vite/deps/modern-DdZwUPV5.js', 100),
+      hookNode('Effect', '/node_modules/.vite/deps/modern-DdZwUPV5.js', 120),
     ])
     const c = makeComponent('DataOnly')
     c.commit('mount', [
@@ -324,6 +448,12 @@ describe('per-effect source attribution', () => {
     )
     expect(all?.effects).toHaveLength(4)
     expect(all?.effects.every((e) => e.isLibrary === true)).toBe(true)
+    expect(all?.effects[0]?.provenance).toMatchObject({
+      ownership: 'library',
+      confidence: 'medium',
+      reason: 'library-only-hook-tree',
+      packageName: null,
+    })
     // appOnly drops a component once all its effects are library-origin.
     expect((await getEffectAudit({ limit: 50 })).find((r) => r.name === 'DataOnly')).toBeUndefined()
   })
@@ -338,5 +468,6 @@ describe('per-effect source attribution', () => {
       (r) => r.name === 'Unknown',
     )
     expect(rec?.effects[0]?.isLibrary).toBe(false)
+    expect(rec?.effects[0]?.provenance.ownership).toBe('unknown')
   })
 })

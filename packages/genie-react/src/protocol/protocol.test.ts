@@ -8,6 +8,13 @@ import {
   newId,
 } from './protocol'
 import { decodeFrame } from './serialization'
+import {
+  CAPTURE_METRICS,
+  captureArtifactSchema,
+  captureComparisonSchema,
+  devtoolsCaptureCompareContract,
+  devtoolsCaptureCreateContract,
+} from './tools'
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -65,6 +72,42 @@ describe('protocol codecs', () => {
     expect(parsed.kind).toBe('app/heartbeat')
   })
 
+  it('carries an optional machine-readable app error code', () => {
+    const parsed = appMessageSchema.parse({
+      kind: 'app/response',
+      id: 'r-invalid',
+      ok: false,
+      error: 'bad arguments',
+      errorCode: 'invalid-args',
+    })
+    expect(parsed).toMatchObject({ errorCode: 'invalid-args' })
+    expect(() =>
+      appMessageSchema.parse({
+        kind: 'app/response',
+        id: 'r-invalid',
+        ok: false,
+        errorCode: 'busy',
+      }),
+    ).toThrow()
+  })
+
+  it('accepts readiness and rejects unsafe session names', () => {
+    expect(appMessageSchema.parse({ kind: 'app/ready', sessionId: 's-1' }).kind).toBe('app/ready')
+    expect(() =>
+      appMessageSchema.parse({
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId: 's-1',
+        logicalSessionId: 'logical-1',
+        documentGeneration: 1,
+        sessionName: 'review\nspoofed',
+        app: {},
+        capabilities: [],
+        tools: [],
+      }),
+    ).toThrow()
+  })
+
   it('carries errorCode + retryInMs on a bridge/result and stays backward-compatible without them', () => {
     const tagged = decodeAgentBoundMessage(
       encodeMessage({
@@ -119,5 +162,116 @@ describe('newId', () => {
     const ids = new Set(Array.from({ length: 64 }, () => newId()))
     expect(ids.size).toBe(64)
     for (const id of ids) expect(id).toMatch(UUID_V4)
+  })
+})
+
+describe('capture protocol', () => {
+  it('applies bounded defaults and rejects ambiguous or terminal-unsafe names', () => {
+    expect(devtoolsCaptureCreateContract.input.parse({ name: 'before fix' })).toEqual({
+      name: 'before fix',
+      include: ['react', 'effects', 'query', 'router', 'memory'],
+      maxAttempts: 3,
+    })
+    expect(() =>
+      devtoolsCaptureCreateContract.input.parse({
+        name: 'duplicate domains',
+        include: ['react', 'react'],
+      }),
+    ).toThrow()
+    expect(() => devtoolsCaptureCreateContract.input.parse({ name: 'spoofed\noutput' })).toThrow()
+    expect(() =>
+      devtoolsCaptureCreateContract.input.parse({ name: 'valid', unexpected: true }),
+    ).toThrow()
+  })
+
+  it('validates a stable schema-versioned artifact shape', () => {
+    expect(
+      captureArtifactSchema.parse({
+        schemaVersion: '1.0',
+        captureId: 'cap_1',
+        name: 'baseline',
+        createdAt: '2026-07-13T08:00:00.000Z',
+        session: { sessionId: 's-1', app: { name: 'demo' } },
+        include: ['react'],
+        consistency: {
+          kind: 'react-commit-stable',
+          attempts: 1,
+          reactCommit: 4,
+          reason: 'stable',
+        },
+        sections: {
+          react: {
+            status: 'ok',
+            tools: {
+              react_get_renders: {
+                status: 'ok',
+                capturedAt: '2026-07-13T08:00:00.000Z',
+                durationMs: 2,
+                result: { commits: 4 },
+              },
+            },
+          },
+        },
+        complete: true,
+        warnings: [],
+        sizeBytes: 512,
+      }),
+    ).toMatchObject({ schemaVersion: '1.0', captureId: 'cap_1' })
+  })
+
+  it('defaults repeated comparisons and rejects ambiguous cohorts or budgets', () => {
+    expect(
+      devtoolsCaptureCompareContract.input.parse({
+        baselineCaptureIds: ['cap_before'],
+        candidateCaptureIds: ['cap_after'],
+      }),
+    ).toEqual({
+      baselineCaptureIds: ['cap_before'],
+      candidateCaptureIds: ['cap_after'],
+      metrics: [...CAPTURE_METRICS],
+      minimumRuns: 3,
+      budgets: [],
+    })
+
+    expect(() =>
+      devtoolsCaptureCompareContract.input.parse({
+        baselineCaptureIds: ['cap_same'],
+        candidateCaptureIds: ['cap_same'],
+      }),
+    ).toThrow(/cannot overlap/)
+    expect(() =>
+      devtoolsCaptureCompareContract.input.parse({
+        baselineCaptureIds: ['cap_before'],
+        candidateCaptureIds: ['cap_after'],
+        metrics: ['react.renders'],
+        budgets: [{ metric: 'performance.avgFps', minValue: 55 }],
+      }),
+    ).toThrow(/must also be requested/)
+    expect(() =>
+      devtoolsCaptureCompareContract.input.parse({
+        baselineCaptureIds: ['cap_before'],
+        candidateCaptureIds: ['cap_after'],
+        metrics: ['react.renders'],
+        budgets: [{ metric: 'react.renders' }],
+      }),
+    ).toThrow(/requires maxRegressionPct/)
+  })
+
+  it('validates the stable machine-readable comparison envelope', () => {
+    expect(
+      captureComparisonSchema.parse({
+        schemaVersion: '1.0',
+        kind: 'capture-comparison',
+        comparisonId: 'cmp_1',
+        createdAt: '2026-07-13T09:00:00.000Z',
+        minimumRuns: 3,
+        baselineCaptureIds: ['cap_before'],
+        candidateCaptureIds: ['cap_after'],
+        overall: 'informational',
+        metrics: [],
+        violations: [],
+        warnings: [],
+      }),
+    ).toMatchObject({ kind: 'capture-comparison', comparisonId: 'cmp_1' })
   })
 })

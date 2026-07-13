@@ -1,5 +1,8 @@
 import { z } from 'zod'
 import { defineAgentToolContract } from '../../protocol'
+import { sourceSchema } from './contract-schemas'
+
+export { reactEffectAuditContract } from './effect-contract'
 
 /** A fiber's stable id (bippy `getFiberId`), branded against the collector's other numbers; erases to a plain number at runtime, so it serializes unchanged. */
 const nodeIdSchema = z.number().int().brand<'ReactNodeId'>()
@@ -7,15 +10,6 @@ export type NodeId = z.infer<typeof nodeIdSchema>
 
 /** Cap on the memoizedState hook walk, shared by the inspector, the hook-state override, and its contract. */
 export const MAX_HOOKS = 100
-
-const sourceSchema = z
-  .object({
-    file: z.string(),
-    line: z.number().nullable(),
-    column: z.number().nullable(),
-    functionName: z.string().nullable(),
-  })
-  .nullable()
 
 const treeNodeSchema = z.object({
   id: z.number(),
@@ -452,6 +446,85 @@ const renderClassStateChangeSchema = renderStateChangeBase.extend({
   name: z.literal('class state'),
 })
 
+const renderExternalStoreCauseBase = z.object({
+  hookIndex: z.number().int().nonnegative(),
+  before: z.unknown().describe('Depth- and size-bounded selected snapshot before this commit.'),
+  after: z.unknown().describe('Depth- and size-bounded selected snapshot after this commit.'),
+  changedFields: z
+    .array(z.string())
+    .describe('Shallow selected-snapshot fields that changed; "$value" means a scalar changed.'),
+})
+
+export const renderCauseSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('mount'), confidence: z.literal('high') }),
+  z.object({
+    kind: z.literal('props'),
+    confidence: z.literal('high'),
+    name: z.string(),
+    unstable: z.boolean(),
+  }),
+  z.object({
+    kind: z.literal('state'),
+    confidence: z.literal('high'),
+    name: z.string(),
+    before: z.unknown(),
+    after: z.unknown(),
+    hook: renderHookStateChangeSchema.shape.hook.optional(),
+  }),
+  z.object({ kind: z.literal('children'), confidence: z.literal('high') }),
+  z.object({
+    kind: z.literal('context'),
+    confidence: z.literal('high'),
+    contextIndex: z.number().int().nonnegative(),
+    name: z.string(),
+    before: z.unknown(),
+    after: z.unknown(),
+  }),
+  renderExternalStoreCauseBase.extend({
+    kind: z.literal('external-store'),
+    confidence: z.literal('high'),
+    reason: z.literal('sync-external-store-snapshot-changed'),
+  }),
+  renderExternalStoreCauseBase.extend({
+    kind: z.literal('query'),
+    confidence: z.literal('medium'),
+    reason: z.literal('query-result-shape'),
+    queryHash: z.string().optional(),
+  }),
+  renderExternalStoreCauseBase.extend({
+    kind: z.literal('router'),
+    confidence: z.literal('medium'),
+    reason: z.literal('router-state-shape'),
+  }),
+  z.object({
+    kind: z.literal('parent'),
+    confidence: z.literal('medium'),
+    parentId: z.number().int(),
+    parentName: z.string(),
+    reason: z.literal('nearest-rendered-ancestor'),
+  }),
+  z.object({
+    kind: z.literal('unknown'),
+    confidence: z.literal('none'),
+    reason: z.literal('no-observable-fiber-input-change'),
+  }),
+])
+
+const renderNecessitySchema = z.enum(['necessary', 'unnecessary', 'unknown'])
+
+const renderCauseCountsSchema = z.object({
+  mount: z.number().int().nonnegative(),
+  props: z.number().int().nonnegative(),
+  state: z.number().int().nonnegative(),
+  children: z.number().int().nonnegative(),
+  context: z.number().int().nonnegative(),
+  'external-store': z.number().int().nonnegative(),
+  query: z.number().int().nonnegative(),
+  router: z.number().int().nonnegative(),
+  parent: z.number().int().nonnegative(),
+  unknown: z.number().int().nonnegative(),
+})
+
 const renderComponentSchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -469,6 +542,14 @@ const renderComponentSchema = z.object({
   totalTime: z.number(),
   changes: z.array(
     z.union([renderPropChangeSchema, renderHookStateChangeSchema, renderClassStateChangeSchema]),
+  ),
+  latestCommitId: z.number().int().nonnegative(),
+  causes: z
+    .array(renderCauseSchema)
+    .describe("Evidence-backed causes for this component's latest observed render."),
+  causeCounts: renderCauseCountsSchema.describe('Cause observations across the current profile.'),
+  necessity: renderNecessitySchema.describe(
+    'necessary when an observable input changed; unnecessary preserves the legacy no-change heuristic; unknown when only parent/unknown evidence exists.',
   ),
   source: sourceSchema,
   isLibrary: z.boolean(),
@@ -518,75 +599,46 @@ export const reactGetRendersContract = defineAgentToolContract({
   annotations: { readOnlyHint: true },
 })
 
-const effectFindingSchema = z.object({
-  index: z.number().describe('Position of the effect among the component’s hooks.'),
-  kind: z.enum(['effect', 'layout', 'insertion']),
-  depsMode: z
-    .enum(['none', 'empty', 'list'])
-    .describe('none = no deps array (runs every render); empty = [] (mount only); list = [deps].'),
-  depCount: z.number(),
-  fired: z.number().describe('Update commits in which this effect actually ran.'),
-  updates: z.number().describe('Update commits observed for the component.'),
-  firesEveryUpdate: z.boolean(),
-  lastChangedDep: z
-    .number()
-    .nullable()
-    .describe('Index of the dependency that drove the most recent run, if a list dep changed.'),
-  hasCleanup: z
-    .boolean()
-    .describe('Whether the effect returned a cleanup (observed after it ran).'),
-  note: z
-    .string()
-    .optional()
-    .describe('A concrete fix when the effect looks like a re-run/loop smell.'),
-  source: sourceSchema.describe(
-    "This effect's own call-site (the useEffect call), resolved per-effect — null when it cannot be attributed (e.g. the component also uses useSyncExternalStore).",
-  ),
-  isLibrary: z
-    .boolean()
-    .describe(
-      'True when the effect was created inside a library hook (node_modules), not your code.',
-    ),
+const renderCauseEventSchema = z.object({
+  commitId: z.number().int().nonnegative(),
+  componentId: z.number().int(),
+  componentName: z.string(),
+  causes: z.array(renderCauseSchema),
+  necessity: renderNecessitySchema,
+  source: sourceSchema,
+  isLibrary: z.boolean(),
 })
 
-export const reactEffectAuditContract = defineAgentToolContract({
-  name: 'react_effect_audit',
-  title: 'Effect audit (did effects fire & why)',
+export const reactRenderCausesContract = defineAgentToolContract({
+  name: 'react_render_causes',
+  title: 'Recent causal render events',
   description:
-    'Audit useEffect / useLayoutEffect / useInsertionEffect executions: per component and per effect, whether it actually FIRED on each commit, how many of the observed updates it ran on, its dependency mode (none/empty/list), which dependency drove the most recent run, whether it returns a cleanup, and the effect\'s own call-site (file:line) — resolved per-effect, so an effect created inside a library hook resolves to that library, not your component. Surfaces effects re-running every commit — the signature of a refetch/setState loop that render counts alone cannot reveal. appOnly (default true) drops library-origin effects so your own effects surface above hook noise; when it hides any, a top-level filteredNote says how many, so an empty result reads as "filtered" not "no effects exist". Interact with the app (or react_clear_renders to reset) first, then read this.',
+    'Report bounded recent component renders with their React commit ID and evidence-backed cause: props, state, children, Context, useSyncExternalStore snapshot, Query-shaped or Router-shaped external snapshots, nearest rendered parent, or explicit unknown. Query/Router labels are medium-confidence shape inference; generic external-store attribution is high-confidence React hook evidence. Use after react_clear_renders plus one exact interaction. commit and afterCommit are mutually exclusive.',
   group: 'react.render',
-  input: z.object({
-    component: z.string().optional().describe('Only components whose name contains this string.'),
-    onlyHot: z
-      .boolean()
-      .default(false)
-      .describe('Only components with an effect that re-runs every update or has no deps array.'),
-    appOnly: z
-      .boolean()
-      .default(true)
-      .describe(
-        'Exclude library components AND library-origin effects (node_modules, incl. Vite pre-bundled deps) so your own effects surface above hook noise; set false to include them.',
-      ),
-    limit: z.number().int().min(1).max(200).default(40),
-  }),
+  input: z
+    .object({
+      commit: z.number().int().nonnegative().optional().describe('Only this exact React commit.'),
+      afterCommit: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Only events after this React commit ID; cannot be combined with commit.'),
+      component: z
+        .string()
+        .optional()
+        .describe('Only component names containing this string (case-insensitive).'),
+      limit: z.number().int().min(1).max(500).default(100),
+      appOnly: z.boolean().default(true),
+    })
+    .refine((input) => input.commit === undefined || input.afterCommit === undefined, {
+      message: 'commit and afterCommit are mutually exclusive',
+    }),
   output: z.object({
     tracking: z.boolean(),
-    commits: z.number(),
-    components: z.array(
-      z.object({
-        id: z.number(),
-        name: z.string(),
-        source: sourceSchema.describe("The component's definition site."),
-        isLibrary: z.boolean(),
-        effects: z.array(effectFindingSchema),
-      }),
-    ),
-    filteredNote: z
-      .string()
-      .optional()
-      .describe(
-        'Present only when appOnly hid library-origin effects; distinguishes "no effects filtered" from "no effects exist".',
-      ),
+    commits: z.number().int().nonnegative(),
+    events: z.array(renderCauseEventSchema),
+    filteredNote: z.string().optional(),
   }),
   annotations: { readOnlyHint: true },
 })

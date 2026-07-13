@@ -1,6 +1,6 @@
 import {
   ClassComponentTag,
-  type ContextDependency,
+  didFiberRender,
   type Fiber,
   type FiberRoot,
   getFiberId,
@@ -15,12 +15,23 @@ import {
   traverseRenderedFibers,
   type Unsubscribe,
 } from 'bippy'
-import { dehydrate, type ToolOutput } from '../../protocol'
+import type { ToolOutput } from '../../protocol'
 import type { reactRendersDiffContract } from './contracts'
 import { clearEffects, recordEffect } from './effect-tracker'
 import { clearErrorState, recordErrorState } from './error-tracker'
 import { classifyHook, isStatefulHook, nameOf, noteCommit, noteCommittedRoot } from './fiber'
 import { isRefreshCommit, noteExcludedRefreshCommit } from './refresh-tracker'
+import {
+  diffContextChanges,
+  diffExternalStoreChanges,
+  emptyCauseCounts,
+  HOOK_WALK_LIMIT,
+  type RenderCause,
+  type RenderCauseCounts,
+  type RenderCauseEvent,
+  type RenderNecessity,
+  stateValue,
+} from './render-causes'
 import { safeCommitHandler } from './safe-instrumentation'
 import {
   classifyFibersWithinBudget,
@@ -61,6 +72,13 @@ export interface ClassStateRenderChange extends StateRenderChangeBase {
 
 export type StateRenderChange = HookStateRenderChange | ClassStateRenderChange
 export type RenderChange = PropRenderChange | StateRenderChange
+export type {
+  RenderCause,
+  RenderCauseCounts,
+  RenderCauseKind,
+  RenderNecessity,
+} from './render-causes'
+export { diffContextChanges, diffExternalStoreChanges } from './render-causes'
 
 export interface RenderRecord {
   id: number
@@ -74,6 +92,10 @@ export interface RenderRecord {
   selfTime: number
   totalTime: number
   changes: RenderChange[]
+  latestCommitId: number
+  causes: RenderCause[]
+  causeCounts: RenderCauseCounts
+  necessity: RenderNecessity
   /** The live fiber, kept so source/library classification can run async at report time. */
   fiber: Fiber
 }
@@ -95,6 +117,15 @@ export interface RenderSummary {
 }
 
 const records = new Map<number, RenderRecord>()
+interface RetainedRenderCauseEvent {
+  commitId: number
+  componentId: number
+  componentName: string
+  causes: RenderCause[]
+  necessity: RenderNecessity
+}
+
+const recentCauseEvents: RetainedRenderCauseEvent[] = []
 let commits = 0
 let installed = false
 let instrumentation: Unsubscribe | null = null
@@ -107,6 +138,7 @@ const DID_CAPTURE = 0b1000_0000
 const REPORT_SOURCE_CLASSIFY_LIMIT = 120
 const REPORT_SOURCE_CLASSIFY_BUDGET_MS = 500
 const UNCLASSIFIED_FIBER: FiberClassification = { source: null, isLibrary: false }
+const RECENT_CAUSE_EVENT_LIMIT = 1_000
 
 export interface CommitAnalysisBudget {
   processed: number
@@ -176,6 +208,7 @@ export const getSkippedCommitFiberCount = (): number => skippedCommitFibers
 
 export function clearRenders(): void {
   records.clear()
+  recentCauseEvents.length = 0
   commits = 0
   skippedCommitFibers = 0
   clears++
@@ -255,6 +288,61 @@ export async function getRendersReport(
     .slice(0, query.limit)
     .map((entry) => entry.report)
   return { components, libraryHidden }
+}
+
+export interface RenderCauseQuery {
+  commit?: number
+  afterCommit?: number
+  component?: string
+  limit: number
+  appOnly?: boolean
+}
+
+/** Recent commit-scoped causes, newest first. Source classification reuses live records and never retains old fiber graphs. */
+export async function getRenderCauseEventsReport(query: RenderCauseQuery): Promise<{
+  events: RenderCauseEvent[]
+  libraryHidden: number
+}> {
+  const needle = query.component?.toLowerCase()
+  const selected = recentCauseEvents
+    .filter((event) => query.commit === undefined || event.commitId === query.commit)
+    .filter((event) => query.afterCommit === undefined || event.commitId > query.afterCommit)
+    .filter((event) => !needle || event.componentName.toLowerCase().includes(needle))
+    .slice(-query.limit)
+    .reverse()
+
+  const liveRecords = [
+    ...new Map(
+      selected
+        .map((event) => records.get(event.componentId))
+        .filter((record): record is RenderRecord => record !== undefined)
+        .map((record) => [record.id, record]),
+    ).values(),
+  ]
+  const classes = await classifyRecordsWithinBudget(liveRecords)
+  const classById = new Map<number, FiberClassification>()
+  liveRecords.forEach((record, index) => {
+    classById.set(record.id, classes[index] ?? UNCLASSIFIED_FIBER)
+  })
+
+  const classified = selected.map((event) => {
+    const classification = classById.get(event.componentId) ?? UNCLASSIFIED_FIBER
+    return {
+      event: {
+        ...event,
+        source: classification.source,
+        isLibrary: classification.isLibrary,
+      } satisfies RenderCauseEvent,
+      isLibrary: classification.isLibrary,
+    }
+  })
+  if (query.appOnly === false) {
+    return { events: classified.map(({ event }) => event), libraryHidden: 0 }
+  }
+  return {
+    events: classified.filter(({ isLibrary }) => !isLibrary).map(({ event }) => event),
+    libraryHidden: classified.filter(({ isLibrary }) => isLibrary).length,
+  }
 }
 
 /** Classify once, sort/slice per leaderboard — react_profile_report's four views without 4× classification passes. */
@@ -524,6 +612,10 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
       selfTime: 0,
       totalTime: 0,
       changes: [],
+      latestCommitId: commits,
+      causes: [],
+      causeCounts: emptyCauseCounts(),
+      necessity: 'unknown',
       fiber,
     }
     records.set(id, record)
@@ -534,21 +626,68 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
   const timings = getTimings(fiber)
   record.selfTime = Math.max(record.selfTime, timings.selfTime)
   record.totalTime = Math.max(record.totalTime, timings.totalTime)
+  record.latestCommitId = commits
 
   if (phase === 'mount') {
     record.mounts += 1
+    const causes: RenderCause[] = [{ kind: 'mount', confidence: 'high' }]
+    record.causes = causes
+    record.necessity = 'necessary'
+    retainCauseEvent(record, causes, record.necessity)
     return
   }
 
   record.updates += 1
   const propChanges = diffProps(fiber)
   const stateChanges = diffStateChanges(fiber)
+  const contextChanges = diffContextChanges(fiber)
+  const externalStoreChanges = diffExternalStoreChanges(fiber)
   const stateDidChange = stateChanges.length > 0
   const childrenDidChange = childrenChanged(fiber)
   const changes: RenderChange[] = [...propChanges, ...stateChanges]
   record.changes = changes
+  const observableCauses: RenderCause[] = [
+    ...propChanges.map(
+      (change): RenderCause => ({
+        kind: 'props',
+        confidence: 'high',
+        name: change.name,
+        unstable: change.unstable,
+      }),
+    ),
+    ...stateChanges.map(
+      (change): RenderCause => ({
+        kind: 'state',
+        confidence: 'high',
+        name: change.name,
+        before: change.before,
+        after: change.after,
+        ...('hook' in change ? { hook: change.hook } : {}),
+      }),
+    ),
+    ...(childrenDidChange ? ([{ kind: 'children', confidence: 'high' }] as const) : []),
+    ...contextChanges,
+    ...externalStoreChanges,
+  ]
+  const parentCause = observableCauses.length === 0 ? renderedParentCause(fiber) : null
+  const causes: RenderCause[] =
+    observableCauses.length > 0
+      ? observableCauses
+      : parentCause
+        ? [parentCause]
+        : [{ kind: 'unknown', confidence: 'none', reason: 'no-observable-fiber-input-change' }]
+  const necessity: RenderNecessity =
+    observableCauses.length > 0 ? 'necessary' : parentCause ? 'unknown' : 'unnecessary'
+  record.causes = causes
+  record.necessity = necessity
+  retainCauseEvent(record, causes, necessity)
   // A render is unnecessary only when none of props/state/children/context changed — new children or context are legitimate reasons.
-  if (changes.length === 0 && !childrenDidChange && !contextChanged(fiber)) {
+  if (
+    changes.length === 0 &&
+    !childrenDidChange &&
+    contextChanges.length === 0 &&
+    externalStoreChanges.length === 0
+  ) {
     record.unnecessary += 1
   }
   // A render driven solely by unstable-reference props (no state/children change) would be skipped under React.memo + stable refs — the most common wasted render.
@@ -592,17 +731,38 @@ function isUnstable(a: unknown, b: unknown): boolean {
   return (ta === 'object' || ta === 'function') && (tb === 'object' || tb === 'function')
 }
 
-const STATE_VALUE_DEPTH = 2
-const STATE_VALUE_MAX_ENTRIES = 20
-const STATE_VALUE_MAX_STRING_LENGTH = 200
-
-/** Bound changed state before it enters the retained render record; commit tracking never pins an app's full state graph. */
-function stateValue(value: unknown): unknown {
-  return dehydrate(value, {
-    depth: STATE_VALUE_DEPTH,
-    maxEntries: STATE_VALUE_MAX_ENTRIES,
-    maxStringLength: STATE_VALUE_MAX_STRING_LENGTH,
+function retainCauseEvent(
+  record: RenderRecord,
+  causes: RenderCause[],
+  necessity: RenderNecessity,
+): void {
+  for (const cause of causes) record.causeCounts[cause.kind] += 1
+  recentCauseEvents.push({
+    commitId: commits,
+    componentId: record.id,
+    componentName: record.name,
+    causes: structuredClone(causes),
+    necessity,
   })
+  if (recentCauseEvents.length > RECENT_CAUSE_EVENT_LIMIT) recentCauseEvents.shift()
+}
+
+function renderedParentCause(fiber: Fiber): RenderCause | null {
+  let parent = fiber.return
+  while (parent && !isCompositeFiber(parent)) parent = parent.return
+  if (!parent) return null
+  try {
+    if (!didFiberRender(parent)) return null
+  } catch {
+    return null
+  }
+  return {
+    kind: 'parent',
+    confidence: 'medium',
+    parentId: getFiberId(parent),
+    parentName: nameOf(parent),
+    reason: 'nearest-rendered-ancestor',
+  }
 }
 
 /** Reports changed useState/useReducer slots in one guarded hook-chain pass; derived hook internals are excluded because they cannot schedule a render. */
@@ -673,23 +833,5 @@ export function stateChanged(fiber: Fiber): boolean {
 
 /** A consumed context whose value changed is a legitimate reason to re-render (not "unnecessary"). */
 export function contextChanged(fiber: Fiber): boolean {
-  let cur = firstContextDependency(fiber)
-  let prev = firstContextDependency(fiber.alternate)
-  let guard = 0
-  while (cur && prev && guard < HOOK_WALK_LIMIT) {
-    if (!Object.is(cur.memoizedValue, prev.memoizedValue)) return true
-    cur = cur.next
-    prev = prev.next
-    guard += 1
-  }
-  return false
+  return diffContextChanges(fiber).length > 0
 }
-
-/** Reads the head of a fiber's context-dependency list (React stores it on `dependencies`). */
-function firstContextDependency(
-  fiber: Fiber | null | undefined,
-): ContextDependency<unknown> | null {
-  return fiber?.dependencies?.firstContext ?? null
-}
-
-const HOOK_WALK_LIMIT = 1000

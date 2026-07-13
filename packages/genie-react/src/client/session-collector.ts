@@ -11,7 +11,6 @@ export function sessionCollector(): GenieCollector {
     capabilities: ['session'],
     appInfo: () => {
       const info: Partial<AppInfo> = {}
-      if (typeof document !== 'undefined' && document.title) info.name = document.title
       if (typeof location !== 'undefined') info.url = location.href
       const reactVersion = detectReactVersion()
       if (reactVersion) info.reactVersion = reactVersion

@@ -20,20 +20,22 @@ Setup commands:
 
 Tool commands (dev server must be running with the genie() plugin or hub):
   tools [<group|tool>]   Discover the catalog progressively; use --all for every contract
-  status                 Show bridge, app, session, and tool details
+  status                 Show compact bridge, app, and session readiness
   call <tool> '<json>'   Invoke one live tool
-  batch [<json-array>]   Run sequential calls as JSONL; reads JSON from stdin when omitted
+  batch [<json-array>]   Run sequential calls; JSONL by default, one array with --json
 
 Run any command with --help for details and an example.
 
 Options:
   --port <n>       Listen on this hub port
   --url <ws-url>   Override the bridge URL discovered from .genie/bridge.json
-  --wait <ms>      Wait up to 1–120000ms for an app (default 15000)
+  --wait <ms>      Call/tools/batch: wait up to 1–120000ms for an app (default 15000)
   --timeout <ms>   Bound each call; the bridge clamps to 1000–120000ms
   --fields <keys>  Project result records to validated comma-separated keys as JSONL
-  --session <id>   Target one app session; status lists IDs
+  --session <target> Target a physical id, logical id, or unique session name
   --json           Print compact JSON and structured failures
+  --ndjson         Batch: explicitly print one JSON object per result line
+  --sessions-only  Status: omit app, domain, and tool metadata
   --all            Print every tool contract
   --dry-run        Preview init changes without writing files
   --yes, -y        Accept safe init defaults
@@ -70,19 +72,20 @@ Example:
   genie-react call react_find_components '{"query":"Button"}' --fields id,name,path`,
   batch: `genie-react batch — run many tool calls over one connection
 
-Usage: genie-react batch '<json-array>' [--session <id>] [--timeout <ms>]
+Usage: genie-react batch '<json-array>' [--session <target>] [--timeout <ms>] [--json|--ndjson]
 
 The array items are {tool, args?} objects; calls run sequentially and continue on
-error. Prints one JSON line per item ({tool, ok:true, status:"ok", result} or {tool, ok:false,
-status, reason, message, errorCode?}); exits 0 only if every call succeeded. Omit the argument to read the
-JSON array from stdin.
+error. The default and --ndjson print one object per line for compatibility; --json
+prints one valid JSON array. Exits 0 only if every call succeeded. Omit the argument
+to read the JSON array from stdin. Unknown item keys are rejected (use "args", not "input").
 
 Example:
   genie-react batch '[{"tool":"react_find_components","args":{"query":"Btn"}},{"tool":"react_get_renders","args":{"sort":"unnecessary"}}]'`,
   status: `genie-react status — bridge connection + app info
 
-Shows connection state, app name, React version, tool count, and every
-connected session (target one with --session <id> or GENIE_SESSION).
+Shows connection/readiness state, app name, React version, tool count, and every
+connected session. Target one by physical id, logical id, or unique name with
+--session <target> / GENIE_SESSION. Use --sessions-only for the smallest response.
 
 Example:
   genie-react status --json`,
@@ -128,9 +131,9 @@ const COMMAND_OPTIONS: Record<string, ReadonlySet<string>> = {
   hub: new Set(['port']),
   link: new Set(),
   tools: new Set(['url', 'wait', 'session', 'json', 'all']),
-  status: new Set(['url', 'session', 'json']),
+  status: new Set(['url', 'session', 'json', 'sessions-only']),
   call: new Set(['url', 'wait', 'session', 'json', 'timeout', 'fields']),
-  batch: new Set(['url', 'wait', 'session', 'json', 'timeout']),
+  batch: new Set(['url', 'wait', 'session', 'json', 'ndjson', 'timeout']),
 }
 
 const POSITIONAL_LIMITS: Record<string, number> = {
@@ -198,6 +201,8 @@ async function main(): Promise<number> {
       wait: { type: 'string' },
       session: { type: 'string' },
       json: { type: 'boolean' },
+      ndjson: { type: 'boolean' },
+      'sessions-only': { type: 'boolean' },
       all: { type: 'boolean' },
       port: { type: 'string' },
       timeout: { type: 'string' },
@@ -211,7 +216,7 @@ async function main(): Promise<number> {
   }
 
   const command = positionals[0]
-  const machine = values.json === true || values.fields !== undefined
+  const machine = values.json === true || values.ndjson === true || values.fields !== undefined
   if (values.help && command && command in COMMAND_HELP) {
     process.stdout.write(`${COMMAND_HELP[command]}\n`)
     return 0
@@ -263,14 +268,20 @@ async function main(): Promise<number> {
     writeCliFailure(machine, '--fields requires at least one comma-separated field name.')
     return 1
   }
+  if (command === 'batch' && values.json === true && values.ndjson === true) {
+    writeCliFailure(true, 'Choose either --json or --ndjson, not both.')
+    return 1
+  }
   const agentOptions = {
     url: values.url,
     waitMs: values.wait ? Number(values.wait) : undefined,
     json: values.json,
+    ndjson: values.ndjson,
     session: values.session,
     all: values.all,
     timeoutMs: values.timeout ? Number(values.timeout) : undefined,
     fields: parseFields(values.fields),
+    sessionsOnly: values['sessions-only'],
   }
 
   switch (command) {
@@ -315,7 +326,8 @@ main()
   })
   .catch((error) => {
     const machine = process.argv.some(
-      (arg) => arg === '--json' || arg === '--fields' || arg.startsWith('--fields='),
+      (arg) =>
+        arg === '--json' || arg === '--ndjson' || arg === '--fields' || arg.startsWith('--fields='),
     )
     const message = errorMessage(error)
     if (machine) {

@@ -4,13 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const getSource = vi.fn(async (fiber: { __source?: unknown }) => fiber.__source ?? null)
 const getFiberHooks = vi.fn<(fiber: unknown) => unknown[]>(() => [])
 const symbolicateStack = vi.fn<(frames: unknown[]) => Promise<unknown[]>>(async (frames) => frames)
+const getSourceMap = vi.fn<(url: string) => Promise<object | null>>(async () => null)
+const getSourceFromSourceMap = vi.fn<
+  (
+    map: object,
+    line: number,
+    column: number,
+  ) => { fileName: string; lineNumber: number; columnNumber: number } | null
+>(() => null)
 const normalize = (file: string) => file.replace(/\?.*$/, '').replace(/^https?:\/\/[^/]+/, '')
 vi.mock('bippy/source', () => ({
   getSource: (fiber: { __source?: unknown }) => getSource(fiber),
-  isSourceFile: (file: string) => !file.includes('/node_modules/'),
+  isSourceFile: (file: string) => !file.includes('/node_modules/') && !file.includes('/.next/'),
   normalizeFileName: normalize,
   getFiberHooks: (fiber: unknown) => getFiberHooks(fiber),
   symbolicateStack: (frames: unknown[]) => symbolicateStack(frames),
+  getSourceMap: (url: string) => getSourceMap(url),
+  getSourceFromSourceMap: (map: object, line: number, column: number) =>
+    getSourceFromSourceMap(map, line, column),
 }))
 
 const {
@@ -46,6 +57,8 @@ beforeEach(() => {
   getSource.mockClear()
   getFiberHooks.mockReset().mockReturnValue([])
   symbolicateStack.mockReset().mockImplementation(async (frames) => frames)
+  getSourceMap.mockReset().mockResolvedValue(null)
+  getSourceFromSourceMap.mockReset().mockReturnValue(null)
   // No network in unit tests: inline-map lookup fails → resolveHookSource keeps served coordinates.
   vi.stubGlobal('fetch', () => Promise.reject(new Error('no network in tests')))
 })
@@ -54,6 +67,7 @@ afterEach(() => vi.unstubAllGlobals())
 describe('isLibraryFile', () => {
   it('treats project sources as app and node_modules (incl. vite deps) as library', () => {
     expect(isLibraryFile('/src/App.tsx')).toBe(false)
+    expect(isLibraryFile('/apps/demo/.next/dev/server/chunks/ssr/root.js')).toBe(false)
     expect(isLibraryFile('/node_modules/.vite/deps/cmdk.js')).toBe(true)
     expect(isLibraryFile('/node_modules/.pnpm/@base-ui+react/dist/index.js')).toBe(true)
   })
@@ -87,6 +101,27 @@ describe('classifyFiber', () => {
     const { source, isLibrary } = await classifyFiber(fiber)
     expect(source?.file).toBe('/node_modules/.vite/deps/cmdk.js')
     expect(isLibrary).toBe(true)
+  })
+
+  it('classifies a Next/Turbopack chunk by its mapped app source', async () => {
+    getSourceMap.mockResolvedValue({ version: 3 })
+    getSourceFromSourceMap.mockReturnValue({
+      fileName: '/apps/demo/app/components/counter.tsx',
+      lineNumber: 12,
+      columnNumber: 4,
+    })
+    const fiber = asFiber({
+      __source: at('/apps/demo/.next/dev/server/chunks/ssr/root.js', 190),
+    })
+
+    const { source, isLibrary } = await classifyFiber(fiber)
+
+    expect(source).toMatchObject({
+      file: '/apps/demo/app/components/counter.tsx',
+      line: 12,
+      column: 4,
+    })
+    expect(isLibrary).toBe(false)
   })
 
   it('inherits the nearest composite ancestor when a fiber has no source of its own', async () => {

@@ -9,6 +9,7 @@ import {
   projectFields,
   relatedActions,
   renderResult,
+  requiresReadySession,
   resolveSession,
   resolveToolsSelector,
   summarizeEffects,
@@ -332,6 +333,57 @@ describe('summarizeEffects', () => {
     expect(summarizeEffects(effectsPayload)).not.toContain('Search.tsx')
   })
 
+  it('shows thresholded hotness and makes unknown/library ownership explicit', () => {
+    const output = summarizeEffects({
+      commits: 5,
+      hotnessCriteria: { minUpdates: 3, minFireRate: 1, confidenceLevel: 0.95 },
+      components: [
+        {
+          id: 9,
+          name: 'Owned',
+          effects: [
+            {
+              index: 0,
+              kind: 'effect',
+              depsMode: 'list',
+              depCount: 1,
+              fired: 3,
+              updates: 3,
+              hasCleanup: false,
+              hotness: { label: 'hot', samples: 3, minUpdates: 3 },
+              provenance: {
+                ownership: 'library',
+                packageName: '@tanstack/react-query',
+                reason: 'exact-hook-order',
+              },
+            },
+            {
+              index: 1,
+              kind: 'effect',
+              depsMode: 'none',
+              depCount: 0,
+              fired: 1,
+              updates: 1,
+              hasCleanup: false,
+              hotness: { label: 'insufficient-data', samples: 1, minUpdates: 3 },
+              provenance: {
+                ownership: 'unknown',
+                packageName: null,
+                reason: 'hook-count-mismatch',
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(output).toContain('hot ≥3 updates @ 100%')
+    expect(output).toContain('fired 3/3 HOT no-cleanup · lib:@tanstack/react-query')
+    expect(output).toContain(
+      'fired 1/1 sample 1/3 no-cleanup · owner unknown (hook-count-mismatch)',
+    )
+  })
+
   it('returns null on a malformed shape', () => {
     expect(summarizeEffects(42)).toBeNull()
     expect(summarizeEffects({ components: 'nope' })).toBeNull()
@@ -488,6 +540,26 @@ describe('progressive tools discovery', () => {
 })
 
 describe('new summarizers', () => {
+  it('prefers evidence-backed causes over the legacy changes-only summary', () => {
+    const payload = {
+      ...rendersPayload,
+      components: [
+        {
+          ...rendersPayload.components[0],
+          causes: [
+            {
+              kind: 'context',
+              name: 'Theme',
+              before: 'light',
+              after: 'dark',
+            },
+          ],
+        },
+      ],
+    }
+    expect(summarizeRenders(payload)).toContain('↻ context Theme "light"→"dark"')
+  })
+
   it('summarizeStatus: single session is one line; multi-session lists full ids', () => {
     expect(
       summarizeStatus({
@@ -496,7 +568,7 @@ describe('new summarizers', () => {
         toolCount: 51,
         sessions: [{ sessionId: 'abc', app: { name: 'Demo' }, current: true }],
       }),
-    ).toBe('connected · Demo · react 19.2.7 · 51 tools')
+    ).toBe('connected · ready · Demo · react 19.2.7 · 51 tools')
     const multi = summarizeStatus({
       connected: true,
       app: { name: 'Demo' },
@@ -508,7 +580,7 @@ describe('new summarizers', () => {
     })
     expect(multi).toContain('2 sessions')
     expect(multi).toContain('aaa-111 · http://x/?_genie=a · (current)')
-    expect(multi).toContain('--session <id>')
+    expect(multi).toContain('--session <target>')
     expect(summarizeStatus({ connected: false, sessions: [] })).toContain('not connected')
     expect(summarizeStatus({ nope: 1 })).toBeNull()
   })
@@ -850,7 +922,7 @@ describe('parseBatchItems', () => {
     ])
   })
 
-  it('rejects non-arrays, missing tool, and non-object args', () => {
+  it('rejects non-arrays, missing or empty tools, non-object args, and unknown keys', () => {
     expect(parseBatchItems('not json')).toEqual({
       error: 'Batch input must be a valid JSON array.',
     })
@@ -861,7 +933,13 @@ describe('parseBatchItems', () => {
       error: expect.stringContaining('string "tool"'),
     })
     expect(parseBatchItems('[{"tool":"a","args":5}]')).toMatchObject({
-      error: expect.stringContaining('args must be an object'),
+      error: expect.stringContaining('"args" must be an object'),
+    })
+    expect(parseBatchItems('[{"tool":""}]')).toMatchObject({
+      error: expect.stringContaining('non-empty "tool"'),
+    })
+    expect(parseBatchItems('[{"tool":"a","input":{"x":1}}]')).toEqual({
+      error: 'Batch item 0 contains unknown key "input". Use "args" for tool arguments.',
     })
   })
 })
@@ -881,6 +959,17 @@ describe('agent failure output', () => {
       next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
     })
     expect(text).not.toContain(String.fromCharCode(27))
+  })
+})
+
+describe('bridge-local tools', () => {
+  it('does not wait for an app before wait or retained-capture reads', () => {
+    expect(requiresReadySession('devtools_wait')).toBe(false)
+    expect(requiresReadySession('devtools_capture_list')).toBe(false)
+    expect(requiresReadySession('devtools_capture_read')).toBe(false)
+    expect(requiresReadySession('devtools_capture_compare')).toBe(false)
+    expect(requiresReadySession('devtools_capture_create')).toBe(true)
+    expect(requiresReadySession('react_get_renders')).toBe(true)
   })
 })
 

@@ -49,13 +49,42 @@ export const appInfoSchema = z.object({
 })
 export type AppInfo = z.infer<typeof appInfoSchema>
 
+const sessionNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .refine((name) => !hasControlCharacters(name), 'session name cannot contain control characters')
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 31 || codePoint === 127
+  })
+}
+
+export function normalizeSessionName(value: string | undefined): string | undefined {
+  const parsed = sessionNameSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
 /** One connected app session (a browser tab); the bridge routes to the most recent unless `agent/invoke.sessionId` targets one. */
 export const sessionSummarySchema = z.object({
   sessionId: z.string(),
+  /** Reload-stable browser-tab identity. `--session` accepts this value as well as the physical session id. */
+  logicalSessionId: z.string().optional(),
+  /** Monotonic document number within a logical browser-tab session. */
+  documentGeneration: z.number().int().positive().optional(),
+  /** Optional human marker, normally sourced from the initial `_genie` URL parameter. */
+  sessionName: sessionNameSchema.optional(),
+  predecessorSessionId: z.string().optional(),
+  successorSessionId: z.string().optional(),
   app: appInfoSchema,
   domains: z.array(z.string()),
   toolCount: z.number(),
   connectedAt: z.number(),
+  ready: z.boolean().default(true),
+  readyAt: z.number().optional(),
   current: z.boolean(),
   /** Present when a heartbeat-capable session went silent (likely a dead tab context); default routing skips it while a fresh session exists. */
   staleMs: z.number().optional(),
@@ -68,9 +97,18 @@ export const appHelloSchema = z.object({
   kind: z.literal('app/hello'),
   protocol: z.number(),
   sessionId: z.string(),
+  logicalSessionId: z.string().optional(),
+  documentGeneration: z.number().int().positive().optional(),
+  sessionName: sessionNameSchema.optional(),
   app: appInfoSchema,
   capabilities: z.array(z.string()),
   tools: z.array(toolDescriptorSchema),
+})
+
+/** Sent after every collector has completed its synchronous startup work. */
+export const appReadySchema = z.object({
+  kind: z.literal('app/ready'),
+  sessionId: z.string(),
 })
 
 export const appSnapshotSchema = z.object({
@@ -87,12 +125,15 @@ export const appEventSchema = z.object({
   ts: z.number(),
 })
 
+const appErrorCodeSchema = z.enum(['invalid-args', 'tool-error'])
+
 export const appResponseSchema = z.object({
   kind: z.literal('app/response'),
   id: z.string(),
   ok: z.boolean(),
   result: z.unknown().optional(),
   error: z.string().optional(),
+  errorCode: appErrorCodeSchema.optional(),
 })
 
 /** Liveness beacon sent on a fixed cadence while the app socket is open; a gap tells the bridge the main thread is busy, not crashed. */
@@ -107,6 +148,7 @@ export const appMessageSchema = z.discriminatedUnion('kind', [
   appEventSchema,
   appResponseSchema,
   appHeartbeatSchema,
+  appReadySchema,
 ])
 export type AppMessage = z.infer<typeof appMessageSchema>
 
@@ -182,6 +224,8 @@ export const bridgeResultSchema = z.object({
 export const bridgeStatusSchema = z.object({
   kind: z.literal('bridge/status'),
   connected: z.boolean(),
+  /** Defaults true when decoding legacy bridge frames, where hello implied readiness. */
+  ready: z.boolean().default(true),
   sessionId: z.string().nullable(),
   app: appInfoSchema.nullable(),
   domains: z.array(z.string()),

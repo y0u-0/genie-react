@@ -82,6 +82,35 @@ function setup() {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('GenieClient', () => {
+  it('announces document lineage and becomes ready only after collector startup', () => {
+    const socket = new FakeSocket()
+    const client = createGenieClient({
+      appName: 'lineage-app',
+      sessionName: 'review-a',
+      sessionIdentity: { logicalSessionId: 'logical-a', documentGeneration: 3 },
+      collectors: [
+        defineCollector({
+          meta: { id: 'startup', title: 'Startup' },
+          start: (ctx) => ctx.pushSnapshot('startup', { initialized: true }),
+        }),
+      ],
+      socketFactory: () => socket,
+    })
+
+    client.start()
+    socket.open()
+
+    const frames = socket.decoded()
+    expect(frames.map((frame) => frame.kind)).toEqual(['app/hello', 'app/snapshot', 'app/ready'])
+    expect(frames[0]).toMatchObject({
+      logicalSessionId: 'logical-a',
+      documentGeneration: 3,
+      sessionName: 'review-a',
+    })
+    expect(frames[2].sessionId).toBe(frames[0].sessionId)
+    client.stop()
+  })
+
   it('announces app info and tool descriptors on connect', () => {
     const { socket, client } = setup()
     client.start()
@@ -95,6 +124,28 @@ describe('GenieClient', () => {
     expect(echo.group).toBe('meta')
     expect(echo.inputJsonSchema).toBeTruthy()
     expect(echo.annotations.readOnlyHint).toBe(true)
+  })
+
+  it('keeps the initial document title as the app name across later hellos', () => {
+    vi.stubGlobal('document', { title: 'Stable app name' })
+    try {
+      const socket = new FakeSocket()
+      const client = createGenieClient({ collectors: [], socketFactory: () => socket })
+      client.start()
+      socket.open()
+
+      document.title = 'Live counter · 1'
+      client.registerCollector(
+        defineCollector({ meta: { id: 'late', title: 'Late collector' }, capabilities: ['late'] }),
+      )
+
+      const hellos = socket.decoded().filter((message) => message.kind === 'app/hello')
+      expect(hellos).toHaveLength(2)
+      expect(hellos.map((hello) => hello.app.name)).toEqual(['Stable app name', 'Stable app name'])
+      client.stop()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('runs a forwarded tool and replies with the result', async () => {
@@ -145,6 +196,7 @@ describe('GenieClient', () => {
     expect(response.ok).toBe(false)
     expect(response.error).toContain('Invalid arguments for "echo"')
     expect(response.error).toContain('message')
+    expect(response.errorCode).toBe('invalid-args')
   })
 
   it('remaps component/query/name aliases onto the schema key the tool wants', async () => {
@@ -175,6 +227,7 @@ describe('GenieClient', () => {
     expect(response.ok).toBe(false)
     expect(response.error).toContain('Unknown argument "maxDepth"')
     expect(response.error).toContain('valid keys: message')
+    expect(response.errorCode).toBe('invalid-args')
   })
 
   describe('heartbeat', () => {

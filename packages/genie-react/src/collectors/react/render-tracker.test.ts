@@ -5,8 +5,11 @@ import {
   clearRenders,
   clearSnapshots,
   createCommitAnalysisBudget,
+  diffContextChanges,
+  diffExternalStoreChanges,
   diffProps,
   diffStateChanges,
+  getRenderCauseEventsReport,
   getRenders,
   getSkippedCommitFiberCount,
   isTracking,
@@ -198,6 +201,187 @@ describe('diffStateChanges safety bounds', () => {
       nested: { value: { __genie_dehydrated__: true, preview: '{…}' } },
       self: { __genie_dehydrated__: true, preview: '[Circular]' },
     })
+  })
+})
+
+describe('causal render attribution', () => {
+  type HookNode = {
+    memoizedState: unknown
+    queue?: unknown
+    next: HookNode | null
+  }
+
+  const hookChain = (hooks: Array<Omit<HookNode, 'next'>>): HookNode | null => {
+    let next: HookNode | null = null
+    for (let index = hooks.length - 1; index >= 0; index -= 1) {
+      const hook = hooks[index]
+      if (hook) next = { ...hook, next }
+    }
+    return next
+  }
+
+  const externalStoreHook = (snapshot: unknown): Omit<HookNode, 'next'> => ({
+    memoizedState: snapshot,
+    queue: { value: snapshot, getSnapshot: () => snapshot },
+  })
+
+  const causalFiber = (
+    name: string,
+    currentHooks: Array<Omit<HookNode, 'next'>>,
+    previousHooks: Array<Omit<HookNode, 'next'>>,
+    extra: Record<string, unknown> = {},
+  ): Fiber => {
+    const type = (): null => null
+    Object.assign(type, { displayName: name })
+    return asFiber({
+      tag: 0,
+      type,
+      memoizedProps: {},
+      memoizedState: hookChain(currentHooks),
+      actualDuration: 0,
+      selfBaseDuration: 0,
+      child: null,
+      ...extra,
+      alternate: {
+        memoizedProps: {},
+        memoizedState: hookChain(previousHooks),
+      },
+    })
+  }
+
+  it('attributes an exact useSyncExternalStore snapshot and prevents a false unnecessary render', async () => {
+    const fiber = causalFiber('SelectedRow', [externalStoreHook(true)], [externalStoreHook(false)])
+    expect(diffExternalStoreChanges(fiber)).toMatchObject([
+      {
+        kind: 'external-store',
+        confidence: 'high',
+        hookIndex: 0,
+        before: false,
+        after: true,
+        changedFields: ['$value'],
+      },
+    ])
+
+    render(fiber, 'update')
+    const report = (await getRenders({ sort: 'renders', limit: 10 }))[0]
+    expect(report).toMatchObject({
+      unnecessary: 0,
+      necessity: 'necessary',
+      causes: [{ kind: 'external-store', confidence: 'high' }],
+      causeCounts: { 'external-store': 1 },
+    })
+  })
+
+  it('labels Query-shaped snapshots with changed fields and a nearby query hash', () => {
+    const observer = (queryHash: string): Omit<HookNode, 'next'> => ({
+      memoizedState: { options: { queryHash } },
+    })
+    const before = {
+      status: 'success',
+      fetchStatus: 'idle',
+      dataUpdatedAt: 1,
+      data: { count: 1 },
+    }
+    const after = { ...before, fetchStatus: 'fetching', dataUpdatedAt: 2 }
+    const causes = diffExternalStoreChanges(
+      causalFiber(
+        'QueryConsumer',
+        [observer('["todos"]'), externalStoreHook(after)],
+        [observer('["todos"]'), externalStoreHook(before)],
+      ),
+    )
+    expect(causes).toMatchObject([
+      {
+        kind: 'query',
+        confidence: 'medium',
+        hookIndex: 1,
+        queryHash: '["todos"]',
+        changedFields: ['fetchStatus', 'dataUpdatedAt'],
+      },
+    ])
+  })
+
+  it('labels Router-shaped snapshots without guessing at scalar selectors', () => {
+    const before = { location: { pathname: '/' }, matches: [{ id: '/' }] }
+    const after = { location: { pathname: '/settings' }, matches: [{ id: '/settings' }] }
+    expect(
+      diffExternalStoreChanges(
+        causalFiber('RouterConsumer', [externalStoreHook(after)], [externalStoreHook(before)]),
+      ),
+    ).toMatchObject([{ kind: 'router', confidence: 'medium' }])
+    expect(
+      diffExternalStoreChanges(
+        causalFiber(
+          'RouterLocationConsumer',
+          [externalStoreHook({ href: '/settings', pathname: '/settings', searchStr: '' })],
+          [externalStoreHook({ href: '/', pathname: '/', searchStr: '' })],
+        ),
+      ),
+    ).toMatchObject([{ kind: 'router', confidence: 'medium' }])
+    expect(
+      diffExternalStoreChanges(
+        causalFiber('ScalarStore', [externalStoreHook('b')], [externalStoreHook('a')]),
+      ),
+    ).toMatchObject([{ kind: 'external-store', confidence: 'high' }])
+  })
+
+  it('retains exact Context before/after evidence and its display name', () => {
+    const context = { displayName: 'Theme' }
+    const fiber = asFiber({
+      dependencies: {
+        firstContext: { context, memoizedValue: 'dark', next: null },
+      },
+      alternate: {
+        dependencies: {
+          firstContext: { context, memoizedValue: 'light', next: null },
+        },
+      },
+    })
+    expect(diffContextChanges(fiber)).toEqual([
+      {
+        kind: 'context',
+        confidence: 'high',
+        contextIndex: 0,
+        name: 'Theme',
+        before: 'light',
+        after: 'dark',
+      },
+    ])
+  })
+
+  it('distinguishes nearest-parent propagation from an explicit unknown cause', async () => {
+    const parent = componentFiber({ name: 'Parent', props: {}, prevProps: {} })
+    Object.assign(parent, { flags: 1 })
+    const child = componentFiber({ name: 'Child', props: {}, prevProps: {} })
+    Object.assign(child, { return: parent })
+    render(child, 'update')
+    const unknown = componentFiber({ name: 'Unknown', props: {}, prevProps: {} })
+    render(unknown, 'update')
+
+    const reports = new Map(
+      (await getRenders({ sort: 'renders', limit: 10 })).map((report) => [report.name, report]),
+    )
+    expect(reports.get('Child')).toMatchObject({
+      necessity: 'unknown',
+      causes: [{ kind: 'parent', parentName: 'Parent', confidence: 'medium' }],
+    })
+    expect(reports.get('Unknown')).toMatchObject({
+      necessity: 'unnecessary',
+      causes: [{ kind: 'unknown', confidence: 'none' }],
+    })
+  })
+
+  it('returns bounded recent cause events newest first and filters by component', async () => {
+    render(causalFiber('FirstRow', [externalStoreHook(2)], [externalStoreHook(1)]), 'update')
+    render(causalFiber('SecondRow', [externalStoreHook(3)], [externalStoreHook(2)]), 'update')
+    const result = await getRenderCauseEventsReport({ component: 'second', limit: 1 })
+    expect(result.libraryHidden).toBe(0)
+    expect(result.events).toMatchObject([
+      {
+        componentName: 'SecondRow',
+        causes: [{ kind: 'external-store' }],
+      },
+    ])
   })
 })
 
