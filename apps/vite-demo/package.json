@@ -16,13 +16,13 @@
   },
   "devDependencies": {
     "@genie-react/cli": "workspace:*",
-    "@types/node": "^24.13.2",
+    "@types/node": "^26.1.1",
     "genie-react": "workspace:*",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
-    "oxlint": "^1.71.0",
-    "typescript": "~6.0.2",
-    "vite": "^8.1.1"
+    "oxlint": "^1.73.0",
+    "typescript": "~7.0.2",
+    "vite": "^8.1.4"
   }
 }
