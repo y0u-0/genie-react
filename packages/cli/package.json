@@ -1,6 +1,6 @@
 {
   "name": "@genie-react/cli",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Give AI coding agents live React and TanStack DevTools from the terminal. Inspect, optimize, test, and verify a running app.",
   "license": "MIT",
   "repository": {

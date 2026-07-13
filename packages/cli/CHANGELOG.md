@@ -1,5 +1,16 @@
 # @genie-react/cli
 
+## 0.7.0
+
+### Minor Changes
+
+- 00a8dae: Add durable session targeting, effect ownership and hotness, causal render events, named runtime captures, and repeated capture comparisons with typed budgets.
+
+### Patch Changes
+
+- Updated dependencies [00a8dae]
+  - genie-react@0.7.0
+
 ## 0.6.1
 
 ### Patch Changes
