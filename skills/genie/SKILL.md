@@ -1,6 +1,6 @@
 ---
 name: genie
-description: Drive live DevTools on a RUNNING React, React Native, or TanStack app with the `genie-react` CLI. Use it to inspect components, explain renders, audit effect ownership and hotness, read Query or Router state, force hard-to-reach UI, and prove a change with repeated runtime captures. Pair it with agent-browser on web or agent-device on native. Do not use it for static source review.
+description: Drive live DevTools on a RUNNING React, React Native, or TanStack app with the `genie-react` CLI. Use it to inspect components, explain renders, audit effect schedules and hotness, read Query or Router state, force hard-to-reach UI, and prove a change with repeated runtime captures. Pair it with agent-browser on web or agent-device on native. Do not use it for static source review.
 ---
 
 # Genie
@@ -59,15 +59,16 @@ genie-react call react_clear_renders '{}'
 genie-react call react_get_renders '{"sort":"selfTime","limit":5}'
 ```
 
-Clear immediately before the flow. Otherwise the result mixes old work with the flow you care about.
+Clear immediately before the flow. Keep the returned observation ID. Otherwise the result mixes old work with the flow you care about.
 
 This step is complete when the output covers one known interaction.
 
 ## 3. Ask the smallest useful question
 
 - Unexpected render: `react_get_renders`, then `react_render_causes`.
+- Missing or repeated instance: `react_component_cohort`.
 - Slow flow: `react_profile_start`, drive the flow, then `react_profile_report`.
-- Effect loop: `react_effect_audit`.
+- Effect loop: `react_effect_events`, then `react_effect_audit`.
 - Blank or stuck UI: `react_error_state`.
 - Component state: `react_find_components`, then `react_inspect_component`.
 - DOM owner: `react_component_for_dom`.
@@ -76,7 +77,24 @@ This step is complete when the output covers one known interaction.
 - Memory: `browser_get_memory`.
 - Frame rate: `browser_fps` while the tab is visible.
 
-Effect results include ownership, the effect's own source, and `exact`, `inferred`, or `unknown` evidence. A hotness result is only strong after enough updates. Treat `insufficient-data` as unknown, not healthy or hot.
+Read evidence literally:
+
+- `exact` means the runtime relationship was observed directly.
+- `inferred` means it is a useful lead, not proof.
+- `unknown` means the agent needs another check.
+- `not-proven-safe` means do not remove the render yet. Test DOM, ARIA, focus, URL, network, and transitions first.
+
+`coverage.complete` covers the tool's primary measurement. `coverage.inputAttributionComplete` covers render-cause inputs. A timing profile can be complete while input attribution is partial. If attribution is `stale`, wait for commits to settle and retry. If primary coverage is incomplete, follow the reported limit or budget and repeat a smaller flow. A render diff reports coverage for both runs.
+
+`propsNotEnumerated` is intentional, not retryable. Genie does not enumerate an arbitrary props container because it may be a Proxy. Inspect a named component prop or path instead. Never use partial input attribution to prove that a render had no cause.
+
+`react_component_cohort` separates mounted-idle, updated, unmounted, and absent instances. Check `omittedByLimit` before calling the result complete.
+
+Effect events mean React scheduled an effect. They do not prove effect execution, cleanup execution, or a downstream request. Effect audits include ownership and the effect's own source when hook order aligns. A hotness result is strong only after enough updates. Treat `insufficient-data` as unknown. The 95% interval belongs to this statistical hotness check; do not invent a general confidence score for causal evidence.
+
+Query evidence can include an exact observer, subscriber, app hook callsite, and paths for documented fields or arrays. Opaque objects stay root-only and incomplete. Check `subscriberObservationStatus`: `current-observation` belongs to this clear-and-measure window; `previous-observation` is older evidence. Auto-tracked fields are private in TanStack Query, so unavailable delivery fields must stay unavailable.
+
+Component locations can be JSX use sites or definition fallbacks. Treat that source as inferred. Exact hook provenance is the better edit target when present.
 
 For one dependency's effects, use an exact package name with `appOnly:false`:
 

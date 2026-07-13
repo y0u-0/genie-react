@@ -71,7 +71,7 @@ in the result, one JSON object per line, with only those keys (implies --json sh
 app the failure is tagged [busy] with a retry hint instead of stalling.
 
 Example:
-  genie-react call react_get_renders '{"sort":"unnecessary"}'
+  genie-react call react_get_renders '{"sort":"selfTime"}'
   genie-react call react_find_components '{"query":"Button"}' --fields id,name,path`,
   batch: `genie-react batch — run many tool calls over one connection
 
@@ -83,7 +83,7 @@ prints one valid JSON array. Exits 0 only if every call succeeded. Omit the argu
 to read the JSON array from stdin. Unknown item keys are rejected (use "args", not "input").
 
 Example:
-  genie-react batch '[{"tool":"react_find_components","args":{"query":"Btn"}},{"tool":"react_get_renders","args":{"sort":"unnecessary"}}]'`,
+  genie-react batch '[{"tool":"react_find_components","args":{"query":"Btn"}},{"tool":"react_get_renders","args":{"sort":"selfTime"}}]'`,
   status: `genie-react status — bridge connection + app info
 
 Shows connection/readiness state, app name, React version, tool count, and every

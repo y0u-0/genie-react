@@ -53,6 +53,7 @@ function makeRouter(): StubRouter {
   }
   const router = {
     state,
+    stores: { __store: {} },
     subscribe: () => () => {},
     navigate: async ({ to }: { to: string }) => {
       navigated.push({ to })
@@ -79,6 +80,7 @@ describe('routerCollector', () => {
     const collector = routerCollector(makeRouter().router)
     const state = (await call(collector, 'router_get_state', {})) as {
       pathname: string
+      routerId: string | null
       href: string
       status: string
       isLoading: boolean
@@ -87,6 +89,7 @@ describe('routerCollector', () => {
       locationSync: string
     }
     expect(state.pathname).toBe('/')
+    expect(state.routerId).toMatch(/^router:/)
     expect(state.status).toBe('idle')
     expect(state.isLoading).toBe(false)
     expect(state.matchCount).toBe(2)

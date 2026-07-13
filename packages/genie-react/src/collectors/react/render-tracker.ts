@@ -1,77 +1,97 @@
 import {
-  ClassComponentTag,
-  didFiberRender,
+  didFiberCommit,
   type Fiber,
   type FiberRoot,
   getFiberId,
   getTimings,
+  HostTextTag,
   hasMemoCache,
   instrument,
   isCompositeFiber,
-  type MemoizedState,
-  type Props,
+  isHostFiber,
   type RenderPhase,
   SuspenseComponentTag,
   traverseRenderedFibers,
   type Unsubscribe,
 } from 'bippy'
-import type { ToolOutput } from '../../protocol'
-import type { reactRendersDiffContract } from './contracts'
-import { clearEffects, recordEffect } from './effect-tracker'
+import {
+  registerQuerySubscriber,
+  setExternalStoreObservation,
+} from '../causal/external-store-registry'
+import { type CommitWorkBudget, commitWorkExhaustions, consumeCommitWork } from './commit-budget'
+import {
+  clearEffects,
+  type EffectScheduleObservation,
+  type PreparedEffectObservation,
+  prepareEffect,
+  removeEffectRecord,
+  scheduledEffectCount,
+} from './effect-tracker'
 import { clearErrorState, recordErrorState } from './error-tracker'
-import { classifyHook, isStatefulHook, nameOf, noteCommit, noteCommittedRoot } from './fiber'
+import { nameOf, noteCommit, noteCommittedRoot } from './fiber'
+import {
+  beginInstanceObservation,
+  discardExcludedInstanceUnmount,
+  getInstanceIdentityCoverage,
+  invalidateLiveInstancesForRefresh,
+  noteInstanceRender,
+  prepareInstanceRender,
+} from './instance-identity'
+import {
+  beginObservation,
+  getActiveObservation,
+  getDocumentCommitId,
+  nextCausalEventId,
+  noteAnalysisInvalidation,
+  noteDocumentCommit,
+  type ObservationWindow,
+} from './observation'
 import { isRefreshCommit, noteExcludedRefreshCommit } from './refresh-tracker'
+import {
+  createRenderEvidenceBudget,
+  inputCoverage,
+  type RenderInputCoverage,
+} from './render-budget'
 import {
   diffContextChanges,
   diffExternalStoreChanges,
-  emptyCauseCounts,
-  HOOK_WALK_LIMIT,
+  type PendingQuerySubscriberRegistration,
   type RenderCause,
-  type RenderCauseCounts,
   type RenderCauseEvent,
   type RenderNecessity,
-  stateValue,
 } from './render-causes'
-import { isSafeRenderer, supportedCommitHandler } from './safe-instrumentation'
+import { type CommitAnalysisBudget, createCommitAnalysisBudget } from './render-commit-budget'
+import { childrenChanged, diffProps, diffStateChanges, type RenderChange } from './render-inputs'
+import type {
+  RenderRecord,
+  RenderReport,
+  RenderSummary,
+  ReportAttribution,
+  RetainedRenderCauseEvent,
+} from './render-model'
+import { draftRenderRecord } from './render-model'
+import { assessRender, type CurrentCommitEvidence, type RenderAssessment } from './render-outcomes'
 import {
-  classifyFibersWithinBudget,
-  clearSourceCache,
-  type FiberClassification,
-  type ResolvedSource,
-  sourceLabel,
-} from './source'
+  buildCurrentAggregates,
+  buildRenderCauseEventsReport,
+  buildRenderSummary,
+  buildRenders,
+  buildRendersLeaderboards,
+  buildRendersMeasurementReport,
+  buildRendersReport,
+  type RenderCauseQuery,
+  type RenderQuery,
+} from './render-reports'
+import {
+  buildRenderTrackingCoverage,
+  diffRenderSnapshot,
+  type RenderTrackingCoverage,
+  storeRenderSnapshot,
+} from './render-snapshots'
+import { captureReportEpoch, reportAttribution, reportStateMatches } from './report-attribution'
+import { isSafeRenderer, supportedCommitHandler } from './safe-instrumentation'
+import { clearSourceCache } from './source'
 
-export interface PropRenderChange {
-  name: string
-  kind: 'props'
-  unstable: boolean
-}
-
-interface StateRenderChangeBase {
-  name: string
-  kind: 'state'
-  unstable: false
-  /** Depth- and size-bounded values safe for the agent-facing wire. */
-  before: unknown
-  after: unknown
-}
-
-export interface HookStateRenderChange extends StateRenderChangeBase {
-  hook: {
-    /** Flat position in the component's complete hook chain. */
-    index: number
-    /** Position among useState/useReducer hooks only; matches react_override_hook_state. */
-    stateIndex: number
-    kind: 'state' | 'reducer'
-  }
-}
-
-export interface ClassStateRenderChange extends StateRenderChangeBase {
-  name: 'class state'
-}
-
-export type StateRenderChange = HookStateRenderChange | ClassStateRenderChange
-export type RenderChange = PropRenderChange | StateRenderChange
 export type {
   RenderCause,
   RenderCauseCounts,
@@ -79,52 +99,33 @@ export type {
   RenderNecessity,
 } from './render-causes'
 export { diffContextChanges, diffExternalStoreChanges } from './render-causes'
-
-export interface RenderRecord {
-  id: number
-  name: string
-  renders: number
-  mounts: number
-  updates: number
-  unnecessary: number
-  unstableRenders: number
-  forget: boolean
-  selfTime: number
-  totalTime: number
-  changes: RenderChange[]
-  latestCommitId: number
-  causes: RenderCause[]
-  causeCounts: RenderCauseCounts
-  necessity: RenderNecessity
-  /** The live fiber, kept so source/library classification can run async at report time. */
-  fiber: Fiber
+export type {
+  ClassStateRenderChange,
+  HookStateRenderChange,
+  PropRenderChange,
+  RenderChange,
+  StateRenderChange,
+} from './render-inputs'
+export {
+  childrenChanged,
+  contextChanged,
+  diffProps,
+  diffStateChanges,
+  stateChanged,
+} from './render-inputs'
+export type { RenderCauseQuery, RenderQuery } from './render-reports'
+export { clearSnapshots, snapshotLabels } from './render-snapshots'
+export type {
+  CommitAnalysisBudget,
+  RenderRecord,
+  RenderReport,
+  RenderSummary,
+  ReportAttribution,
+  RetainedRenderCauseEvent,
 }
-
-/** A render record enriched for the wire — the raw `fiber` handle dropped, source/library added. */
-export interface RenderReport extends Omit<RenderRecord, 'fiber'> {
-  source: ResolvedSource | null
-  isLibrary: boolean
-}
-
-export interface RenderSummary {
-  commits: number
-  trackedComponents: number
-  totalRenders: number
-  totalUpdates: number
-  unstableComponents: number
-  unnecessaryComponents: number
-  topUnstableProps: { name: string; count: number }[]
-}
+export { createCommitAnalysisBudget }
 
 const records = new Map<number, RenderRecord>()
-interface RetainedRenderCauseEvent {
-  commitId: number
-  componentId: number
-  componentName: string
-  causes: RenderCause[]
-  necessity: RenderNecessity
-}
-
 const recentCauseEvents: RetainedRenderCauseEvent[] = []
 let commits = 0
 let installed = false
@@ -132,25 +133,21 @@ let instrumentation: Unsubscribe | null = null
 // Stop is intentionally a soft flag: the commit handler stays wired so the client's liveness heartbeat continues while profiling is paused.
 let paused = false
 let skippedCommitFibers = 0
+let droppedPendingUnmountFibers = 0
+let analysisFailedFibers = 0
+let truncatedInputFibers = 0
+let propsNotEnumeratedFibers = 0
+let budgetExhaustedCommits = 0
+const budgetExhaustedSubsystems = new Map<string, number>()
+let droppedRenderEvents = 0
+let clears = 0
 
-const COMMIT_FIBER_ANALYSIS_LIMIT = 250
 const DID_CAPTURE = 0b1000_0000
-const REPORT_SOURCE_CLASSIFY_LIMIT = 120
-const REPORT_SOURCE_CLASSIFY_BUDGET_MS = 500
-const UNCLASSIFIED_FIBER: FiberClassification = { source: null, isLibrary: false }
 const RECENT_CAUSE_EVENT_LIMIT = 1_000
-
-export interface CommitAnalysisBudget {
-  processed: number
-  skipped: number
-  limit: number
-}
-
-export function createCommitAnalysisBudget(
-  limit = COMMIT_FIBER_ANALYSIS_LIMIT,
-): CommitAnalysisBudget {
-  return { processed: 0, skipped: 0, limit }
-}
+const PENDING_UNMOUNT_LIMIT = 1_000
+const pendingUnmounts: { rendererId: number; fiber: Fiber }[] = []
+const pendingHostUnmountRenderers = new Set<number>()
+let uncertainTraversalRoots = new WeakSet<FiberRoot>()
 
 let commitListener: (() => void) | null = null
 
@@ -166,21 +163,75 @@ export function startRenderTracking(): boolean {
   try {
     instrumentation = instrument({
       name: 'genie-react',
+      onCommitFiberUnmount: (rendererId: number, fiber: Fiber) => {
+        if (!isSafeRenderer(rendererId)) return
+        if (isHostFiber(fiber) || fiber.tag === HostTextTag) {
+          pendingHostUnmountRenderers.add(rendererId)
+        }
+        queuePendingUnmount(rendererId, fiber)
+      },
       onCommitFiberRoot: supportedCommitHandler((rendererId: number, root: FiberRoot) => {
         commitListener?.()
         noteCommit()
         noteCommittedRoot(root)
         if (!isSafeRenderer(rendererId)) return
+        const hostUnmountObserved = pendingHostUnmountRenderers.delete(rendererId)
         if (isRefreshCommit()) {
+          advanceExcludedCommitBaseline(root)
+          noteAnalysisInvalidation()
+          discardPendingUnmounts(rendererId)
+          invalidateLiveInstancesForRefresh()
           noteExcludedRefreshCommit()
           return
         }
-        if (paused) return
+        noteDocumentCommit()
+        if (paused) {
+          discardPendingUnmounts(rendererId)
+          advanceExcludedCommitBaseline(root)
+          return
+        }
+        if (uncertainTraversalRoots.has(root)) {
+          discardPendingUnmounts(rendererId)
+          advanceExcludedCommitBaseline(root)
+          return
+        }
         commits += 1
         const budget = createCommitAnalysisBudget()
+        recordPendingUnmounts(rendererId, budget.work)
+        budget.currentCommitEvidence.hostMutationCaptureComplete = !hostUnmountObserved
+        const candidates: { fiber: Fiber; phase: RenderPhase }[] = []
         traverseRenderedFibers(root, (fiber, phase) => {
-          recordCommitFiber(fiber, phase, budget)
+          if (!consumeCommitWork(budget.work, 'commit-traversal')) {
+            budget.currentCommitEvidence.hostMutationCaptureComplete = false
+            if (shouldAnalyzeCommitFiber(fiber)) {
+              budget.skipped += 1
+              skippedCommitFibers += 1
+            }
+            return
+          }
+          budget.currentCommitEvidence.renderedFibers.add(fiber)
+          if (isHostFiber(fiber)) {
+            try {
+              // The traversal proves this host rendered now; its mutation flag is not used alone.
+              if (didFiberCommit(fiber)) {
+                budget.currentCommitEvidence.hostMutationFibers.add(fiber)
+              }
+            } catch {
+              budget.currentCommitEvidence.hostMutationCaptureComplete = false
+            }
+          }
+          if (!shouldAnalyzeCommitFiber(fiber)) return
+          if (candidates.length >= budget.limit) {
+            budget.skipped += 1
+            skippedCommitFibers += 1
+            return
+          }
+          candidates.push({ fiber, phase })
         })
+        for (const candidate of candidates) {
+          recordCommitFiber(candidate.fiber, candidate.phase, budget)
+        }
+        finalizeCommitAnalysisBudget(budget)
       }),
     })
     installed = true
@@ -190,12 +241,29 @@ export function startRenderTracking(): boolean {
   return installed
 }
 
+/** Advance Bippy's per-root previous-Fiber baseline without retaining excluded commit evidence. */
+function advanceExcludedCommitBaseline(root: FiberRoot): void {
+  try {
+    traverseRenderedFibers(root, () => {})
+    uncertainTraversalRoots.delete(root)
+  } catch {
+    uncertainTraversalRoots.add(root)
+    analysisFailedFibers += 1
+  }
+}
+
 /** Module/HMR teardown only. Profiling stop must keep the lightweight commit heartbeat installed. */
 export function disposeRenderTracking(): void {
+  noteAnalysisInvalidation()
+  invalidateLiveInstancesForRefresh()
   instrumentation?.()
   instrumentation = null
   installed = false
   paused = false
+  pendingUnmounts.length = 0
+  pendingHostUnmountRenderers.clear()
+  uncertainTraversalRoots = new WeakSet()
+  droppedPendingUnmountFibers = 0
 }
 
 /** Pause commit recording without uninstalling instrumentation; isTracking() reports false until startRenderTracking() resumes. */
@@ -206,361 +274,291 @@ export function stopRenderTracking(): void {
 export const isTracking = (): boolean => installed && !paused
 export const getCommitCount = (): number => commits
 export const getSkippedCommitFiberCount = (): number => skippedCommitFibers
+export const getDroppedPendingUnmountFiberCount = (): number => droppedPendingUnmountFibers
+export const getAnalysisFailedFiberCount = (): number => analysisFailedFibers
+export const getTruncatedInputFiberCount = (): number => truncatedInputFibers
+export const getPropsNotEnumeratedFiberCount = (): number => propsNotEnumeratedFibers
+export const getBudgetExhaustedCommitCount = (): number => budgetExhaustedCommits
+export const getBudgetExhaustedSubsystems = (): { subsystem: string; commits: number }[] =>
+  [...budgetExhaustedSubsystems]
+    .map(([subsystem, count]) => ({ subsystem, commits: count }))
+    .sort((left, right) => left.subsystem.localeCompare(right.subsystem))
+export const getDroppedRenderEventCount = (): number => droppedRenderEvents
 
-export function clearRenders(): void {
+export function getRenderTrackingCoverage(
+  scope: 'causal' | 'measurement' = 'causal',
+): RenderTrackingCoverage {
+  return buildRenderTrackingCoverage(
+    {
+      skippedCommitFibers,
+      droppedUnmountFibers: getDroppedUnmountEvidenceCount(),
+      analysisFailedFibers,
+      truncatedInputFibers,
+      propsNotEnumeratedFibers,
+      budgetExhaustedCommits,
+      budgetExhaustedSubsystems: getBudgetExhaustedSubsystems(),
+    },
+    scope,
+  )
+}
+
+function getDroppedUnmountEvidenceCount(): number {
+  const identityCoverage = getInstanceIdentityCoverage()
+  return (
+    droppedPendingUnmountFibers +
+    identityCoverage.droppedTombstones +
+    identityCoverage.excludedLifecycleFibers
+  )
+}
+
+export function clearRenders(): ObservationWindow {
   records.clear()
   recentCauseEvents.length = 0
   commits = 0
   skippedCommitFibers = 0
+  droppedPendingUnmountFibers = 0
+  analysisFailedFibers = 0
+  truncatedInputFibers = 0
+  propsNotEnumeratedFibers = 0
+  budgetExhaustedCommits = 0
+  budgetExhaustedSubsystems.clear()
+  droppedRenderEvents = 0
+  for (const pending of pendingUnmounts) discardExcludedInstanceUnmount(pending.fiber)
+  pendingUnmounts.length = 0
   clears++
   clearEffects()
   clearErrorState()
   clearSourceCache()
-}
-
-export interface RenderQuery {
-  component?: string
-  limit: number
-  sort: 'renders' | 'unnecessary' | 'unstable' | 'selfTime'
-  /** Exclude library components (node_modules, incl. Vite pre-bundled deps). Default true. */
-  appOnly?: boolean
-}
-
-/** Classifies the component-filtered records (source + app/library); reports how many library components appOnly dropped so callers can disclose the filter. */
-async function selectRecords(
-  query: RenderQuery,
-): Promise<{ kept: { record: RenderRecord; report: RenderReport }[]; libraryHidden: number }> {
-  let list = [...records.values()]
-  if (query.component) {
-    const needle = query.component.toLowerCase()
-    list = list.filter((record) => record.name.toLowerCase().includes(needle))
-  }
-
-  const appOnly = query.appOnly ?? true
-  const classes = await classifyRecordsWithinBudget(list)
-  const classified = list.map((record, index) => {
-    const { source, isLibrary } = classes[index] ?? UNCLASSIFIED_FIBER
-    const { fiber: _fiber, ...rest } = record
-    const name = rest.name === 'Anonymous' ? (sourceLabel(source) ?? rest.name) : rest.name
-    return { record, report: { ...rest, name, source, isLibrary } satisfies RenderReport }
-  })
-  if (!appOnly) return { kept: classified, libraryHidden: 0 }
-  const kept = classified.filter((entry) => !entry.report.isLibrary)
-  return { kept, libraryHidden: classified.length - kept.length }
-}
-
-async function classifyRecordsWithinBudget(
-  recordsToClassify: RenderRecord[],
-): Promise<FiberClassification[]> {
-  const { classes } = await classifyFibersWithinBudget(
-    recordsToClassify.map((record) => record.fiber),
-    { limit: REPORT_SOURCE_CLASSIFY_LIMIT, budgetMs: REPORT_SOURCE_CLASSIFY_BUDGET_MS },
-  )
-  return classes
-}
-
-function sortReports(
-  entries: { record: RenderRecord; report: RenderReport }[],
-  sort: RenderQuery['sort'],
-): { record: RenderRecord; report: RenderReport }[] {
-  return [...entries].sort((a, b) => {
-    const x = a.report
-    const y = b.report
-    if (sort === 'selfTime') return y.selfTime - x.selfTime
-    if (sort === 'unnecessary') return y.unnecessary - x.unnecessary
-    if (sort === 'unstable') return y.unstableRenders - x.unstableRenders
-    return y.renders - x.renders
-  })
+  const observation = beginObservation()
+  setExternalStoreObservation(observation)
+  beginInstanceObservation(observation.id)
+  return observation
 }
 
 export async function getRenders(query: RenderQuery): Promise<RenderReport[]> {
-  const { kept } = await selectRecords(query)
-  return sortReports(kept, query.sort)
-    .slice(0, query.limit)
-    .map((entry) => entry.report)
+  return buildRenders(records, query)
 }
 
-/** Like getRenders, plus the count of library components appOnly hid — for react_get_renders' filteredNote. */
 export async function getRendersReport(
   query: RenderQuery,
-): Promise<{ components: RenderReport[]; libraryHidden: number }> {
-  const { kept, libraryHidden } = await selectRecords(query)
-  const components = sortReports(kept, query.sort)
-    .slice(0, query.limit)
-    .map((entry) => entry.report)
-  return { components, libraryHidden }
+): Promise<{ components: RenderReport[]; libraryHidden: number; omittedByLimit: number }> {
+  return buildRendersReport(records, query)
 }
 
-export interface RenderCauseQuery {
-  commit?: number
-  afterCommit?: number
-  component?: string
-  limit: number
-  appOnly?: boolean
+export async function getRendersMeasurement(query: RenderQuery): Promise<{
+  tracking: boolean
+  commits: number
+  documentCommitId: number
+  observation: ObservationWindow | null
+  attribution: ReportAttribution
+  summary: RenderSummary
+  components: RenderReport[]
+  libraryHidden: number
+  omittedByLimit: number
+  skippedCommitFibers: number
+  droppedUnmountFibers: number
+  analysisFailedFibers: number
+  truncatedInputFibers: number
+  propsNotEnumeratedFibers: number
+  budgetExhaustedCommits: number
+  budgetExhaustedSubsystems: { subsystem: string; commits: number }[]
+}> {
+  const recordsAtStart = snapshotRenderRecords()
+  const commitsAtStart = commits
+  const epoch = captureReportEpoch()
+  const observation = getActiveObservation()
+  const tracking = isTracking()
+  const skippedAtStart = skippedCommitFibers
+  const droppedUnmountsAtStart = getDroppedUnmountEvidenceCount()
+  const failedAtStart = analysisFailedFibers
+  const truncatedAtStart = truncatedInputFibers
+  const propsNotEnumeratedAtStart = propsNotEnumeratedFibers
+  const budgetCommitsAtStart = budgetExhaustedCommits
+  const budgetSubsystemsAtStart = getBudgetExhaustedSubsystems()
+  const report = await buildRendersMeasurementReport(recordsAtStart, commitsAtStart, query, {
+    isCurrent: () => reportStateMatches(epoch),
+  })
+  return {
+    tracking,
+    commits: commitsAtStart,
+    documentCommitId: epoch.documentCommitId,
+    observation,
+    attribution: reportAttribution(epoch),
+    ...report,
+    skippedCommitFibers: skippedAtStart,
+    droppedUnmountFibers: droppedUnmountsAtStart,
+    analysisFailedFibers: failedAtStart,
+    truncatedInputFibers: truncatedAtStart,
+    propsNotEnumeratedFibers: propsNotEnumeratedAtStart,
+    budgetExhaustedCommits: budgetCommitsAtStart,
+    budgetExhaustedSubsystems: budgetSubsystemsAtStart,
+  }
 }
 
-/** Recent commit-scoped causes, newest first. Source classification reuses live records and never retains old fiber graphs. */
+function snapshotRenderRecords(): Map<number, RenderRecord> {
+  return new Map(
+    [...records].map(([id, record]) => [
+      id,
+      {
+        ...record,
+        instance: structuredClone(record.instance),
+        changes: structuredClone(record.changes),
+        causes: structuredClone(record.causes),
+        causeCounts: { ...record.causeCounts },
+        assessment: structuredClone(record.assessment),
+        inputCoverage: { ...record.inputCoverage },
+      },
+    ]),
+  )
+}
+
 export async function getRenderCauseEventsReport(query: RenderCauseQuery): Promise<{
   events: RenderCauseEvent[]
   libraryHidden: number
+  omittedByLimit: number
 }> {
-  const needle = query.component?.toLowerCase()
-  const selected = recentCauseEvents
-    .filter((event) => query.commit === undefined || event.commitId === query.commit)
-    .filter((event) => query.afterCommit === undefined || event.commitId > query.afterCommit)
-    .filter((event) => !needle || event.componentName.toLowerCase().includes(needle))
-    .slice(-query.limit)
-    .reverse()
+  return buildRenderCauseEventsReport(records, recentCauseEvents, query)
+}
 
-  const liveRecords = [
-    ...new Map(
-      selected
-        .map((event) => records.get(event.componentId))
-        .filter((record): record is RenderRecord => record !== undefined)
-        .map((record) => [record.id, record]),
-    ).values(),
-  ]
-  const classes = await classifyRecordsWithinBudget(liveRecords)
-  const classById = new Map<number, FiberClassification>()
-  liveRecords.forEach((record, index) => {
-    classById.set(record.id, classes[index] ?? UNCLASSIFIED_FIBER)
-  })
-
-  const classified = selected.map((event) => {
-    const classification = classById.get(event.componentId) ?? UNCLASSIFIED_FIBER
-    return {
-      event: {
-        ...event,
-        source: classification.source,
-        isLibrary: classification.isLibrary,
-      } satisfies RenderCauseEvent,
-      isLibrary: classification.isLibrary,
-    }
-  })
-  if (query.appOnly === false) {
-    return { events: classified.map(({ event }) => event), libraryHidden: 0 }
+export async function getRenderCauseMeasurement(query: RenderCauseQuery): Promise<{
+  tracking: boolean
+  commits: number
+  documentCommitId: number
+  observation: ObservationWindow | null
+  attribution: ReportAttribution
+  events: RenderCauseEvent[]
+  libraryHidden: number
+  omittedByLimit: number
+  skippedCommitFibers: number
+  droppedUnmountFibers: number
+  analysisFailedFibers: number
+  truncatedInputFibers: number
+  propsNotEnumeratedFibers: number
+  budgetExhaustedCommits: number
+  budgetExhaustedSubsystems: { subsystem: string; commits: number }[]
+  renderEventRetention: {
+    evictedEvents: number
+    earliestDocumentCommitId: number | null
+    latestDocumentCommitId: number | null
   }
+}> {
+  const recordsAtStart = snapshotRenderRecords()
+  const eventsAtStart = structuredClone(recentCauseEvents)
+  const commitsAtStart = commits
+  const epoch = captureReportEpoch()
+  const observation = getActiveObservation()
+  const tracking = isTracking()
+  const skippedAtStart = skippedCommitFibers
+  const droppedUnmountsAtStart = getDroppedUnmountEvidenceCount()
+  const failedAtStart = analysisFailedFibers
+  const truncatedAtStart = truncatedInputFibers
+  const propsNotEnumeratedAtStart = propsNotEnumeratedFibers
+  const budgetCommitsAtStart = budgetExhaustedCommits
+  const budgetSubsystemsAtStart = getBudgetExhaustedSubsystems()
+  const evictedAtStart = droppedRenderEvents
+  const report = await buildRenderCauseEventsReport(recordsAtStart, eventsAtStart, query, {
+    isCurrent: () => reportStateMatches(epoch),
+  })
   return {
-    events: classified.filter(({ isLibrary }) => !isLibrary).map(({ event }) => event),
-    libraryHidden: classified.filter(({ isLibrary }) => isLibrary).length,
+    tracking,
+    commits: commitsAtStart,
+    documentCommitId: epoch.documentCommitId,
+    observation,
+    attribution: reportAttribution(epoch),
+    ...report,
+    skippedCommitFibers: skippedAtStart,
+    droppedUnmountFibers: droppedUnmountsAtStart,
+    analysisFailedFibers: failedAtStart,
+    truncatedInputFibers: truncatedAtStart,
+    propsNotEnumeratedFibers: propsNotEnumeratedAtStart,
+    budgetExhaustedCommits: budgetCommitsAtStart,
+    budgetExhaustedSubsystems: budgetSubsystemsAtStart,
+    renderEventRetention: {
+      evictedEvents: evictedAtStart,
+      earliestDocumentCommitId: eventsAtStart[0]?.documentCommitId ?? null,
+      latestDocumentCommitId: eventsAtStart.at(-1)?.documentCommitId ?? null,
+    },
   }
 }
 
-/** Classify once, sort/slice per leaderboard — react_profile_report's four views without 4× classification passes. */
 export async function getRendersLeaderboards(limit: number): Promise<{
   slowest: RenderReport[]
   mostRerendered: RenderReport[]
   mostUnnecessary: RenderReport[]
   mostUnstable: RenderReport[]
 }> {
-  const { kept } = await selectRecords({ limit, sort: 'renders' })
-  const top = (sort: RenderQuery['sort']): RenderReport[] =>
-    sortReports(kept, sort)
-      .slice(0, limit)
-      .map((entry) => entry.report)
-  return {
-    slowest: top('selfTime'),
-    mostRerendered: top('renders'),
-    mostUnnecessary: top('unnecessary'),
-    mostUnstable: top('unstable'),
-  }
+  return buildRendersLeaderboards(records, limit)
 }
 
-/** Aggregate stats across tracked components (app-only by default, so library noise is excluded). */
-export async function getRenderSummary(appOnly = true): Promise<RenderSummary> {
-  let list = [...records.values()]
-  if (appOnly) {
-    const flags = await classifyRecordsWithinBudget(list)
-    list = list.filter((_, index) => !flags[index]?.isLibrary)
-  }
-
-  let totalRenders = 0
-  let totalUpdates = 0
-  let unstableComponents = 0
-  let unnecessaryComponents = 0
-  const unstablePropCounts = new Map<string, number>()
-
-  for (const record of list) {
-    totalRenders += record.renders
-    totalUpdates += record.updates
-    if (record.unstableRenders > 0) unstableComponents += 1
-    if (record.unnecessary > 0) unnecessaryComponents += 1
-    for (const change of record.changes) {
-      if (change.kind === 'props' && change.unstable) {
-        unstablePropCounts.set(change.name, (unstablePropCounts.get(change.name) ?? 0) + 1)
-      }
-    }
-  }
-
-  const topUnstableProps = [...unstablePropCounts.entries()]
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 10)
-
-  return {
-    commits,
-    trackedComponents: list.length,
-    totalRenders,
-    totalUpdates,
-    unstableComponents,
-    unnecessaryComponents,
-    topUnstableProps,
-  }
-}
-
-// ── Snapshots + diff (regression verdict) ────────────────────────────────────
-
-export interface ComponentAggregate {
-  name: string
-  source: string | null
-  renders: number
-  mounts: number
-  updates: number
-  selfTime: number
-  totalTime: number
-  unnecessary: number
-  unstableRenders: number
-}
-
-interface Snapshot {
+export async function getRendersLeaderboardsMeasurement(limit: number): Promise<{
   commits: number
-  clears: number
-  components: ComponentAggregate[]
+  tracking: boolean
+  documentCommitId: number
+  attribution: ReportAttribution
+  coverage: RenderTrackingCoverage
+  boards: Awaited<ReturnType<typeof buildRendersLeaderboards>>
+}> {
+  const recordsAtStart = snapshotRenderRecords()
+  const commitsAtStart = commits
+  const epoch = captureReportEpoch()
+  const tracking = isTracking()
+  const coverage = getRenderTrackingCoverage('measurement')
+  const boards = await buildRendersLeaderboards(recordsAtStart, limit, {
+    isCurrent: () => reportStateMatches(epoch),
+  })
+  return {
+    commits: commitsAtStart,
+    tracking,
+    documentCommitId: epoch.documentCommitId,
+    attribution: reportAttribution(epoch),
+    coverage,
+    boards,
+  }
 }
 
-const snapshots = new Map<string, Snapshot>()
-
-// Counts clearRenders() calls so a diff can say whether its baseline predates a counter reset (session-vs-session compare) or shares the session (additive compare).
-let clears = 0
-
-// Join key: components with a resolved source disambiguate by name+file:line (two same-named components stay distinct); unresolved ones fall back to name alone.
-const aggregateKey = (aggregate: { name: string; source: string | null }): string =>
-  aggregate.source ? `${aggregate.name}@${aggregate.source}` : aggregate.name
-
-/** Current per-component aggregates with a resolved source label, app-filtered by default — the shape snapshots store and diffs read on the live side. */
-async function currentAggregates(appOnly = true): Promise<ComponentAggregate[]> {
-  const list = [...records.values()]
-  const classified = await classifyRecordsWithinBudget(list)
-  const out: ComponentAggregate[] = []
-  list.forEach((record, index) => {
-    const { source, isLibrary } = classified[index] ?? { source: null, isLibrary: false }
-    if (appOnly && isLibrary) return
-    const label = sourceLabel(source)
-    out.push({
-      name: record.name === 'Anonymous' ? (label ?? record.name) : record.name,
-      source: label,
-      renders: record.renders,
-      mounts: record.mounts,
-      updates: record.updates,
-      selfTime: record.selfTime,
-      totalTime: record.totalTime,
-      unnecessary: record.unnecessary,
-      unstableRenders: record.unstableRenders,
-    })
-  })
-  return out
+export async function getRenderSummary(appOnly = true): Promise<RenderSummary> {
+  return buildRenderSummary(records, commits, appOnly)
 }
 
 /** Store the current aggregates under `label` (overwriting a prior snapshot of the same label) so a later react_renders_diff can measure change against it. */
-export async function takeSnapshot(
-  label: string,
-): Promise<{ label: string; commits: number; components: number }> {
-  const components = await currentAggregates()
-  snapshots.set(label, { commits, clears, components })
-  return { label, commits, components: components.length }
+export async function takeSnapshot(label: string): Promise<{
+  label: string
+  commits: number
+  components: number
+  coverage: RenderTrackingCoverage
+}> {
+  const recordsAtStart = snapshotRenderRecords()
+  const commitsAtStart = commits
+  const clearsAtStart = clears
+  const epoch = captureReportEpoch()
+  const coverage = getRenderTrackingCoverage('measurement')
+  const components = await buildCurrentAggregates(recordsAtStart, true, {
+    isCurrent: () => reportStateMatches(epoch),
+  })
+  if (!reportStateMatches(epoch)) {
+    throw new Error(
+      'React analysis changed while the snapshot was resolving. Retry after commits, clears, or refreshes settle.',
+    )
+  }
+  return storeRenderSnapshot(label, commitsAtStart, clearsAtStart, components, coverage)
 }
-
-export const snapshotLabels = (): string[] => [...snapshots.keys()]
-
-type RendersDiff = ToolOutput<typeof reactRendersDiffContract>
-type RenderDelta = RendersDiff['regressed'][number]
-
-const round1 = (n: number): number => Math.round(n * 10) / 10
-
-// pct is delta/before*100 to 1dp; null when before is 0 (no baseline cost to divide by — an honest "undefined ratio", not a fabricated 100%).
-const pctChange = (before: number, delta: number): number | null =>
-  before === 0 ? null : round1((delta / before) * 100)
-
-const toDelta = (
-  name: string,
-  source: string | null,
-  before: ComponentAggregate,
-  after: ComponentAggregate,
-): RenderDelta => ({
-  name,
-  ...(source ? { source } : {}),
-  deltaMs: round1(after.selfTime - before.selfTime),
-  before: { renders: before.renders, selfTime: round1(before.selfTime) },
-  after: { renders: after.renders, selfTime: round1(after.selfTime) },
-})
 
 /** Compare a stored snapshot against the current live aggregates: total self-time change plus per-component regressions/improvements past a threshold, and components that appeared/vanished. */
-export async function rendersDiff(baseline: string, thresholdMs: number): Promise<RendersDiff> {
-  const snapshot = snapshots.get(baseline)
-  if (!snapshot)
+export async function rendersDiff(baseline: string, thresholdMs: number) {
+  const recordsAtStart = snapshotRenderRecords()
+  const commitsAtStart = commits
+  const clearsAtStart = clears
+  const epoch = captureReportEpoch()
+  const coverage = getRenderTrackingCoverage('measurement')
+  const after = await buildCurrentAggregates(recordsAtStart, true, {
+    isCurrent: () => reportStateMatches(epoch),
+  })
+  if (!reportStateMatches(epoch)) {
     throw new Error(
-      snapshots.size === 0
-        ? `No snapshot named "${baseline}" — take one with react_profile_snapshot first (no snapshots stored yet).`
-        : `No snapshot named "${baseline}". Stored labels: ${snapshotLabels().join(', ')}.`,
+      'React analysis changed while the render diff was resolving. Retry after commits, clears, or refreshes settle.',
     )
-
-  const after = await currentAggregates()
-  const beforeByKey = new Map(snapshot.components.map((c) => [aggregateKey(c), c]))
-  const afterByKey = new Map(after.map((c) => [aggregateKey(c), c]))
-
-  const regressed: RenderDelta[] = []
-  const improved: RenderDelta[] = []
-  const added: { name: string; renders: number; selfTime: number }[] = []
-  const removed: { name: string }[] = []
-
-  for (const [key, afterAgg] of afterByKey) {
-    const beforeAgg = beforeByKey.get(key)
-    if (!beforeAgg) {
-      added.push({
-        name: afterAgg.name,
-        renders: afterAgg.renders,
-        selfTime: round1(afterAgg.selfTime),
-      })
-      continue
-    }
-    const delta = afterAgg.selfTime - beforeAgg.selfTime
-    if (delta > thresholdMs)
-      regressed.push(toDelta(afterAgg.name, afterAgg.source, beforeAgg, afterAgg))
-    else if (delta < -thresholdMs)
-      improved.push(toDelta(afterAgg.name, afterAgg.source, beforeAgg, afterAgg))
   }
-  for (const [key, beforeAgg] of beforeByKey) {
-    if (!afterByKey.has(key)) removed.push({ name: beforeAgg.name })
-  }
-
-  const byMagnitude = (a: RenderDelta, b: RenderDelta): number =>
-    Math.abs(b.deltaMs) - Math.abs(a.deltaMs)
-  regressed.sort(byMagnitude)
-  improved.sort(byMagnitude)
-
-  const beforeSelf = snapshot.components.reduce((sum, c) => sum + c.selfTime, 0)
-  const afterSelf = after.reduce((sum, c) => sum + c.selfTime, 0)
-  const selfDelta = afterSelf - beforeSelf
-
-  return {
-    baseline,
-    commits: { before: snapshot.commits, after: commits },
-    clearsSinceBaseline: clears - snapshot.clears,
-    selfTimeMs: {
-      before: round1(beforeSelf),
-      after: round1(afterSelf),
-      delta: round1(selfDelta),
-      pct: pctChange(beforeSelf, selfDelta),
-    },
-    regressed,
-    improved,
-    added,
-    removed,
-  }
-}
-
-export function clearSnapshots(): void {
-  snapshots.clear()
+  return diffRenderSnapshot(baseline, thresholdMs, commitsAtStart, clearsAtStart, after, coverage)
 }
 
 function shouldAnalyzeCommitFiber(fiber: Fiber): boolean {
@@ -582,78 +580,153 @@ export function recordCommitFiber(
     skippedCommitFibers += 1
     return false
   }
+  if (!consumeCommitWork(budget.work, 'commit-fibers')) {
+    budget.skipped += 1
+    skippedCommitFibers += 1
+    return false
+  }
   budget.processed += 1
-  recordRender(fiber, phase)
-  recordEffect(fiber, phase)
-  recordErrorState(fiber)
-  return true
+  try {
+    const effectPreparation = prepareEffect(fiber, phase, commits, budget.work)
+    if (!consumeCommitWork(budget.work, 'render-record')) {
+      budget.skipped += 1
+      skippedCommitFibers += 1
+      return false
+    }
+    recordRender(fiber, phase, effectPreparation, budget.work, budget.currentCommitEvidence)
+    if (consumeCommitWork(budget.work, 'error-state')) recordErrorState(fiber)
+    return true
+  } catch {
+    budget.failed += 1
+    analysisFailedFibers += 1
+    return false
+  }
 }
 
-export function recordRender(fiber: Fiber, phase: RenderPhase): void {
+export function recordRender(
+  fiber: Fiber,
+  phase: RenderPhase,
+  effectPreparation?: PreparedEffectObservation,
+  commitWork?: CommitWorkBudget,
+  commitEvidence?: CurrentCommitEvidence,
+): void {
+  if (!isCompositeFiber(fiber)) return
+  const id = getFiberId(fiber)
+  const previous = records.get(id)
+  const checkpoint = previous ? { ...previous, causeCounts: { ...previous.causeCounts } } : null
+  try {
+    recordRenderAtomic(fiber, phase, effectPreparation, commitWork, commitEvidence)
+  } catch (error) {
+    if (checkpoint) records.set(id, checkpoint)
+    else records.delete(id)
+    throw error
+  }
+}
+
+function recordRenderAtomic(
+  fiber: Fiber,
+  phase: RenderPhase,
+  effectPreparation?: PreparedEffectObservation,
+  commitWork?: CommitWorkBudget,
+  commitEvidence?: CurrentCommitEvidence,
+): void {
   if (!isCompositeFiber(fiber)) return
 
-  const id = getFiberId(fiber)
-  // Evict on unmount so the map tracks live components and does not grow for the page's lifetime.
+  // Ignore simulated Suspense unmounts; recordPendingUnmounts handles exact lifecycle tombstones.
   if (phase === 'unmount') {
-    records.delete(id)
     return
   }
-
-  let record = records.get(id)
-  if (!record) {
-    record = {
-      id,
-      name: nameOf(fiber),
-      renders: 0,
-      mounts: 0,
-      updates: 0,
-      unnecessary: 0,
-      unstableRenders: 0,
-      forget: hasMemoCache(fiber),
-      selfTime: 0,
-      totalTime: 0,
-      changes: [],
-      latestCommitId: commits,
-      causes: [],
-      causeCounts: emptyCauseCounts(),
-      necessity: 'unknown',
-      fiber,
-    }
-    records.set(id, record)
-  }
-
-  record.fiber = fiber
-  record.renders += 1
+  const id = getFiberId(fiber)
+  const existing = records.get(id)
+  const recordName = existing?.name ?? nameOf(fiber)
+  const forget = existing?.forget ?? hasMemoCache(fiber)
   const timings = getTimings(fiber)
-  record.selfTime = Math.max(record.selfTime, timings.selfTime)
-  record.totalTime = Math.max(record.totalTime, timings.totalTime)
-  record.latestCommitId = commits
+  const instancePreparation = prepareInstanceRender(
+    fiber,
+    phase,
+    commits,
+    getDocumentCommitId(),
+    commitWork,
+  )
+  const instance = instancePreparation.instance
 
   if (phase === 'mount') {
-    record.mounts += 1
+    const inputCoverage = {
+      complete: true,
+      omittedInputs: 0,
+      scanTruncated: false,
+      propsNotEnumerated: false,
+    } as const
+    const eventId = nextCausalEventId('render')
     const causes: RenderCause[] = [{ kind: 'mount', evidence: 'exact' }]
+    const effects: EffectScheduleObservation = effectPreparation?.observation ?? {
+      scheduled: scheduledEffectCount(fiber),
+      complete: true,
+    }
+    const assessment = assessRender(
+      fiber,
+      phase,
+      causes,
+      effects.scheduled,
+      true,
+      commitWork,
+      effects.complete,
+      commitEvidence,
+    )
+    const retained = prepareCauseEventEvidence(causes, assessment, inputCoverage)
+    const record = draftRenderRecord(existing, {
+      id,
+      name: recordName,
+      instance,
+      fiber,
+      forget,
+      timings,
+      commitId: commits,
+      documentCommitId: getDocumentCommitId(),
+    })
+    record.renders += 1
+    record.mounts += 1
     record.causes = causes
     record.necessity = 'necessary'
-    retainCauseEvent(record, causes, record.necessity)
+    record.assessment = assessment
+    record.inputCoverage = inputCoverage
+    publishCauseEvent(record, retained, eventId)
+    instancePreparation.publish()
+    effectPreparation?.publish(instance)
     return
   }
 
-  record.updates += 1
-  const propChanges = diffProps(fiber)
-  const stateChanges = diffStateChanges(fiber)
-  const contextChanges = diffContextChanges(fiber)
-  const externalStoreChanges = diffExternalStoreChanges(fiber)
+  const renderEventId = nextCausalEventId('render')
+  const evidenceBudget = createRenderEvidenceBudget(commitWork)
+  const pendingQuerySubscribers: PendingQuerySubscriberRegistration[] = []
+  const propChanges = diffProps(fiber, evidenceBudget)
+  const stateChanges = diffStateChanges(fiber, evidenceBudget)
+  const contextChanges = diffContextChanges(fiber, evidenceBudget)
+  const externalStoreChanges = diffExternalStoreChanges(
+    fiber,
+    evidenceBudget,
+    { renderEventId, commitId: commits },
+    pendingQuerySubscribers,
+    instance,
+  )
+  const childrenDidChange = childrenChanged(fiber, evidenceBudget)
+  const coverage = inputCoverage(evidenceBudget)
   const stateDidChange = stateChanges.length > 0
-  const childrenDidChange = childrenChanged(fiber)
   const changes: RenderChange[] = [...propChanges, ...stateChanges]
-  record.changes = changes
   const observableCauses: RenderCause[] = [
     ...propChanges.map(
       (change): RenderCause => ({
         kind: 'props',
         evidence: 'exact',
         name: change.name,
+        referenceChanged: change.referenceChanged,
+        referenceOnly: change.referenceOnly,
         unstable: change.unstable,
+        beforePresent: change.beforePresent,
+        afterPresent: change.afterPresent,
+        before: change.before,
+        after: change.after,
+        deepDiff: change.deepDiff,
       }),
     ),
     ...stateChanges.map(
@@ -663,6 +736,7 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
         name: change.name,
         before: change.before,
         after: change.after,
+        deepDiff: change.deepDiff,
         ...('hook' in change ? { hook: change.hook } : {}),
       }),
     ),
@@ -670,20 +744,61 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
     ...contextChanges,
     ...externalStoreChanges,
   ]
-  const parentCause = observableCauses.length === 0 ? renderedParentCause(fiber) : null
+  const parentResult =
+    observableCauses.length === 0
+      ? renderedParentCause(fiber, commitWork, commitEvidence?.renderedFibers)
+      : { cause: null, complete: true }
+  const parentCause = parentResult.cause
+  const causalAnalysisComplete = coverage.complete && parentResult.complete
   const causes: RenderCause[] =
     observableCauses.length > 0
       ? observableCauses
       : parentCause
         ? [parentCause]
-        : [{ kind: 'unknown', evidence: 'unknown', reason: 'no-observable-fiber-input-change' }]
+        : !causalAnalysisComplete
+          ? [{ kind: 'unknown', evidence: 'unknown', reason: 'causal-analysis-incomplete' }]
+          : [{ kind: 'unknown', evidence: 'unknown', reason: 'no-observable-fiber-input-change' }]
   const necessity: RenderNecessity =
-    observableCauses.length > 0 ? 'necessary' : parentCause ? 'unknown' : 'unnecessary'
+    observableCauses.length > 0
+      ? 'necessary'
+      : !causalAnalysisComplete || parentCause
+        ? 'unknown'
+        : 'unnecessary'
+  const effects: EffectScheduleObservation = effectPreparation?.observation ?? {
+    scheduled: scheduledEffectCount(fiber),
+    complete: true,
+  }
+  const assessment = assessRender(
+    fiber,
+    phase,
+    causes,
+    effects.scheduled,
+    causalAnalysisComplete,
+    commitWork,
+    effects.complete,
+    commitEvidence,
+  )
+  const retained = prepareCauseEventEvidence(causes, assessment, coverage)
+  const record = draftRenderRecord(existing, {
+    id,
+    name: recordName,
+    instance,
+    fiber,
+    forget,
+    timings,
+    commitId: commits,
+    documentCommitId: getDocumentCommitId(),
+  })
+  record.renders += 1
+  record.updates += 1
+  record.changes = changes
   record.causes = causes
   record.necessity = necessity
-  retainCauseEvent(record, causes, necessity)
+  record.assessment = assessment
+  record.inputCoverage = coverage
   // A render is unnecessary only when none of props/state/children/context changed — new children or context are legitimate reasons.
   if (
+    coverage.complete &&
     changes.length === 0 &&
     !childrenDidChange &&
     contextChanges.length === 0 &&
@@ -691,148 +806,161 @@ export function recordRender(fiber: Fiber, phase: RenderPhase): void {
   ) {
     record.unnecessary += 1
   }
-  // A render driven solely by unstable-reference props (no state/children change) would be skipped under React.memo + stable refs — the most common wasted render.
+  // Canonical allocation candidate: bounded deep evidence found reference-only props and no other React input cause.
   if (
+    coverage.complete &&
     propChanges.length > 0 &&
-    propChanges.every((change) => change.unstable) &&
+    propChanges.every((change) => change.referenceOnly) &&
     !stateDidChange &&
-    !childrenDidChange
+    !childrenDidChange &&
+    contextChanges.length === 0 &&
+    externalStoreChanges.length === 0
   ) {
+    record.referenceOnlyPropRenders += 1
     record.unstableRenders += 1
   }
-}
-
-export function childrenChanged(fiber: Fiber): boolean {
-  const next: Props | null = fiber.memoizedProps
-  const prev: Props | null = fiber.alternate?.memoizedProps ?? null
-  if (!next || !prev || typeof next !== 'object' || typeof prev !== 'object') return false
-  return !Object.is(prev.children, next.children)
-}
-
-export function diffProps(fiber: Fiber): PropRenderChange[] {
-  const next: Props | null = fiber.memoizedProps
-  const prev: Props | null = fiber.alternate?.memoizedProps ?? null
-  if (!next || !prev || typeof next !== 'object' || typeof prev !== 'object') return []
-
-  const changes: PropRenderChange[] = []
-  for (const key of new Set([...Object.keys(prev), ...Object.keys(next)])) {
-    if (key === 'children') continue
-    if (!Object.is(prev[key], next[key])) {
-      changes.push({ name: key, kind: 'props', unstable: isUnstable(prev[key], next[key]) })
-    }
+  publishCauseEvent(record, retained, renderEventId)
+  instancePreparation.publish()
+  for (const pending of pendingQuerySubscribers) {
+    registerQuerySubscriber(pending.observer, pending.subscriber)
   }
-  return changes
+  effectPreparation?.publish(instance)
+  if (coverage.scanTruncated || coverage.omittedInputs > 0) truncatedInputFibers += 1
+  if (coverage.propsNotEnumerated) propsNotEnumeratedFibers += 1
 }
 
-/** A non-primitive prop whose reference changed is "unstable" — a new value every render that defeats memo. */
-function isUnstable(a: unknown, b: unknown): boolean {
-  if (a == null || b == null) return false
-  const ta = typeof a
-  const tb = typeof b
-  return (ta === 'object' || ta === 'function') && (tb === 'object' || tb === 'function')
+interface PreparedCauseEventEvidence {
+  causes: RenderCause[]
+  assessment: RenderAssessment
+  inputCoverage: RenderInputCoverage
 }
 
-function retainCauseEvent(
-  record: RenderRecord,
+function prepareCauseEventEvidence(
   causes: RenderCause[],
-  necessity: RenderNecessity,
+  assessment: RenderAssessment,
+  coverage: RenderInputCoverage,
+): PreparedCauseEventEvidence {
+  return {
+    causes: structuredClone(causes),
+    assessment: structuredClone(assessment),
+    inputCoverage: { ...coverage },
+  }
+}
+
+function recordPendingUnmounts(rendererId: number, budget?: CommitWorkBudget): void {
+  const retained: { rendererId: number; fiber: Fiber }[] = []
+  for (const pending of pendingUnmounts) {
+    if (!consumeCommitWork(budget, 'pending-unmounts')) {
+      retained.push(pending)
+      continue
+    }
+    if (pending.rendererId !== rendererId) {
+      retained.push(pending)
+      continue
+    }
+    if (!isCompositeFiber(pending.fiber)) continue
+    const instance = noteInstanceRender(
+      pending.fiber,
+      'unmount',
+      commits,
+      getDocumentCommitId(),
+      budget,
+    )
+    removeEffectRecord(pending.fiber)
+    records.delete(instance.fiberId)
+  }
+  pendingUnmounts.length = 0
+  pendingUnmounts.push(...retained)
+}
+
+/** Queue only component lifecycles; host-node unmounts cannot produce cohort tombstones. */
+export function queuePendingUnmount(rendererId: number, fiber: Fiber): void {
+  if (!isCompositeFiber(fiber)) return
+  pendingUnmounts.push({ rendererId, fiber })
+  if (pendingUnmounts.length <= PENDING_UNMOUNT_LIMIT) return
+  pendingUnmounts.shift()
+  droppedPendingUnmountFibers += 1
+}
+
+function discardPendingUnmounts(rendererId: number): void {
+  const retained: { rendererId: number; fiber: Fiber }[] = []
+  for (const pending of pendingUnmounts) {
+    if (pending.rendererId === rendererId) discardExcludedInstanceUnmount(pending.fiber)
+    else retained.push(pending)
+  }
+  pendingUnmounts.length = 0
+  pendingUnmounts.push(...retained)
+}
+
+function publishCauseEvent(
+  record: RenderRecord,
+  retained: PreparedCauseEventEvidence,
+  eventId: string,
 ): void {
-  for (const cause of causes) record.causeCounts[cause.kind] += 1
-  recentCauseEvents.push({
+  for (const cause of retained.causes) record.causeCounts[cause.kind] += 1
+  record.latestRenderEventId = eventId
+  const event: RetainedRenderCauseEvent = {
+    renderEventId: eventId,
+    observationId: getActiveObservation()?.id ?? null,
     commitId: commits,
+    documentCommitId: getDocumentCommitId(),
     componentId: record.id,
     componentName: record.name,
-    causes: structuredClone(causes),
-    necessity,
-  })
-  if (recentCauseEvents.length > RECENT_CAUSE_EVENT_LIMIT) recentCauseEvents.shift()
+    instance: {
+      ...record.instance,
+      parent: record.instance.parent ? { ...record.instance.parent } : null,
+      keyedParent: record.instance.keyedParent ? { ...record.instance.keyedParent } : null,
+    },
+    causes: retained.causes,
+    necessity: record.necessity,
+    assessment: retained.assessment,
+    inputCoverage: retained.inputCoverage,
+  }
+  records.set(record.id, record)
+  recentCauseEvents.push(event)
+  if (recentCauseEvents.length > RECENT_CAUSE_EVENT_LIMIT) {
+    recentCauseEvents.shift()
+    droppedRenderEvents += 1
+  }
 }
 
-function renderedParentCause(fiber: Fiber): RenderCause | null {
-  let parent = fiber.return
-  while (parent && !isCompositeFiber(parent)) parent = parent.return
-  if (!parent) return null
+/** Finalize once after traversal so report coverage names every subsystem the shared guard stopped. */
+export function finalizeCommitAnalysisBudget(budget: CommitAnalysisBudget): void {
+  const exhausted = commitWorkExhaustions(budget.work)
+  if (exhausted.length === 0) return
+  budgetExhaustedCommits += 1
+  for (const subsystem of exhausted) {
+    budgetExhaustedSubsystems.set(subsystem, (budgetExhaustedSubsystems.get(subsystem) ?? 0) + 1)
+  }
+}
+
+function renderedParentCause(
+  fiber: Fiber,
+  budget?: CommitWorkBudget,
+  renderedFibers?: ReadonlySet<Fiber>,
+): { cause: RenderCause | null; complete: boolean } {
   try {
-    if (!didFiberRender(parent)) return null
-  } catch {
-    return null
-  }
-  return {
-    kind: 'parent',
-    evidence: 'inferred',
-    parentId: getFiberId(parent),
-    parentName: nameOf(parent),
-    reason: 'nearest-rendered-ancestor',
-  }
-}
-
-/** Reports changed useState/useReducer slots in one guarded hook-chain pass; derived hook internals are excluded because they cannot schedule a render. */
-export function diffStateChanges(fiber: Fiber): StateRenderChange[] {
-  // Class components store state directly on memoizedState (a fresh object per setState, no hook list) — compare by reference, not by walking a chain that isn't there.
-  if (fiber.tag === ClassComponentTag) {
-    const before = fiber.alternate?.memoizedState ?? null
-    const after = fiber.memoizedState
-    return Object.is(before, after)
-      ? []
-      : [
-          {
-            name: 'class state',
-            kind: 'state',
-            unstable: false,
-            before: stateValue(before),
-            after: stateValue(after),
-          },
-        ]
-  }
-
-  const changes: StateRenderChange[] = []
-  let cur: MemoizedState | null = fiber.memoizedState
-  let alt: MemoizedState | null = fiber.alternate?.memoizedState ?? null
-  let index = 0
-  let stateIndex = 0
-  while (cur && alt && index < HOOK_WALK_LIMIT) {
-    const currentStateful = isStatefulHook(cur)
-    const previousStateful = isStatefulHook(alt)
-    if (currentStateful || previousStateful) {
-      if (!Object.is(cur.memoizedState, alt.memoizedState)) {
-        const classified = classifyHook(currentStateful ? cur : alt)
-        const kind = classified === 'reducer' ? 'reducer' : 'state'
-        changes.push({
-          name: `${kind}[${stateIndex}]`,
-          kind: 'state',
-          unstable: false,
-          hook: { index, stateIndex, kind },
-          before: stateValue(alt.memoizedState),
-          after: stateValue(cur.memoizedState),
-        })
-      }
-      stateIndex += 1
+    let parent = fiber.return
+    while (parent && !isCompositeFiber(parent)) {
+      if (!consumeCommitWork(budget, 'parent-ancestry')) return { cause: null, complete: false }
+      parent = parent.return
     }
-    cur = cur.next
-    alt = alt.next
-    index += 1
+    if (!parent) return { cause: null, complete: true }
+    if (!renderedFibers) return { cause: null, complete: false }
+    if (!consumeCommitWork(budget, 'parent-ancestry')) return { cause: null, complete: false }
+    if (!renderedFibers.has(parent)) return { cause: null, complete: true }
+    return {
+      cause: {
+        kind: 'parent',
+        evidence: 'inferred',
+        parentId: getFiberId(parent),
+        parentName: nameOf(parent),
+        reason: 'nearest-rendered-ancestor',
+      },
+      complete: true,
+    }
+  } catch {
+    analysisFailedFibers += 1
+    return { cause: null, complete: false }
   }
-  return changes
-}
-
-/** Backward-compatible "any hook internals changed" predicate; detailed reports intentionally narrow to stateful hooks. */
-export function stateChanged(fiber: Fiber): boolean {
-  if (fiber.tag === ClassComponentTag) {
-    return !Object.is(fiber.memoizedState, fiber.alternate?.memoizedState ?? null)
-  }
-  let cur: MemoizedState | null = fiber.memoizedState
-  let alt: MemoizedState | null = fiber.alternate?.memoizedState ?? null
-  let guard = 0
-  while (cur && alt && guard < HOOK_WALK_LIMIT) {
-    if (!Object.is(cur.memoizedState, alt.memoizedState)) return true
-    cur = cur.next
-    alt = alt.next
-    guard += 1
-  }
-  return false
-}
-
-/** A consumed context whose value changed is a legitimate reason to re-render (not "unnecessary"). */
-export function contextChanged(fiber: Fiber): boolean {
-  return diffContextChanges(fiber).length > 0
 }

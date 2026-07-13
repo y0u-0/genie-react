@@ -2,6 +2,7 @@ import type { AnyRouter, NavigateOptions, ToOptions } from '@tanstack/react-rout
 import { z } from 'zod'
 import { defineCollector, defineCollectorTool, type GenieCollector } from '../../client'
 import { defineAgentToolContract, dehydrate } from '../../protocol'
+import { registerRouterStore } from '../causal/external-store-registry'
 
 interface RouteEntry {
   id: string
@@ -43,6 +44,7 @@ const routerGetStateContract = defineAgentToolContract({
   group: 'router',
   input: z.object({}),
   output: z.object({
+    routerId: z.string().nullable(),
     pathname: z.string(),
     href: z.string(),
     searchStr: z.string().optional(),
@@ -237,6 +239,10 @@ const routerClearCacheContract = defineAgentToolContract({
 })
 
 export function routerCollector(router: AnyRouter): GenieCollector {
+  const registeredRouter = routerStoreOf(router)
+  const routerId = registeredRouter
+    ? registerRouterStore(registeredRouter, () => router.state).routerId
+    : null
   return defineCollector({
     meta: { id: 'router', title: 'TanStack Router', description: 'Location, matches, navigation' },
     capabilities: ['router'],
@@ -261,6 +267,7 @@ export function routerCollector(router: AnyRouter): GenieCollector {
                 ? 'matched'
                 : 'mismatched'
           return {
+            routerId,
             pathname: location.pathname,
             href: location.href,
             searchStr: location.searchStr,
@@ -388,6 +395,11 @@ export function routerCollector(router: AnyRouter): GenieCollector {
       }),
     ],
   })
+}
+
+function routerStoreOf(router: AnyRouter): object | null {
+  const stores = (router as unknown as { stores?: { __store?: unknown } }).stores
+  return typeof stores?.__store === 'object' && stores.__store !== null ? stores.__store : null
 }
 
 interface ComparableLocation {

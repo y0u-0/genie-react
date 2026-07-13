@@ -61,6 +61,11 @@ describe('render provenance against a live React tree', () => {
         hook: { index: 0, stateIndex: 0, kind: 'state' },
         before: false,
         after: true,
+        deepDiff: {
+          changes: [{ kind: 'value', path: '', before: false, after: true }],
+          visited: 1,
+          truncated: false,
+        },
       },
       {
         name: 'reducer[1]',
@@ -69,6 +74,11 @@ describe('render provenance against a live React tree', () => {
         hook: { index: 2, stateIndex: 1, kind: 'reducer' },
         before: 0,
         after: 1,
+        deepDiff: {
+          changes: [{ kind: 'value', path: '', before: 0, after: 1 }],
+          visited: 1,
+          truncated: false,
+        },
       },
     ])
   })

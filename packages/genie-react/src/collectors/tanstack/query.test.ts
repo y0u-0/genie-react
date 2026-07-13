@@ -1,6 +1,12 @@
-import { QueryClient } from '@tanstack/react-query'
-import { describe, expect, it } from 'vitest'
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
+import { beforeEach, describe, expect, it } from 'vitest'
 import type { CollectorContext, GenieCollector } from '../../client'
+import {
+  isRegisteredQueryObserver,
+  registerQuerySubscriber,
+  resetExternalStoreRegistryForTests,
+  setExternalStoreObservation,
+} from '../causal/external-store-registry'
 import { queryCollector } from './query'
 
 const ctx: CollectorContext = {
@@ -16,7 +22,31 @@ function call<T = unknown>(collector: GenieCollector, name: string, args: unknow
   return tool.handler(args as never, ctx) as Promise<T> | T
 }
 
+beforeEach(() => resetExternalStoreRegistryForTests())
+
 describe('queryCollector', () => {
+  it('registers existing and newly subscribed observers when the collector starts', () => {
+    const client = new QueryClient()
+    client.setQueryData(['existing'], 'ready')
+    const existing = new QueryObserver(client, { queryKey: ['existing'] })
+    const unsubscribeExisting = existing.subscribe(() => {})
+    const collector = queryCollector(client)
+
+    expect(isRegisteredQueryObserver(existing)).toBe(false)
+    const stop = collector.start?.(ctx)
+    expect(isRegisteredQueryObserver(existing)).toBe(true)
+
+    client.setQueryData(['late'], 'ready')
+    const late = new QueryObserver(client, { queryKey: ['late'] })
+    expect(isRegisteredQueryObserver(late)).toBe(false)
+    const unsubscribeLate = late.subscribe(() => {})
+    expect(isRegisteredQueryObserver(late)).toBe(true)
+
+    unsubscribeLate()
+    unsubscribeExisting()
+    stop?.()
+  })
+
   it('query_list reports every cache entry with status and counts', async () => {
     const client = new QueryClient()
     client.setQueryData(['todos'], [{ id: 1 }])
@@ -51,6 +81,100 @@ describe('queryCollector', () => {
     expect(result.queryHash).toBe(queryHash)
     expect(result.status).toBe('success')
     expect(result.data).toEqual({ name: 'Ada', roles: ['admin'] })
+  })
+
+  it('query_get exposes observer policy and temporal component subscriber evidence', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['todos'], [{ id: 1 }])
+    const observer = new QueryObserver(client, {
+      queryKey: ['todos'],
+      queryFn: async () => [{ id: 1 }],
+      notifyOnChangeProps: ['data'],
+      select: (rows) => rows.length,
+    })
+    const unsubscribe = observer.subscribe(() => {})
+    setExternalStoreObservation({ id: 'observation:1' })
+    registerQuerySubscriber(observer, {
+      subscriberId: 'subscriber:mount:1:0',
+      componentId: 7,
+      componentName: 'TodoCount',
+      mountId: 'mount:1',
+      hookIndex: 3,
+      externalStoreIndex: 0,
+      observationId: 'observation:1',
+      documentCommitId: 7,
+      renderEventId: 'render:7:3',
+      commitId: 3,
+    })
+    const collector = queryCollector(client)
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+
+    const result = (await call(collector, 'query_get', { queryHash, depth: 3 })) as {
+      observers: Array<Record<string, unknown>>
+    }
+    expect(result.observers).toMatchObject([
+      {
+        notificationPolicy: {
+          mode: 'fields',
+          fields: ['data'],
+          trackedFieldsAvailable: true,
+        },
+        deliveryEvidence: 'policy-explicit',
+        hasSelect: true,
+        subscriberObservationStatus: 'current-observation',
+        subscriber: {
+          subscriberId: 'subscriber:mount:1:0',
+          componentId: 7,
+          componentName: 'TodoCount',
+          observationId: 'observation:1',
+          documentCommitId: 7,
+          renderEventId: 'render:7:3',
+          commitId: 3,
+        },
+      },
+    ])
+
+    setExternalStoreObservation({ id: 'observation:2' })
+    const afterClear = (await call(collector, 'query_get', { queryHash, depth: 3 })) as {
+      observers: Array<Record<string, unknown>>
+    }
+    expect(afterClear.observers).toMatchObject([
+      {
+        subscriberObservationStatus: 'previous-observation',
+        subscriber: {
+          observationId: 'observation:1',
+          documentCommitId: 7,
+        },
+      },
+    ])
+    unsubscribe()
+  })
+
+  it('query_get bounds observer detail and reports omissions', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['shared'], 'ready')
+    const observers = Array.from(
+      { length: 103 },
+      () =>
+        new QueryObserver(client, {
+          queryKey: ['shared'],
+          queryFn: async () => 'ready',
+        }),
+    )
+    const unsubscribes = observers.map((observer) => observer.subscribe(() => {}))
+    const collector = queryCollector(client)
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+
+    const result = (await call(collector, 'query_get', { queryHash, depth: 3 })) as {
+      observerCount: number
+      observersOmitted: number
+      observers: unknown[]
+    }
+
+    expect(result.observerCount).toBe(103)
+    expect(result.observers).toHaveLength(100)
+    expect(result.observersOmitted).toBe(3)
+    for (const unsubscribe of unsubscribes) unsubscribe()
   })
 
   it('query_get throws for an unknown queryHash', () => {

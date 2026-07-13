@@ -1,10 +1,10 @@
 import { type Fiber, FunctionComponentTag } from 'bippy'
 import { describe, expect, it, vi } from 'vitest'
 
-// Per-fiber __source so matches classify app vs library, mirroring source.test.ts.
-const getSource = vi.fn(async (fiber: { __source?: unknown }) => fiber.__source ?? null)
+// Per-fiber _debugSource so matches classify app vs library, mirroring source.test.ts.
+const getSource = vi.fn(async (fiber: { _debugSource?: unknown }) => fiber._debugSource ?? null)
 vi.mock('bippy/source', () => ({
-  getSource: (fiber: { __source?: unknown }) => getSource(fiber),
+  getSource: (fiber: { _debugSource?: unknown }) => getSource(fiber),
   isSourceFile: (file: string) => !file.includes('/node_modules/'),
   normalizeFileName: (file: string) => file,
   getFiberHooks: () => [],
@@ -48,13 +48,13 @@ describe('matchDetail', () => {
 describe('findByName enrichment flow', () => {
   // root → App (/src) → Modal (/src) and a library Tooltip (node_modules).
   const buildTree = (): Fiber => {
-    const tooltip = component('Tooltip', { __source: at('/node_modules/.vite/deps/ui.js') })
+    const tooltip = component('Tooltip', { _debugSource: at('/node_modules/.vite/deps/ui.js') })
     const modal = component('Modal', {
-      __source: at('/src/Modal.tsx'),
+      _debugSource: at('/src/Modal.tsx'),
       memoizedProps: { open: true },
       sibling: tooltip,
     })
-    const app = component('App', { __source: at('/src/App.tsx'), child: modal })
+    const app = component('App', { _debugSource: at('/src/App.tsx'), child: modal })
     const root = asFiber({ tag: FunctionComponentTag, type: (): null => null, child: app })
     Object.assign(app, { return: root })
     Object.assign(modal, { return: app })

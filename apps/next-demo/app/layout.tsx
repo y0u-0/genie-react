@@ -1,6 +1,7 @@
 import { GenieScript } from 'genie-react/next'
 import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
+import { GenieManual } from './genie-manual'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -13,6 +14,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body>
         <GenieScript />
+        <GenieManual />
         {children}
         <footer>Genie demo — Next.js App Router</footer>
       </body>

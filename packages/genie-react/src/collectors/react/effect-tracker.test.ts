@@ -1,19 +1,37 @@
 import type { Effect, Fiber, RenderPhase } from 'bippy'
+import type { HooksNode } from 'bippy/source'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { clearEffects, getEffectAuditReport, recordEffect } from './effect-tracker'
+import { getEffectScheduleEvents } from './effect-events'
+import {
+  clearEffects,
+  getEffectAuditReport,
+  getEffectTrackingCoverage,
+  prepareEffect,
+  recordEffect,
+  removeEffectRecord,
+} from './effect-tracker'
 import { clearSourceCache } from './source'
 
+const getRetainedHookTree = (fiber: Fiber): HooksNode[] | null => {
+  try {
+    return inspector.getFiberHooks(fiber)
+  } catch {
+    return null
+  }
+}
+
+const getEffectAuditReportWithHooks = (query: Parameters<typeof getEffectAuditReport>[0]) =>
+  getEffectAuditReport({ ...query, getRetainedHookTree })
+
 const getEffectAudit = async (query: Parameters<typeof getEffectAuditReport>[0]) =>
-  (await getEffectAuditReport(query)).components
+  (await getEffectAuditReportWithHooks(query)).components
 
 // Fake fibers have no _debugStack: stub source lookup to null so everything classifies as app and survives appOnly; per-test getFiberHooks trees drive per-effect attribution.
 const inspector = vi.hoisted(() => ({
-  getSource: vi.fn<(fiber: unknown) => Promise<unknown>>(async () => null),
-  getFiberHooks: vi.fn<(fiber: unknown) => unknown[]>(() => []),
+  getFiberHooks: vi.fn<(fiber: unknown) => HooksNode[]>(() => []),
   symbolicateStack: vi.fn<(frames: unknown[]) => Promise<unknown[]>>(async (frames) => frames),
 }))
 vi.mock('bippy/source', () => ({
-  getSource: inspector.getSource,
   isSourceFile: (file: string) => !file.includes('/node_modules/'),
   normalizeFileName: (file: string) => file,
   getFiberHooks: inspector.getFiberHooks,
@@ -25,9 +43,12 @@ const hookNode = (
   name: string,
   fileName: string | null,
   line: number | null,
-  subHooks: unknown[] = [],
-) => ({
+  subHooks: HooksNode[] = [],
+): HooksNode => ({
+  id: null,
+  isStateEditable: false,
   name,
+  value: null,
   subHooks,
   hookSource: fileName ? { fileName, lineNumber: line, columnNumber: 0, functionName: null } : null,
 })
@@ -70,20 +91,27 @@ function effectList(specs: EffectSpec[]): Effect | null {
 }
 
 // One fiber whose identity (hence bippy id) is stable across commits; the effect list and alternate are mutated per commit, as React reuses fibers.
-function makeComponent(name: string) {
+function makeComponent(
+  name: string,
+  source?: { fileName: string; lineNumber: number; columnNumber: number },
+) {
   const type = (): null => null
   Object.assign(type, { displayName: name })
-  const fiber = { tag: 0, type, updateQueue: { lastEffect: null }, alternate: null } as Record<
-    string,
-    unknown
-  >
+  const fiber = {
+    tag: 0,
+    type,
+    updateQueue: { lastEffect: null },
+    alternate: null,
+    _debugSource: source,
+  } as Record<string, unknown>
   return {
+    fiber: asFiber(fiber),
     commit(phase: RenderPhase, effects: EffectSpec[], prevEffects?: EffectSpec[]) {
       fiber.updateQueue = { lastEffect: effectList(effects) }
       fiber.alternate = prevEffects
         ? { updateQueue: { lastEffect: effectList(prevEffects) } }
         : null
-      recordEffect(asFiber(fiber), phase)
+      return recordEffect(asFiber(fiber), phase)
     },
   }
 }
@@ -98,7 +126,6 @@ beforeAll(() => {
 beforeEach(() => {
   clearEffects()
   clearSourceCache()
-  inspector.getSource.mockReset().mockResolvedValue(null)
   // Default: the inspector throws → resolveEffectSources returns null → effects stay unattributed and unfiltered; per-effect tests override getFiberHooks.
   inspector.getFiberHooks.mockReset().mockImplementation(() => {
     throw new Error('inspector unavailable in test')
@@ -110,6 +137,40 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('recordEffect dependency-mode classification', () => {
+  it('keeps simulated traversal unmounts but removes exact DevTools unmounts', async () => {
+    const component = makeComponent('UnmountedEffect')
+    component.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: [] }])
+
+    component.commit('unmount', [])
+    expect((await getEffectAudit({ limit: 50 })).map((record) => record.name)).toContain(
+      'UnmountedEffect',
+    )
+
+    removeEffectRecord(component.fiber)
+    expect((await getEffectAudit({ limit: 50 })).map((record) => record.name)).not.toContain(
+      'UnmountedEffect',
+    )
+  })
+
+  it('keeps prepared effect stats and events private until publication', async () => {
+    const component = makeComponent('AtomicEffect')
+    Object.assign(component.fiber, {
+      updateQueue: { lastEffect: effectList([{ tag: PASSIVE | HAS_EFFECT, deps: [] }]) },
+    })
+
+    const prepared = prepareEffect(component.fiber, 'mount', 1)
+    expect(await getEffectAudit({ limit: 50 })).toEqual([])
+    expect(getEffectScheduleEvents({ limit: 10 }).events).toEqual([])
+
+    prepared.publish()
+    expect((await getEffectAudit({ limit: 50 })).map((record) => record.name)).toContain(
+      'AtomicEffect',
+    )
+    expect(getEffectScheduleEvents({ limit: 10 }).events).toMatchObject([
+      { componentName: 'AtomicEffect', event: 'scheduled' },
+    ])
+  })
+
   it('flags a no-deps effect that runs after every render', async () => {
     const c = makeComponent('NoDeps')
     c.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: null }])
@@ -131,6 +192,8 @@ describe('recordEffect dependency-mode classification', () => {
 
     const eff = (await byName()).get('NoDeps')?.effects[0]
     expect(eff?.depsMode).toBe('none')
+    expect(eff?.scheduled).toBe(3)
+    expect(eff?.schedulesEveryUpdate).toBe(true)
     expect(eff?.fired).toBe(3)
     expect(eff?.updates).toBe(3)
     expect(eff?.firesEveryUpdate).toBe(true)
@@ -138,6 +201,7 @@ describe('recordEffect dependency-mode classification', () => {
       label: 'hot',
       samples: 3,
       observedRate: 1,
+      scheduleReason: 'meets-threshold',
       reason: 'meets-threshold',
     })
     expect(eff?.hotness.confidenceInterval).toMatchObject({ level: 0.95, upper: 1 })
@@ -159,6 +223,7 @@ describe('recordEffect dependency-mode classification', () => {
       label: 'insufficient-data',
       samples: 1,
       minUpdates: 3,
+      scheduleReason: 'below-minimum-updates',
       reason: 'below-minimum-updates',
     })
     expect(defaultFinding?.note).toBeUndefined()
@@ -168,7 +233,7 @@ describe('recordEffect dependency-mode classification', () => {
     expect(lowered[0]?.effects[0]?.hotness.label).toBe('hot')
   })
 
-  it('uses the requested fire-rate threshold and reports the observed rate', async () => {
+  it('uses the requested schedule-rate threshold and keeps the legacy reason explicit', async () => {
     const c = makeComponent('TwoOfThree')
     c.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: [0] }])
     c.commit(
@@ -183,17 +248,20 @@ describe('recordEffect dependency-mode classification', () => {
     expect(defaultFinding?.hotness).toMatchObject({
       label: 'not-hot',
       observedRate: 0.6667,
+      minScheduleRate: 1,
       minFireRate: 1,
+      scheduleReason: 'below-schedule-rate',
       reason: 'below-fire-rate',
     })
 
     const lowered = await getEffectAudit({
       limit: 50,
       onlyHot: true,
-      minFireRate: 0.6,
+      minScheduleRate: 0.6,
     })
     expect(lowered[0]?.effects[0]?.hotness).toMatchObject({
       label: 'hot',
+      minScheduleRate: 0.6,
       minFireRate: 0.6,
     })
   })
@@ -260,6 +328,7 @@ describe('recordEffect kind + cleanup', () => {
     makeComponent('Layout').commit('mount', [{ tag: LAYOUT | HAS_EFFECT, deps: [], cleanup: true }])
     const eff = (await byName()).get('Layout')?.effects[0]
     expect(eff?.kind).toBe('layout')
+    expect(eff?.cleanupFunctionObserved).toBe(true)
     expect(eff?.hasCleanup).toBe(true)
   })
 
@@ -277,7 +346,7 @@ describe('recordEffect kind + cleanup', () => {
 })
 
 describe('recordEffect tracking lifecycle', () => {
-  it('ignores non-function-component fibers and evicts on unmount', async () => {
+  it('ignores non-function fibers and waits for an exact unmount before eviction', async () => {
     recordEffect(
       asFiber({ tag: 5, updateQueue: { lastEffect: effectList([{ tag: PASSIVE, deps: null }]) } }),
       'update',
@@ -286,6 +355,8 @@ describe('recordEffect tracking lifecycle', () => {
     gone.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: null }])
     expect((await byName()).get('Gone')).toBeDefined()
     gone.commit('unmount', [{ tag: PASSIVE | HAS_EFFECT, deps: null }])
+    expect((await byName()).get('Gone')).toBeDefined()
+    removeEffectRecord(gone.fiber)
     expect(await getEffectAudit({ limit: 50 })).toEqual([])
   })
 
@@ -317,6 +388,37 @@ describe('recordEffect tracking lifecycle', () => {
       'Loopy',
     ])
   })
+
+  it('bounds one component effect list and exposes incomplete tracking coverage', async () => {
+    const effects = Array.from({ length: 101 }, () => ({
+      tag: PASSIVE | HAS_EFFECT,
+      deps: [] as unknown[],
+    }))
+    const observation = makeComponent('ManyEffects').commit('mount', effects)
+
+    expect(observation).toEqual({ scheduled: 100, complete: false })
+    expect(getEffectTrackingCoverage().truncatedEffectLists).toBe(1)
+    expect((await byName()).get('ManyEffects')?.effects).toHaveLength(100)
+  })
+
+  it('caps total effect findings and reports the omitted total', async () => {
+    const effects = Array.from({ length: 100 }, () => ({
+      tag: PASSIVE | HAS_EFFECT,
+      deps: [] as unknown[],
+    }))
+    for (let index = 0; index < 6; index += 1) {
+      makeComponent(`EffectGroup${index}`).commit('mount', effects)
+    }
+
+    const report = await getEffectAuditReportWithHooks({ limit: 50, appOnly: false })
+    expect(report.components.reduce((sum, component) => sum + component.effects.length, 0)).toBe(
+      500,
+    )
+    expect(report.effectsOmittedByLimit).toBe(100)
+    expect(report.components.reduce((sum, component) => sum + component.effectsOmitted, 0)).toBe(
+      100,
+    )
+  })
 })
 
 describe('per-effect source attribution', () => {
@@ -328,6 +430,25 @@ describe('per-effect source attribution', () => {
       hookNode('Effect', '/node_modules/@tanstack/react-query/build/index.js', 42),
     ]),
   ]
+
+  it('keeps automatic provenance unknown without invoking a hook inspector', async () => {
+    inspector.getFiberHooks.mockReturnValue(tree())
+    makeComponent('AutomaticSafe').commit('mount', [
+      { tag: PASSIVE | HAS_EFFECT, deps: null },
+      { tag: PASSIVE | HAS_EFFECT, deps: [] },
+    ])
+
+    const record = (await getEffectAuditReport({ limit: 50, appOnly: false })).components.find(
+      (entry) => entry.name === 'AutomaticSafe',
+    )
+
+    expect(record?.effects).toHaveLength(2)
+    expect(record?.effects.every((effect) => effect.provenance.ownership === 'unknown')).toBe(true)
+    expect(
+      record?.effects.every((effect) => effect.provenance.reason === 'shadow-render-disabled'),
+    ).toBe(true)
+    expect(inspector.getFiberHooks).not.toHaveBeenCalled()
+  })
 
   it('attributes each effect to its own call-site when the inspector and effect list line up', async () => {
     inspector.getFiberHooks.mockReturnValue(tree())
@@ -347,6 +468,7 @@ describe('per-effect source attribution', () => {
       evidence: 'exact',
       reason: 'exact-hook-order',
       packageName: null,
+      hookAncestry: [],
     })
     expect(rec?.effects[1]?.source?.file).toContain('@tanstack/react-query')
     expect(rec?.effects[1]?.isLibrary).toBe(true)
@@ -354,9 +476,17 @@ describe('per-effect source attribution', () => {
       ownership: 'library',
       evidence: 'exact',
       packageName: '@tanstack/react-query',
+      hookAncestry: [
+        {
+          name: 'Translation',
+          source: { file: '/src/tree-search.tsx', line: 24 },
+          ownership: 'app',
+          packageName: null,
+        },
+      ],
     })
 
-    const packageReport = await getEffectAuditReport({
+    const packageReport = await getEffectAuditReportWithHooks({
       limit: 50,
       appOnly: false,
       packageName: '@tanstack/react-query',
@@ -388,14 +518,12 @@ describe('per-effect source attribution', () => {
   })
 
   it('keeps an exact app effect when the component source only resolves to a library chunk', async () => {
-    inspector.getSource.mockResolvedValue({
+    const component = makeComponent('MappedEffectDemo', {
       fileName: '/node_modules/opaque-server-chunk.js',
       lineNumber: 10,
       columnNumber: 0,
-      functionName: 'EffectDemo',
     })
     inspector.getFiberHooks.mockReturnValue([hookNode('Effect', '/src/effect-demo.tsx', 11)])
-    const component = makeComponent('MappedEffectDemo')
     component.commit('mount', [{ tag: PASSIVE | HAS_EFFECT, deps: [] }])
 
     const record = (await getEffectAudit({ limit: 50 })).find(
@@ -425,6 +553,7 @@ describe('per-effect source attribution', () => {
     expect(rec?.effects.every((e) => e.isLibrary === false)).toBe(true)
     expect(rec?.effects.every((e) => e.provenance.ownership === 'unknown')).toBe(true)
     expect(rec?.effects.every((e) => e.provenance.reason === 'hook-count-mismatch')).toBe(true)
+    expect(rec?.effects.every((e) => e.provenance.hookAncestry.length === 0)).toBe(true)
   })
 
   it('falls back to no per-effect source when the inspector throws', async () => {

@@ -344,7 +344,47 @@ export function summarizeQueryGet(result: unknown): string | null {
   const lines = [parts.join(' · ')]
   if ('data' in result) lines.push(`  data: ${recordPreview(result.data)}`)
   if (typeof result.error === 'string') lines.push(`  error: ${result.error}`)
+  if (Array.isArray(result.observers)) {
+    const observers = result.observers.filter(isRecord)
+    for (const observer of observers.slice(0, 5)) lines.push(summarizeQueryObserver(observer))
+    const omitted = Math.max(0, num(result.observerCount) - Math.min(observers.length, 5))
+    if (omitted > 0) lines.push(`  +${omitted} observers omitted`)
+  }
   return lines.join('\n')
+}
+
+function summarizeQueryObserver(observer: Record<string, unknown>): string {
+  const parts = [`  observer ${String(observer.observerId)}`, String(observer.identityStatus)]
+  if (isRecord(observer.notificationPolicy)) {
+    const policy = observer.notificationPolicy
+    parts.push(String(policy.mode).replaceAll('-', ' '))
+    if (Array.isArray(policy.fields)) {
+      const fields = policy.fields.filter((field): field is string => typeof field === 'string')
+      if (fields.length > 0) parts.push(`fields ${fields.slice(0, 5).join(',')}`)
+    }
+  }
+  if (observer.deliveryEvidence === 'unavailable-private-tracking')
+    parts.push('delivery unavailable (private tracking)')
+  else if (observer.deliveryEvidence === 'policy-explicit') parts.push('delivery policy explicit')
+  const subscriberStatus = subscriberObservationLabel(observer.subscriberObservationStatus)
+  if (subscriberStatus) parts.push(subscriberStatus)
+  else if (isRecord(observer.subscriber)) parts.push('subscriber freshness unknown')
+  if (isRecord(observer.subscriber)) {
+    const subscriber = observer.subscriber
+    parts.push(
+      `subscriber ${String(subscriber.componentName)} #${num(subscriber.componentId)} hook[${num(subscriber.hookIndex)}]`,
+    )
+    if (typeof subscriber.subscriberId === 'string') parts.push(subscriber.subscriberId)
+  }
+  return parts.join(' · ')
+}
+
+function subscriberObservationLabel(value: unknown): string | null {
+  if (value === 'current-observation') return 'subscriber current observation'
+  if (value === 'previous-observation') return '! subscriber previous observation'
+  if (value === 'no-active-observation') return 'subscriber before measurement window'
+  if (value === 'not-observed') return 'subscriber not observed'
+  return null
 }
 
 export function summarizeRouterState(result: unknown): string | null {
@@ -707,9 +747,9 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
     if (!opts.json) {
       err(`bridge: ${url}`)
       err(
-        `run from any dir: genie-react --url ${shellQuote(url)} call react_get_renders '{"sort":"unnecessary"}'`,
+        `run from any dir: genie-react --url ${shellQuote(url)} call react_get_renders '{"sort":"selfTime"}'`,
       )
-      if (sessions.length > 1)
+      if (sessions.length > 1 && resolveSession(opts.session) === undefined)
         err(
           `${sessions.length} sessions connected — calls hit the most recent; target one with --session <id>`,
         )
@@ -744,10 +784,14 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
           })),
         }
       : { schemaVersion: CLI_OUTPUT_SCHEMA_VERSION, ...status }
+    const targetSessionId =
+      resolveSession(opts.session) === undefined ? undefined : (status.sessionId ?? undefined)
     out(
       opts.sessionsOnly && !opts.json
-        ? summarizeSessionsOnly(result)
-        : renderResult('devtools_status', result, opts.json),
+        ? summarizeSessionsOnly(result, { targetSessionId })
+        : !opts.json && targetSessionId
+          ? (summarizeStatus(result, { targetSessionId }) ?? prettyJson(result))
+          : renderResult('devtools_status', result, opts.json),
     )
     return 0
   } catch (error) {
@@ -810,7 +854,10 @@ export async function runTools(
           return 0
         }
         case 'unknown':
-          err(selection.message)
+          emitFailure(opts, 'invalid_input', selection.message, {
+            userActionRequired: true,
+            next: { command: 'genie-react tools', argv: ['genie-react', 'tools'] },
+          })
           return 1
       }
     }

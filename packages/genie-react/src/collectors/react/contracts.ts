@@ -1,8 +1,18 @@
 import { z } from 'zod'
 import { defineAgentToolContract } from '../../protocol'
 import { sourceSchema } from './contract-schemas'
+import { observationSchema, renderCoverageSchema } from './render-contract'
 
-export { reactEffectAuditContract } from './effect-contract'
+export { reactEffectAuditContract, reactEffectEventsContract } from './effect-contract'
+export {
+  instanceDescriptorSchema,
+  observationSchema,
+  reactClearRendersContract,
+  reactComponentCohortContract,
+  reactGetRendersContract,
+  reactRenderCausesContract,
+  renderCauseSchema,
+} from './render-contract'
 
 /** A fiber's stable id (bippy `getFiberId`), branded against the collector's other numbers; erases to a plain number at runtime, so it serializes unchanged. */
 const nodeIdSchema = z.number().int().brand<'ReactNodeId'>()
@@ -422,232 +432,6 @@ export const reactResetOverridesContract = defineAgentToolContract({
   annotations: { destructiveHint: true, idempotentHint: true },
 })
 
-const renderPropChangeSchema = z.object({
-  name: z.string(),
-  kind: z.literal('props'),
-  unstable: z.boolean(),
-})
-
-const renderStateChangeBase = z.object({
-  name: z.string(),
-  kind: z.literal('state'),
-  unstable: z.literal(false),
-  before: z.unknown().describe('Depth- and size-bounded value before this commit.'),
-  after: z.unknown().describe('Depth- and size-bounded value after this commit.'),
-})
-
-const renderHookStateChangeSchema = renderStateChangeBase.extend({
-  hook: z.object({
-    index: z.number().int().describe("Flat position in the component's complete hook chain."),
-    stateIndex: z
-      .number()
-      .int()
-      .describe('Position among useState/useReducer hooks; accepted by react_override_hook_state.'),
-    kind: z.enum(['state', 'reducer']),
-  }),
-})
-
-const renderClassStateChangeSchema = renderStateChangeBase.extend({
-  name: z.literal('class state'),
-})
-
-const renderExternalStoreCauseBase = z.object({
-  hookIndex: z.number().int().nonnegative(),
-  before: z.unknown().describe('Depth- and size-bounded selected snapshot before this commit.'),
-  after: z.unknown().describe('Depth- and size-bounded selected snapshot after this commit.'),
-  changedFields: z
-    .array(z.string())
-    .describe('Shallow selected-snapshot fields that changed; "$value" means a scalar changed.'),
-})
-
-export const renderCauseSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('mount'), evidence: z.literal('exact') }),
-  z.object({
-    kind: z.literal('props'),
-    evidence: z.literal('exact'),
-    name: z.string(),
-    unstable: z.boolean(),
-  }),
-  z.object({
-    kind: z.literal('state'),
-    evidence: z.literal('exact'),
-    name: z.string(),
-    before: z.unknown(),
-    after: z.unknown(),
-    hook: renderHookStateChangeSchema.shape.hook.optional(),
-  }),
-  z.object({ kind: z.literal('children'), evidence: z.literal('exact') }),
-  z.object({
-    kind: z.literal('context'),
-    evidence: z.literal('exact'),
-    contextIndex: z.number().int().nonnegative(),
-    name: z.string(),
-    before: z.unknown(),
-    after: z.unknown(),
-  }),
-  renderExternalStoreCauseBase.extend({
-    kind: z.literal('external-store'),
-    evidence: z.literal('exact'),
-    reason: z.literal('sync-external-store-snapshot-changed'),
-  }),
-  renderExternalStoreCauseBase.extend({
-    kind: z.literal('query'),
-    evidence: z.literal('inferred'),
-    reason: z.literal('query-result-shape'),
-    queryHash: z.string().optional(),
-  }),
-  renderExternalStoreCauseBase.extend({
-    kind: z.literal('router'),
-    evidence: z.literal('inferred'),
-    reason: z.literal('router-state-shape'),
-  }),
-  z.object({
-    kind: z.literal('parent'),
-    evidence: z.literal('inferred'),
-    parentId: z.number().int(),
-    parentName: z.string(),
-    reason: z.literal('nearest-rendered-ancestor'),
-  }),
-  z.object({
-    kind: z.literal('unknown'),
-    evidence: z.literal('unknown'),
-    reason: z.literal('no-observable-fiber-input-change'),
-  }),
-])
-
-const renderNecessitySchema = z.enum(['necessary', 'unnecessary', 'unknown'])
-
-const renderCauseCountsSchema = z.object({
-  mount: z.number().int().nonnegative(),
-  props: z.number().int().nonnegative(),
-  state: z.number().int().nonnegative(),
-  children: z.number().int().nonnegative(),
-  context: z.number().int().nonnegative(),
-  'external-store': z.number().int().nonnegative(),
-  query: z.number().int().nonnegative(),
-  router: z.number().int().nonnegative(),
-  parent: z.number().int().nonnegative(),
-  unknown: z.number().int().nonnegative(),
-})
-
-const renderComponentSchema = z.object({
-  id: z.number(),
-  name: z.string(),
-  renders: z.number(),
-  mounts: z.number(),
-  updates: z.number(),
-  unnecessary: z.number(),
-  unstableRenders: z
-    .number()
-    .describe(
-      'Updates whose only changes were unstable-reference props (no state/children change) — wasted renders that React.memo + stable refs would skip.',
-    ),
-  forget: z.boolean(),
-  selfTime: z.number(),
-  totalTime: z.number(),
-  changes: z.array(
-    z.union([renderPropChangeSchema, renderHookStateChangeSchema, renderClassStateChangeSchema]),
-  ),
-  latestCommitId: z.number().int().nonnegative(),
-  causes: z
-    .array(renderCauseSchema)
-    .describe("Evidence-backed causes for this component's latest observed render."),
-  causeCounts: renderCauseCountsSchema.describe('Cause observations across the current profile.'),
-  necessity: renderNecessitySchema.describe(
-    'necessary when an observable input changed; unnecessary preserves the legacy no-change heuristic; unknown when only parent/unknown evidence exists.',
-  ),
-  source: sourceSchema,
-  isLibrary: z.boolean(),
-})
-
-const renderSummarySchema = z.object({
-  commits: z.number(),
-  trackedComponents: z.number(),
-  totalRenders: z.number(),
-  totalUpdates: z.number(),
-  unstableComponents: z.number().describe('Components with at least one unstable-prop render.'),
-  unnecessaryComponents: z
-    .number()
-    .describe('Components with at least one fully-unnecessary render.'),
-  topUnstableProps: z.array(z.object({ name: z.string(), count: z.number() })),
-})
-
-export const reactGetRendersContract = defineAgentToolContract({
-  name: 'react_get_renders',
-  title: 'Render report (why-did-render)',
-  description:
-    'Report which components re-rendered, how often, and WHY — changed prop names, exact useState/useReducer slots with bounded before/after values, unstable-reference flags (a new object/function each render that defeats memo), unnecessary renders, React Compiler ("forget") status, and self/total render time. Interact with the app first (or react_clear_renders to reset), then read this.',
-  group: 'react.render',
-  input: z.object({
-    component: z.string().optional().describe('Only components whose name contains this string.'),
-    sort: z.enum(['renders', 'unnecessary', 'unstable', 'selfTime']).default('renders'),
-    limit: z.number().int().min(1).max(200).default(40),
-    appOnly: z
-      .boolean()
-      .default(true)
-      .describe(
-        'Exclude library components (node_modules, incl. Vite pre-bundled deps like Base UI / cmdk / devtools). Default true so your own components surface above library noise; set false to include them.',
-      ),
-  }),
-  output: z.object({
-    tracking: z.boolean(),
-    commits: z.number(),
-    summary: renderSummarySchema,
-    components: z.array(renderComponentSchema),
-    filteredNote: z
-      .string()
-      .optional()
-      .describe(
-        'Present only when appOnly hid library components; names how many and how to include them.',
-      ),
-  }),
-  annotations: { readOnlyHint: true },
-})
-
-const renderCauseEventSchema = z.object({
-  commitId: z.number().int().nonnegative(),
-  componentId: z.number().int(),
-  componentName: z.string(),
-  causes: z.array(renderCauseSchema),
-  necessity: renderNecessitySchema,
-  source: sourceSchema,
-  isLibrary: z.boolean(),
-})
-
-export const reactRenderCausesContract = defineAgentToolContract({
-  name: 'react_render_causes',
-  title: 'Recent causal render events',
-  description:
-    'Report bounded recent component renders with their React commit ID and evidence-backed cause: props, state, children, Context, useSyncExternalStore snapshot, Query-shaped or Router-shaped external snapshots, nearest rendered parent, or explicit unknown. Each cause says whether its evidence is exact, inferred, or unknown. Use after react_clear_renders plus one exact interaction. commit and afterCommit are mutually exclusive.',
-  group: 'react.render',
-  input: z
-    .object({
-      commit: z.number().int().nonnegative().optional().describe('Only this exact React commit.'),
-      afterCommit: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe('Only events after this React commit ID; cannot be combined with commit.'),
-      component: z
-        .string()
-        .optional()
-        .describe('Only component names containing this string (case-insensitive).'),
-      limit: z.number().int().min(1).max(500).default(100),
-      appOnly: z.boolean().default(true),
-    })
-    .refine((input) => input.commit === undefined || input.afterCommit === undefined, {
-      message: 'commit and afterCommit are mutually exclusive',
-    }),
-  output: z.object({
-    tracking: z.boolean(),
-    commits: z.number().int().nonnegative(),
-    events: z.array(renderCauseEventSchema),
-    filteredNote: z.string().optional(),
-  }),
-  annotations: { readOnlyHint: true },
-})
-
 export const reactErrorStateContract = defineAgentToolContract({
   name: 'react_error_state',
   title: 'Error & suspense state (why is it blank/stuck?)',
@@ -761,17 +545,6 @@ export const reactRefreshEventsContract = defineAgentToolContract({
   annotations: { readOnlyHint: true },
 })
 
-export const reactClearRendersContract = defineAgentToolContract({
-  name: 'react_clear_renders',
-  title: 'Clear render data',
-  description:
-    'Reset the render/commit counters. Call this before an interaction to measure exactly that interaction.',
-  group: 'react.render',
-  input: z.object({}),
-  output: z.object({ ok: z.boolean(), tracking: z.boolean() }),
-  annotations: { idempotentHint: true },
-})
-
 export const reactProfileStartContract = defineAgentToolContract({
   name: 'react_profile_start',
   title: 'Start profiling',
@@ -779,14 +552,21 @@ export const reactProfileStartContract = defineAgentToolContract({
     'Begin (or resume) a profiling session — enables commit tracking and clears render counters. Then interact with the app and call react_profile_report, or react_profile_stop to pause. For a before/after regression verdict: react_profile_snapshot (label the "before"), make the change, then react_renders_diff — no hand-diffing two JSON dumps.',
   group: 'react.profile',
   input: z.object({}),
-  output: z.object({ ok: z.boolean(), tracking: z.boolean() }),
-  annotations: { idempotentHint: true },
+  output: z.object({
+    ok: z.boolean(),
+    tracking: z.boolean(),
+    documentCommitId: z.number().int().nonnegative(),
+    observation: observationSchema,
+  }),
+  annotations: { idempotentHint: false },
 })
 
 const renderDeltaSchema = z.object({
   name: z.string(),
   source: z.string().optional().describe('file:line when resolved.'),
-  deltaMs: z.number().describe('after.selfTime − before.selfTime, ms (positive = slower).'),
+  deltaMs: z
+    .number()
+    .describe('Candidate cumulative window self-time minus baseline, ms (positive = slower).'),
   before: z.object({ renders: z.number(), selfTime: z.number() }),
   after: z.object({ renders: z.number(), selfTime: z.number() }),
 })
@@ -810,7 +590,7 @@ export const reactProfileSnapshotContract = defineAgentToolContract({
   name: 'react_profile_snapshot',
   title: 'Snapshot render aggregates',
   description:
-    'Capture the current per-component render aggregates (renders/mounts/updates, self & total time, unnecessary & unstable renders) under a label, as the "before" baseline for react_renders_diff. Take one before applying a fix (e.g. adding memo/useCallback), make the change and interact, then call react_renders_diff to get the regression/improvement verdict. Re-using a label overwrites that snapshot. Library components are excluded, matching the other react reads.',
+    'Capture current app-component render aggregates under a label as the before baseline for react_renders_diff. The snapshot includes coverage; do not use an incomplete baseline to prove a change. Reusing a label overwrites it.',
   group: 'react.profile',
   input: z.object({
     label: z
@@ -825,6 +605,9 @@ export const reactProfileSnapshotContract = defineAgentToolContract({
     label: z.string(),
     commits: z.number(),
     components: z.number().describe('Components captured in this snapshot.'),
+    coverage: renderCoverageSchema.describe(
+      'Whether the baseline includes every tracked commit input needed for a reliable comparison.',
+    ),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -833,7 +616,7 @@ export const reactRendersDiffContract = defineAgentToolContract({
   name: 'react_renders_diff',
   title: 'Diff renders vs a snapshot',
   description:
-    'The before/after regression verdict: joins a react_profile_snapshot baseline against the CURRENT live aggregates (by component name + source file:line when resolved, else name) and reports which components got slower (regressed) or faster (improved) by more than thresholdMs of self-time, plus components that appeared (added) or vanished (removed) and the overall self-time change. Sorted by |delta| so the biggest movers lead. Take a snapshot, apply your change, interact, then call this — no hand-diffing two react_get_renders dumps. Check clearsSinceBaseline to know what you compared: 0 means the baseline shares this session (after includes before), ≥1 means counters were cleared since the snapshot (react_clear_renders or react_profile_start), so this is a session-vs-session compare — only meaningful when both sessions drove the same interaction, and "removed" then just means "has not re-rendered since the clear".',
+    'Compare a stored profile snapshot with current app-component aggregates by component name plus source when resolved. Reports cumulative window self-time and the largest regressions, improvements, additions, and removals. Check coverage for both sides. If counters were cleared, compare only equivalent interactions; removed then means not observed in the current window.',
   group: 'react.profile',
   input: z.object({
     baseline: z
@@ -853,6 +636,10 @@ export const reactRendersDiffContract = defineAgentToolContract({
       .describe(
         'How many times counters were cleared after the snapshot; 0 = additive same-session compare, ≥1 = session-vs-session (commits.before can exceed commits.after).',
       ),
+    coverage: z.object({
+      baseline: renderCoverageSchema.describe('Completeness recorded with the stored baseline.'),
+      current: renderCoverageSchema.describe('Completeness of the current comparison window.'),
+    }),
     selfTimeMs: z.object({
       before: z.number(),
       after: z.number(),
@@ -864,8 +651,15 @@ export const reactRendersDiffContract = defineAgentToolContract({
     }),
     regressed: z.array(renderDeltaSchema),
     improved: z.array(renderDeltaSchema),
-    added: z.array(z.object({ name: z.string(), renders: z.number(), selfTime: z.number() })),
-    removed: z.array(z.object({ name: z.string() })),
+    added: z.array(
+      z.object({
+        name: z.string(),
+        source: z.string().optional(),
+        renders: z.number(),
+        selfTime: z.number(),
+      }),
+    ),
+    removed: z.array(z.object({ name: z.string(), source: z.string().optional() })),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -874,12 +668,21 @@ export const reactProfileReportContract = defineAgentToolContract({
   name: 'react_profile_report',
   title: 'Profiling report',
   description:
-    'Summarize the profiling session: slowest components by render time, most re-rendered, most unnecessary renders, and most renders wasted on unstable-reference props.',
+    'Summarize peak render cost, render counts, and no-observed-input updates when causal attribution is complete. Check coverage.inputAttributionComplete before using causal leaderboards. The report never calls a render safe to remove.',
   group: 'react.profile',
   input: z.object({ limit: z.number().int().min(1).max(100).default(20) }),
   output: z.object({
     commits: z.number(),
     tracking: z.boolean(),
+    documentCommitId: z.number().int().nonnegative(),
+    attribution: z.object({
+      status: z.enum(['current', 'stale']),
+      startedAtDocumentCommitId: z.number().int().nonnegative(),
+      completedAtDocumentCommitId: z.number().int().nonnegative(),
+      startedAtAnalysisGeneration: z.number().int().nonnegative(),
+      completedAtAnalysisGeneration: z.number().int().nonnegative(),
+    }),
+    coverage: renderCoverageSchema,
     slowest: z.array(
       z.object({ id: z.number(), name: z.string(), selfTime: z.number(), renders: z.number() }),
     ),
@@ -894,6 +697,14 @@ export const reactProfileReportContract = defineAgentToolContract({
         id: z.number(),
         name: z.string(),
         unstableRenders: z.number(),
+        renders: z.number(),
+      }),
+    ),
+    mostReferenceOnly: z.array(
+      z.object({
+        id: z.number(),
+        name: z.string(),
+        referenceOnlyPropRenders: z.number(),
         renders: z.number(),
       }),
     ),
