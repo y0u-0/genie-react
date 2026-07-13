@@ -1,5 +1,16 @@
 # @genie-react/cli
 
+## 0.8.0
+
+### Minor Changes
+
+- a26309e: Make CLI and session targeting agent-safe with workspace bridge discovery, persistent tab aliases, bounded startup diagnostics, versioned machine envelopes, exact Query waits, targeted React subtrees, atomic Router/browser snapshots, and explicit package-filter accounting.
+
+### Patch Changes
+
+- Updated dependencies [a26309e]
+  - genie-react@0.8.0
+
 ## 0.7.0
 
 ### Minor Changes
