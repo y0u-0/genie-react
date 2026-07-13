@@ -3,36 +3,221 @@
 [![npm version](https://img.shields.io/npm/v/genie-react.svg)](https://www.npmjs.com/package/genie-react)
 [![npm downloads](https://img.shields.io/npm/dm/genie-react.svg)](https://www.npmjs.com/package/genie-react)
 [![CLI](https://img.shields.io/npm/v/@genie-react/cli.svg?label=%40genie-react%2Fcli)](https://www.npmjs.com/package/@genie-react/cli)
-[![CI](https://github.com/y0u-0/genie-react/actions/workflows/ci.yml/badge.svg)](https://github.com/y0u-0/genie-react/actions/workflows/ci.yml)
+[![CI](https://github.com/Genie-sa/genie-react/actions/workflows/ci.yml/badge.svg)](https://github.com/Genie-sa/genie-react/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/genie-react.svg)](./LICENSE)
 
-> Live DevTools for your running React + TanStack app — driven from the terminal by your AI agent, through one CLI.
+> Live React and TanStack tools for coding agents.
 
-AI coding agents work blind: they read source code and guess what the running app does. Genie removes the guessing. It connects your agent (Claude Code, Codex, OpenCode, …) to the app's live DevTools — React internals, TanStack Query, TanStack Router, and any custom devtools built on TanStack — so the agent can **see** what's happening and **act** on it.
+Genie lets an agent inspect the app that is running now. It can explain renders, inspect effects, read Query and Router state, test hard-to-reach UI, and measure a fix.
 
-That closes the loop. The agent makes a change, checks the real app, and confirms the change works — finds what's slow, fixes it, proves the fix — without you relaying screenshots or console output.
+Genie is for development only. The hub listens on localhost.
 
-One command drives everything:
-
-```bash
-genie-react call <tool> '<json>'
-```
-
-## Install
-
-Dev-only. Never ships to production.
+## Quick start
 
 ```bash
-pnpm add -D genie-react     # everything app-side: collectors, <Genie />, Vite plugin, hub
-npx @genie-react/cli init   # detects your setup and wires it
-pnpm dev                    # start your app
+pnpm add -D genie-react @genie-react/cli
+npx @genie-react/cli init
+pnpm dev
 ```
 
-`init` adapts to your framework. The same tools work everywhere.
+Open the app in a browser. Then check the connection:
 
-### Vite
+```bash
+npx @genie-react/cli status --sessions-only
+```
 
-Covers TanStack Start, plain React, and any Vite-based framework. `init` adds the `genie()` plugin: the hub rides the dev server (loopback only, no extra port) and the client is injected automatically. Router/Start apps also get one line near the app root:
+When the session says `ready=true`, try a read:
+
+```bash
+npx @genie-react/cli call react_get_tree '{"depth":3,"maxNodes":50}'
+```
+
+Run commands from the app folder. If several running apps match, Genie stops and asks you to choose instead of guessing.
+
+## Common tasks
+
+### Explain why a component rendered
+
+Clear old data, perform one action, then read the result:
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Click, type, or navigate in the app.
+npx @genie-react/cli call react_get_renders '{"component":"Checkout","sort":"selfTime","limit":10}'
+npx @genie-react/cli call react_render_causes '{"component":"Checkout","limit":20}'
+```
+
+The result can point to a state hook, Context, Query, Router, children, a parent render, or a mount.
+
+### Find a slow flow
+
+```bash
+npx @genie-react/cli call react_profile_start '{}'
+# Perform the flow once.
+npx @genie-react/cli call react_profile_report '{"limit":10}'
+npx @genie-react/cli call react_profile_stop '{}'
+```
+
+The report separates the slowest single render from total time across the whole flow.
+
+### Check effects
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Perform one action.
+npx @genie-react/cli call react_effect_events '{"component":"Checkout"}'
+npx @genie-react/cli call react_effect_audit '{"component":"Checkout"}'
+```
+
+`react_effect_events` shows what React scheduled. It does not claim that an effect or cleanup ran.
+
+To inspect one package:
+
+```bash
+npx @genie-react/cli call react_effect_audit \
+  '{"packageName":"@tanstack/react-query","appOnly":false}'
+```
+
+### Inspect a Query
+
+```bash
+npx @genie-react/cli call query_list '{"limit":20}'
+npx @genie-react/cli call query_get '{"queryKey":["cart"]}'
+```
+
+Wait for one exact key instead of sleeping:
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["cart"],"timeoutMs":10000}'
+```
+
+### Inspect or change a route
+
+```bash
+npx @genie-react/cli call router_get_state '{}'
+npx @genie-react/cli call router_build_location '{"to":"/products/$productId","params":{"productId":"42"}}'
+npx @genie-react/cli call router_navigate '{"to":"/products/$productId","params":{"productId":"42"}}'
+```
+
+`router_get_state` returns the Router URL and browser URL together. Check `locationSync` before trusting them.
+
+### Inspect one component
+
+```bash
+npx @genie-react/cli call react_find_components '{"query":"Checkout","exact":true}'
+npx @genie-react/cli call react_inspect_component '{"id":42,"path":["user","address"],"depth":3}'
+```
+
+For a large tree, read only one subtree:
+
+```bash
+npx @genie-react/cli call react_get_tree '{"rootId":42,"depth":3,"maxNodes":100}'
+```
+
+### Check repeated list items
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Perform one action.
+npx @genie-react/cli call react_component_cohort '{"component":"Row","exact":true}'
+```
+
+The result separates updated, mounted-but-idle, unmounted, and missing rows. It also reports rows omitted by the limit.
+
+## Prove a fix
+
+For a quick same-session check:
+
+```bash
+npx @genie-react/cli call react_profile_start '{}'
+# Run the flow before the code change.
+npx @genie-react/cli call react_profile_snapshot '{"label":"before"}'
+
+# Make the change, start a clean window, then run the same flow again.
+npx @genie-react/cli call react_profile_start '{}'
+# Run the same flow again.
+npx @genie-react/cli call react_renders_diff '{"baseline":"before","thresholdMs":0.5}'
+```
+
+For a stronger result, capture the same flow at least three times before and after the change:
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+# Run the flow.
+npx @genie-react/cli call devtools_capture_create '{"name":"before-1"}' --json
+
+# After the change, clear, run the same flow, and capture again.
+npx @genie-react/cli call react_clear_renders '{}'
+# Run the same flow.
+npx @genie-react/cli call devtools_capture_create '{"name":"after-1"}' --json
+```
+
+Use the returned capture IDs to compare both groups:
+
+```bash
+npx @genie-react/cli call devtools_capture_compare \
+  '{"baselineCaptureIds":["<before-1>","<before-2>","<before-3>"],"candidateCaptureIds":["<after-1>","<after-2>","<after-3>"],"metrics":["react.renders","react.selfTimeMs"],"budgets":[{"metric":"react.renders","maxRegressionPct":0}]}'
+```
+
+Use the same build, route, device, and action for every run. `insufficient-data` is not a pass.
+
+## Read results safely
+
+| Field | Meaning |
+| --- | --- |
+| `exact` | Genie observed the direct runtime link. |
+| `inferred` | Useful lead, but not proof. |
+| `unknown` | Genie could not prove the cause. |
+| `not-proven-safe` | Test the page before removing the render. |
+| `coverage.complete` | The tool's main measurement is complete. |
+| `coverage.inputAttributionComplete` | Every captured render has complete input evidence. |
+| `attribution.status: stale` | Wait for React to settle, then retry. |
+| `propsNotEnumerated` | Props were not read because a Proxy could run app code. Inspect a named path instead. |
+
+A timing report can be complete while render-cause data is partial. Never use incomplete data to prove that a change worked.
+
+Effect hotness needs at least three updates by default. One sample returns `insufficient-data`. Only effect hotness gets a 95% range; other results stay `exact`, `inferred`, or `unknown`.
+
+## Target one tab
+
+Name the tab in its URL:
+
+```text
+http://localhost:3000/?_genie=my-agent
+```
+
+Pin later calls to it:
+
+```bash
+export GENIE_SESSION=my-agent
+```
+
+The name survives navigation, reloads, and reconnects. You can also pass `--session my-agent` to one command.
+
+## JSON and scripts
+
+```bash
+npx @genie-react/cli status --json
+npx @genie-react/cli call react_get_renders '{}' --json | jq '.coverage'
+npx @genie-react/cli batch \
+  '[{"tool":"react_get_tree","args":{"depth":2}},{"tool":"react_get_renders","args":{"limit":5}}]' --ndjson
+```
+
+- `--json` writes one JSON value.
+- `batch` writes JSONL by default. `--ndjson` makes that explicit.
+- `batch --json` writes one JSON array.
+- CLI status, batch, and error objects include `schemaVersion`.
+
+Use `--verbose` when startup hangs. It prints the CLI version, chosen connection, session, and time limits to stderr, so JSON stdout stays clean.
+
+## Setup by platform
+
+`init` handles Vite and Next.js. Use the examples below when you need manual control.
+
+### Vite and TanStack Start
+
+`init` adds the `genie()` Vite plugin. For Query and Router tools, render `<Genie />` near the app root:
 
 ```tsx
 import { Genie } from 'genie-react'
@@ -40,13 +225,17 @@ import { Genie } from 'genie-react'
 {import.meta.env.DEV && <Genie />}
 ```
 
-`<Genie />` finds your Router and QueryClient on its own. If yours live somewhere unusual, pass them in: `<Genie queryClient={queryClient} router={router} />`.
+It normally finds the Router and Query client. You can also pass them:
+
+```tsx
+{import.meta.env.DEV && <Genie queryClient={queryClient} router={router} />}
+```
 
 ### Next.js
 
-`init` adds `<GenieScript />` to your root layout and creates `instrumentation.ts`, which starts a standalone hub alongside `next dev`. The hub serves the browser client to the page as one classic script.
+`init` adds `<GenieScript />` to the root layout and creates `instrumentation.ts`.
 
-To add Query tools, render a small client component near `<GenieScript />` and pass the same client used by `QueryClientProvider`:
+To add Query tools, pass the same client used by `QueryClientProvider`:
 
 ```tsx
 'use client'
@@ -59,21 +248,29 @@ export function GenieRuntime() {
 }
 ```
 
-### Other bundlers (CRA, Parcel, Rsbuild, …)
+Render `<GenieRuntime />` near `<GenieScript />` in the root layout.
 
-Run `npx @genie-react/cli hub` and add one line first in `<head>`:
+### Other web bundlers
+
+Start the hub:
+
+```bash
+npx @genie-react/cli hub
+```
+
+Load the client first in `<head>`:
 
 ```html
 <script src="http://localhost:4390/__genie/client.js"></script>
 ```
 
-The tag ships the React + memory tools. To add the Query/Router tools, compose the client in your own bundle instead, passing your own instances:
+This adds React and memory tools. To add Query tools, start the client from your bundle with your own Query client:
 
 ```ts
-import 'genie-react/hook' // first import, before React
+import 'genie-react/hook'
 import { createGenieClient, reactCollector, sessionCollector } from 'genie-react/client'
 import { memoryCollector, queryCollector } from 'genie-react/collectors'
-import { queryClient } from './query-client' // the instance your <QueryClientProvider> renders with
+import { queryClient } from './query-client'
 
 createGenieClient({
   url: 'ws://localhost:4390/__genie/ws',
@@ -81,198 +278,95 @@ createGenieClient({
 }).start()
 ```
 
-### React Native / Expo
+Import `genie-react/hook` before React.
 
-`genie-react/native` wires the DOM-free collectors (React, memory, perf, plugins) and takes your TanStack instances by value, so it loads under Metro whether or not TanStack is installed. Needs Metro with `package.json` exports enabled (React Native 0.79+ / Expo SDK 53+).
+### React Native and Expo
 
-Run the hub on your dev machine (`npx @genie-react/cli hub`), then start Genie from your app entry, dev-only:
+Start the hub on your development machine:
+
+```bash
+npx @genie-react/cli hub
+```
+
+Then render Genie in development:
 
 ```tsx
 import { Genie } from 'genie-react/native'
 
-// iOS simulator: 127.0.0.1, Android emulator: 10.0.2.2, physical device: your machine's LAN IP
-// Use 127.0.0.1, not localhost — the hub binds IPv4 loopback, and some runtimes resolve localhost to IPv6 (::1) first.
 {__DEV__ && <Genie url="ws://127.0.0.1:4390/__genie/ws" />}
 ```
 
-Or start it imperatively (e.g. in `index.js`, before `registerRootComponent`): `if (__DEV__) startGenie({ url: 'ws://127.0.0.1:4390/__genie/ws' })`. Pass `queryClient` / `router` on any render to add the Query/Router tools — Genie registers them onto the running client.
+Use `127.0.0.1` for the iOS simulator or `10.0.2.2` for the Android emulator. A physical device needs a port forward to the local hub. Pass `queryClient` or `router` to add those tools.
 
-Almost everything works as on the web. The differences: `react_dom_for_component` reports native views with their `testID` / accessibility props (there are no CSS selectors); `browser_get_memory` needs RN 0.85+ (Hermes exposes `performance.memory` there); `react_component_for_dom` needs a DOM and is unavailable.
+React Native has no DOM selectors. `react_dom_for_component` returns native view details instead. Browser-only tools stay unavailable.
 
-## Drive it
-
-```bash
-npx @genie-react/cli status --sessions-only    # connected once a browser opens the app
-npx @genie-react/cli tools                     # group index; drill in: tools <group> / tools <tool>
-npx @genie-react/cli call react_get_renders '{"sort":"renders"}'
-npx @genie-react/cli call react_render_causes '{"component":"Checkout"}'
-npx @genie-react/cli call query_list '{}'
-npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
-```
-
-Run the CLI from the app directory. From a workspace root, it selects the only live Genie bridge. If several apps are live, it stops and lists each bridge instead of guessing.
-
-Render reports show observed state, Context, Query, Router, children, parent-render, and mount evidence. Each cause says `exact`, `inferred`, or `unknown`. Arrays and documented store fields can include exact paths. Arbitrary object fields stay opaque and are marked incomplete.
-
-Genie never enumerates an arbitrary props container because it may be a Proxy. When its identity changes, `propsNotEnumerated` is true and input attribution is incomplete. Render counts and timings can still be complete. Use `react_inspect_component` with an explicit prop path when you need the value.
-
-Start each flow with `react_clear_renders`. It returns an observation ID. Render, effect, commit, Query observer, Router, subscriber, and component instance IDs let an agent follow that one observation without joining unrelated events by time.
-
-Use the focused follow-up tools:
-
-- `react_render_causes` shows changed inputs and observed behavior. `not-proven-safe` means the agent must still test DOM, ARIA, focus, URL, network, and transitions before removing a render.
-- `react_component_cohort` tells `mounted-idle`, `updated`, `unmounted`, and `absent` apart. It also reports omitted matches.
-- `react_effect_events` shows effects React scheduled. It does not claim that an effect or cleanup ran.
-- `react_effect_audit` reports the effect's source and sample-aware hotness. One update is `insufficient-data`; the 95% interval is useful only for this statistical hotness check.
-- Query causes include the matching observer and subscriber when public runtime identity proves them. `subscriberObservationStatus` says whether that subscriber belongs to the current measurement window. Private auto-tracked fields stay unavailable instead of being guessed.
-
-`coverage.complete` covers the tool's primary measurement. `coverage.inputAttributionComplete` covers render-cause inputs. A timing profile can be complete while props stay opaque. A stale report tells the agent to retry after commits settle. Render diffs report both baseline and current coverage; never use an incomplete side as proof that an optimization worked.
-
-Component source is often a JSX use site or definition fallback. Genie labels that location as inferred. Exact hook alignment can still report the app hook callsite, primitive hook source, and wrapper ancestry.
-
-Give each browser tab a stable name when several agents or tabs share a hub:
-
-```text
-http://localhost:3000/?_genie=my-agent
-```
-
-Then pass `--session my-agent`, or set `GENIE_SESSION=my-agent` once. The same target keeps working after navigation, reloads, and reconnects—even when the route removes `_genie` from the URL.
-
-If connection startup is unclear, add `--verbose`. Diagnostics go to stderr, so JSON stdout stays clean. `--connect-timeout <ms>` bounds the bridge connection without changing the tool timeout.
-
-Wait for exact state instead of sleeping:
+## Find more tools
 
 ```bash
-npx @genie-react/cli call devtools_wait \
-  '{"condition":"query-settled","queryKey":["demo","greeting"]}'
+npx @genie-react/cli tools
+npx @genie-react/cli tools react_render_causes
 ```
 
-Query waits accept an exact `queryHash` or structured `queryKey`. Legacy names are exact too; partial text never matches. `router_get_state` returns Router state and browser history together, with `locationSync` set to `matched`, `mismatched`, or `unavailable`.
+Tool areas include React, effects, Query, Router, memory, frame rate, plugins, and runtime captures. Read tools inspect the app. Action tools can change live Query, Router, component, Suspense, and error state.
 
-For a dense React tree, find a component and read only that mounted subtree:
+After testing an action, restore temporary state:
 
 ```bash
-npx @genie-react/cli call react_find_components '{"query":"Checkout","exact":true}'
-npx @genie-react/cli call react_get_tree '{"rootId":42,"depth":3,"maxNodes":100}'
+npx @genie-react/cli call query_restore_state '{"all":true}'
+npx @genie-react/cli call react_reset_overrides '{}'
 ```
 
-Machine output is bounded and pipeable. `--json` writes one JSON value. `batch` writes JSONL by default; `--ndjson` makes that choice explicit, while `batch --json` writes one array. CLI-owned status, batch, and error envelopes include `schemaVersion`; successful tool payloads keep each tool's advertised schema.
+## Give Genie to your agent
 
-`npx @genie-react/cli doctor` checks the wiring; `doctor --live` also probes the running hub, the served client, and a session round-trip. Stale `.genie/bridge.json` files left by a killed dev server are cleaned up automatically.
-
-## Prove a change with captures
-
-A capture records one bounded view of React, effects, Query, Router, memory, and optional frame-rate data.
+Install the agent skill:
 
 ```bash
-npx @genie-react/cli call react_clear_renders '{}'
-# Drive one exact flow.
-npx @genie-react/cli call devtools_capture_create '{"name":"before-1"}' --json
+npx skills add y0u-0/genie-react
 ```
 
-Repeat the same flow at least three times before and three times after the change. Compare the returned capture IDs:
+Pair Genie with a UI driver:
+
+- [agent-browser](https://github.com/vercel-labs/agent-browser) for web apps.
+- [agent-device](https://github.com/callstack/agent-device) for React Native.
+
+The UI driver performs the action. Genie explains what happened inside the app.
+
+## Check setup
 
 ```bash
-npx @genie-react/cli call devtools_capture_compare \
-  '{"baselineCaptureIds":["<before-1>","<before-2>","<before-3>"],"candidateCaptureIds":["<after-1>","<after-2>","<after-3>"],"metrics":["react.renders","react.selfTimeMs"],"budgets":[{"metric":"react.renders","maxRegressionPct":0}]}'
+npx @genie-react/cli doctor
+npx @genie-react/cli doctor --live
 ```
 
-The result includes sample counts, median, p95, spread, and a clear budget verdict. Small or missing samples are `insufficient-data`, never a false pass. The hub keeps the latest 20 captures, so export important JSON results.
+`doctor` checks files. `doctor --live` also checks the running hub, client script, and browser session.
 
-## Try a change before it ships
+## Test a pull request build
 
-Every pull request and every push to `main` publishes preview builds to [pkg.pr.new](https://pkg.pr.new) — no npm release required. The Preview Release workflow comments ready-to-copy URLs on each PR:
+Each pull request publishes packages through [pkg.pr.new](https://pkg.pr.new):
 
 ```bash
 pnpm add -D https://pkg.pr.new/genie-react@<sha>
 npx https://pkg.pr.new/@genie-react/cli@<sha> status
 ```
 
-## Give your agent the skill
-
-Install the [agent skill](https://github.com/vercel-labs/skills) so your agent knows when and how to use Genie:
-
-```bash
-npx skills add y0u-0/genie-react
-```
-
-## Use with agent-browser & agent-device
-
-Genie is the eyes — it reads what happens underneath the pixels: renders, effects, hooks, queries, errors no screenshot can show. Pair it with the hands that drive the UI:
-
-- **Web** — [agent-browser](https://github.com/vercel-labs/agent-browser) opens the app, clicks, types, and takes screenshots.
-- **React Native** — [agent-device](https://github.com/callstack/agent-device) taps, types, and screenshots the simulator or device.
-
-Together your agent closes the loop on its own: make a change, drive the app, read why, then fix or optimize — verifying its own work end to end.
-
-## What you get
-
-**See** —
-
-- the component tree; find components by name
-- a component's props, state, hooks (each labeled: state / reducer / memo / callback / ref / effect), and the contexts it consumes
-- the DOM node(s) a component renders, each with a selector
-- what re-rendered, how often, and which runtime input or parent was observed
-- the observed event behind each render: state, Context, Query, Router, children, or parent
-- stable component instance and mount identity, plus mounted, idle, updated, and unmounted cohorts
-- which effects React scheduled, who owns them, and whether enough samples prove they are hot
-- bounded array and known-store paths, with opaque objects reported as incomplete
-- caught errors and suspended boundaries — why a screen is blank or stuck
-- a profiler: peak render cost, cumulative window cost, render counts, and no-observed-input updates when attribution is complete
-- the TanStack Query cache: staleness, observers, refetch storms, cache churn
-- the Router: state, matches, params, loaders
-- the browser JS heap
-
-**Do** —
-
-- navigate, preload, and invalidate routes
-- invalidate / refetch / reset / remove / setData / cancel / fetch / ensure queries
-- simulate a query's pending or error state, then restore its exact prior state
-- re-run a mutation
-- override a component's props, hook state, or a context value
-- force a Suspense fallback or an error boundary — hold loading / error UI open to inspect it, no code edits
-- list every active override and reset them all
-- create named runtime captures and compare repeated before/after runs against typed budgets
-
-## Tools
-
-The available tool count depends on the collectors in the running app. `read` tools are safe to call freely; `action` tools mutate the running app. Each tool documents itself — `tools <group>` lists a group, `tools <tool>` prints the full schema — so here are just the names:
-
-**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_render_causes`, `react_component_cohort`, `react_clear_renders`, `react_effect_audit`, `react_effect_events`, `react_error_state`, `react_refresh_events`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
-
-**Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_simulate_state`, `query_restore_state`, `query_fetch`, `query_ensure`, `mutation_rerun`.
-
-**Router** — read: `router_get_state`, `router_list_matches`, `router_list_routes`, `router_build_location`, `router_match_route`. action: `router_navigate`, `router_preload`, `router_load`, `router_invalidate`, `router_clear_cache`, `router_history`.
-
-**Plugin passthrough** — read: `plugin_list`, `plugin_get_events`. action: `plugin_emit`. Discovery is traffic-based; declare silent plugins up front with `<Genie plugins={['cart-devtools']} />` so they're listed before their first event.
-
-**Memory** — read: `browser_get_memory`, `browser_measure_memory` (Chromium only).
-
-**Perf** — read: `browser_fps` (frame-rate sample with a smooth / degraded / janky verdict).
-
-**Meta** — read: `devtools_status`, `devtools_wait`, `devtools_capture_create`, `devtools_capture_list`, `devtools_capture_read`, `devtools_capture_compare`.
-
 ## How it works
 
-Collectors in the browser (React, Query, Router, plugins, memory) run tool calls against the real fibers and caches, and talk over a WebSocket to a small hub — embedded in your Vite dev server, or standalone (`genie-react hub` / Next.js `instrumentation.ts`), where it also serves the browser client as a single script. The CLI connects to that hub, runs tools, and prints JSON.
+The browser collectors read React and TanStack state. They send tool results to a local WebSocket hub. The CLI sends requests to that hub and prints the result.
 
-Several tabs, apps, and agents coexist. Calls hit the most recent tab unless you target a physical session ID, a durable logical ID, or a unique name from `?_genie=<name>`. `genie-react status` shows readiness and every session; `--sessions-only` keeps that response small. Set `GENIE_SESSION` once to pin an agent to its tab. A reconnect keeps the logical identity and stable name. A standalone hub identifies the app it serves, so a second app's hub walks to the next free port instead of cross-connecting, and each app's `.genie/bridge.json` pins its CLI to its own hub.
-
-Dev-only and local: the Vite plugin is inert in production builds, the browser client only starts under `import.meta.env.DEV`, and the hub listens on `localhost` only.
+Vite runs the hub inside its development server. Next.js and other setups run a small standalone hub. More than one app or tab can connect safely when you target the right session.
 
 ## Packages
 
-| Package / export | What it is |
+| Package or export | Purpose |
 | --- | --- |
 | `genie-react` | `<Genie />` component |
 | `genie-react/vite` | Vite plugin |
-| `genie-react/script` | `<GenieScript />` for any SSR root layout |
-| `genie-react/next` | Next.js helpers |
-| `genie-react/native` | React Native / Expo entry |
-| `genie-react/client`, `genie-react/hook` | the injected browser client |
-| `genie-react/collectors` | every collector, for manual composition |
-| `genie-react/hub` | the WebSocket hub |
-| `genie-react/protocol` | the wire protocol |
-| `@genie-react/cli` | the agent interface: `init` / `doctor` / `link`, `status` / `tools` / `call` |
+| `genie-react/next` | Next.js setup |
+| `genie-react/native` | React Native and Expo |
+| `genie-react/client` | Browser client |
+| `genie-react/collectors` | Individual collectors |
+| `genie-react/hub` | Local hub |
+| `genie-react/protocol` | Tool and wire types |
+| `@genie-react/cli` | Terminal commands |
 
 MIT © Genie React Agent contributors
