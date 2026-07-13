@@ -1,5 +1,11 @@
 # genie-react
 
+## 0.7.0
+
+### Minor Changes
+
+- 00a8dae: Add durable session targeting, effect ownership and hotness, causal render events, named runtime captures, and repeated capture comparisons with typed budgets.
+
 ## 0.6.1
 
 ### Patch Changes
