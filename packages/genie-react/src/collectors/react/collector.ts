@@ -3,9 +3,11 @@ import { defineCollector, defineCollectorTool, type GenieCollector } from '../..
 import type { NodeId } from './contracts'
 import {
   reactClearRendersContract,
+  reactComponentCohortContract,
   reactComponentForDomContract,
   reactDomForComponentContract,
   reactEffectAuditContract,
+  reactEffectEventsContract,
   reactErrorStateContract,
   reactFindComponentsContract,
   reactForceErrorBoundaryContract,
@@ -27,7 +29,8 @@ import {
   reactResetOverridesContract,
   reactToggleSuspenseFallbackContract,
 } from './contracts'
-import { getEffectAuditReport } from './effect-tracker'
+import { getEffectScheduleEvents } from './effect-events'
+import { getEffectAuditReport, getEffectTrackingCoverage } from './effect-tracker'
 import { getErrorState } from './error-tracker'
 import {
   appOnlyFilteredNote,
@@ -43,6 +46,7 @@ import {
   owningComponentFor,
   registerFiber,
 } from './fiber'
+import { getAnalysisGeneration, getDocumentCommitId } from './observation'
 import {
   applyContextOverride,
   applyErrorOverride,
@@ -53,13 +57,21 @@ import {
   resetOverrides,
 } from './overrides'
 import { getRefreshEvents, startRefreshTracking } from './refresh-tracker'
+import { getRenderCohort } from './render-cohort'
 import {
   clearRenders,
+  getAnalysisFailedFiberCount,
+  getBudgetExhaustedCommitCount,
+  getBudgetExhaustedSubsystems,
   getCommitCount,
-  getRenderCauseEventsReport,
-  getRenderSummary,
-  getRendersLeaderboards,
-  getRendersReport,
+  getDroppedPendingUnmountFiberCount,
+  getPropsNotEnumeratedFiberCount,
+  getRenderCauseMeasurement,
+  getRendersLeaderboardsMeasurement,
+  getRendersMeasurement,
+  getRenderTrackingCoverage,
+  getSkippedCommitFiberCount,
+  getTruncatedInputFiberCount,
   isTracking,
   rendersDiff,
   setCommitListener,
@@ -68,6 +80,16 @@ import {
   takeSnapshot,
 } from './render-tracker'
 import { classifyFiber, classifyFibersWithinBudget } from './source'
+
+function currentEffectCoverage() {
+  const renderCoverage = getRenderTrackingCoverage('measurement')
+  const { truncatedEffectLists } = getEffectTrackingCoverage()
+  return {
+    ...renderCoverage,
+    complete: renderCoverage.complete && truncatedEffectLists === 0,
+    truncatedEffectLists,
+  }
+}
 
 export function hasDomLookupRuntime(): boolean {
   const globals = globalThis as {
@@ -268,18 +290,43 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactGetRendersContract,
         handler: async ({ component, sort, limit, appOnly }) => {
-          const [summary, { components, libraryHidden }] = await Promise.all([
-            getRenderSummary(appOnly),
-            getRendersReport({ component, sort, limit, appOnly }),
-          ])
+          const report = await getRendersMeasurement({ component, sort, limit, appOnly })
+          const { summary, components, libraryHidden, omittedByLimit } = report
           const filteredNote = appOnly
             ? appOnlyFilteredNote(components.length, libraryHidden, 'components')
             : undefined
           return {
-            tracking: isTracking(),
-            commits: getCommitCount(),
+            tracking: report.tracking,
+            commits: report.commits,
+            documentCommitId: report.documentCommitId,
+            observation: report.observation,
+            attribution: report.attribution,
             summary,
             components,
+            omittedByLimit,
+            coverage: {
+              inputAttributionComplete:
+                report.skippedCommitFibers === 0 &&
+                report.droppedUnmountFibers === 0 &&
+                report.analysisFailedFibers === 0 &&
+                report.truncatedInputFibers === 0 &&
+                report.propsNotEnumeratedFibers === 0 &&
+                report.budgetExhaustedCommits === 0,
+              complete:
+                report.skippedCommitFibers === 0 &&
+                report.droppedUnmountFibers === 0 &&
+                report.analysisFailedFibers === 0 &&
+                report.truncatedInputFibers === 0 &&
+                report.propsNotEnumeratedFibers === 0 &&
+                report.budgetExhaustedCommits === 0,
+              skippedCommitFibers: report.skippedCommitFibers,
+              droppedUnmountFibers: report.droppedUnmountFibers,
+              analysisFailedFibers: report.analysisFailedFibers,
+              truncatedInputFibers: report.truncatedInputFibers,
+              propsNotEnumeratedFibers: report.propsNotEnumeratedFibers,
+              budgetExhaustedCommits: report.budgetExhaustedCommits,
+              budgetExhaustedSubsystems: report.budgetExhaustedSubsystems,
+            },
             filteredNote,
           }
         },
@@ -287,22 +334,71 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactRenderCausesContract,
         handler: async ({ commit, afterCommit, component, limit, appOnly }) => {
-          const { events, libraryHidden } = await getRenderCauseEventsReport({
+          const report = await getRenderCauseMeasurement({
             commit,
             afterCommit,
             component,
             limit,
             appOnly,
           })
+          const { events, libraryHidden, omittedByLimit } = report
           return {
-            tracking: isTracking(),
-            commits: getCommitCount(),
+            tracking: report.tracking,
+            commits: report.commits,
+            documentCommitId: report.documentCommitId,
+            observation: report.observation,
+            attribution: report.attribution,
             events,
+            omittedByLimit,
+            renderEventRetention: report.renderEventRetention,
+            coverage: {
+              inputAttributionComplete:
+                report.skippedCommitFibers === 0 &&
+                report.droppedUnmountFibers === 0 &&
+                report.analysisFailedFibers === 0 &&
+                report.truncatedInputFibers === 0 &&
+                report.propsNotEnumeratedFibers === 0 &&
+                report.budgetExhaustedCommits === 0 &&
+                report.renderEventRetention.evictedEvents === 0,
+              complete:
+                report.skippedCommitFibers === 0 &&
+                report.droppedUnmountFibers === 0 &&
+                report.analysisFailedFibers === 0 &&
+                report.truncatedInputFibers === 0 &&
+                report.propsNotEnumeratedFibers === 0 &&
+                report.budgetExhaustedCommits === 0 &&
+                report.renderEventRetention.evictedEvents === 0,
+              skippedCommitFibers: report.skippedCommitFibers,
+              droppedUnmountFibers: report.droppedUnmountFibers,
+              analysisFailedFibers: report.analysisFailedFibers,
+              truncatedInputFibers: report.truncatedInputFibers,
+              propsNotEnumeratedFibers: report.propsNotEnumeratedFibers,
+              budgetExhaustedCommits: report.budgetExhaustedCommits,
+              budgetExhaustedSubsystems: report.budgetExhaustedSubsystems,
+              droppedRenderEvents: report.renderEventRetention.evictedEvents,
+            },
             filteredNote: appOnly
               ? appOnlyFilteredNote(events.length, libraryHidden, 'components')
               : undefined,
           }
         },
+      }),
+      defineCollectorTool({
+        contract: reactComponentCohortContract,
+        handler: ({ component, exact, limit }) =>
+          getRenderCohort(
+            findRootFiber(),
+            { component, exact, limit },
+            {
+              skippedCommitFibers: getSkippedCommitFiberCount(),
+              droppedUnmountFibers: getDroppedPendingUnmountFiberCount(),
+              analysisFailedFibers: getAnalysisFailedFiberCount(),
+              truncatedInputFibers: getTruncatedInputFiberCount(),
+              propsNotEnumeratedFibers: getPropsNotEnumeratedFiberCount(),
+              budgetExhaustedCommits: getBudgetExhaustedCommitCount(),
+              budgetExhaustedSubsystems: getBudgetExhaustedSubsystems(),
+            },
+          ),
       }),
       defineCollectorTool({
         contract: reactEffectAuditContract,
@@ -313,29 +409,76 @@ export function reactCollector(): GenieCollector {
           packageName,
           minUpdates,
           minFireRate,
+          minScheduleRate,
           limit,
         }) => {
-          const { components, libraryEffectsHidden, hotnessCriteria, packageFilter } =
-            await getEffectAuditReport({
-              component,
-              onlyHot,
-              appOnly,
-              packageName,
-              minUpdates,
-              minFireRate,
-              limit,
-            })
+          const tracking = isTracking()
+          const commits = getCommitCount()
+          const documentCommitId = getDocumentCommitId()
+          const analysisGeneration = getAnalysisGeneration()
+          const coverage = currentEffectCoverage()
+          const {
+            components,
+            omittedByLimit,
+            effectsOmittedByLimit,
+            libraryEffectsHidden,
+            hotnessCriteria,
+            packageFilter,
+          } = await getEffectAuditReport({
+            component,
+            onlyHot,
+            appOnly,
+            packageName,
+            minUpdates,
+            minFireRate,
+            minScheduleRate,
+            limit,
+            isAttributionCurrent: () =>
+              getDocumentCommitId() === documentCommitId &&
+              getAnalysisGeneration() === analysisGeneration,
+          })
+          const completedAtDocumentCommitId = getDocumentCommitId()
+          const completedAtAnalysisGeneration = getAnalysisGeneration()
           const appEffects = components.reduce((sum, c) => sum + c.effects.length, 0)
           const filteredNote = appOnly
             ? appOnlyFilteredNote(appEffects, libraryEffectsHidden, 'effects')
             : undefined
           return {
-            tracking: isTracking(),
-            commits: getCommitCount(),
+            tracking,
+            commits,
+            documentCommitId,
+            attribution: {
+              status:
+                completedAtDocumentCommitId === documentCommitId &&
+                completedAtAnalysisGeneration === analysisGeneration
+                  ? ('current' as const)
+                  : ('stale' as const),
+              startedAtDocumentCommitId: documentCommitId,
+              completedAtDocumentCommitId,
+              startedAtAnalysisGeneration: analysisGeneration,
+              completedAtAnalysisGeneration,
+            },
             hotnessCriteria,
             components,
+            omittedByLimit,
+            effectsOmittedByLimit,
+            coverage,
             filteredNote,
             packageFilter,
+          }
+        },
+      }),
+      defineCollectorTool({
+        contract: reactEffectEventsContract,
+        handler: ({ component, afterDocumentCommitId, limit }) => {
+          const tracking = isTracking()
+          const documentCommitId = getDocumentCommitId()
+          const coverage = currentEffectCoverage()
+          return {
+            tracking,
+            documentCommitId,
+            ...getEffectScheduleEvents({ component, afterDocumentCommitId, limit }),
+            coverage,
           }
         },
       }),
@@ -351,16 +494,27 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactClearRendersContract,
         handler: () => {
-          clearRenders()
-          return { ok: true, tracking: isTracking() }
+          startRenderTracking()
+          const observation = clearRenders()
+          return {
+            ok: true,
+            tracking: isTracking(),
+            documentCommitId: getDocumentCommitId(),
+            observation,
+          }
         },
       }),
       defineCollectorTool({
         contract: reactProfileStartContract,
         handler: () => {
           startRenderTracking()
-          clearRenders()
-          return { ok: true, tracking: isTracking() }
+          const observation = clearRenders()
+          return {
+            ok: true,
+            tracking: isTracking(),
+            documentCommitId: getDocumentCommitId(),
+            observation,
+          }
         },
       }),
       defineCollectorTool({
@@ -384,14 +538,18 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactProfileReportContract,
         handler: async ({ limit }) => {
-          const boards = await getRendersLeaderboards(limit)
+          const measurement = await getRendersLeaderboardsMeasurement(limit)
+          const { boards } = measurement
           const bySelfTime = boards.slowest
           const byRenders = boards.mostRerendered
           const byUnnecessary = boards.mostUnnecessary
           const byUnstable = boards.mostUnstable
           return {
-            commits: getCommitCount(),
-            tracking: isTracking(),
+            commits: measurement.commits,
+            tracking: measurement.tracking,
+            documentCommitId: measurement.documentCommitId,
+            attribution: measurement.attribution,
+            coverage: measurement.coverage,
             slowest: bySelfTime.map((r) => ({
               id: r.id,
               name: r.name,
@@ -418,6 +576,14 @@ export function reactCollector(): GenieCollector {
                 id: r.id,
                 name: r.name,
                 unstableRenders: r.unstableRenders,
+                renders: r.renders,
+              })),
+            mostReferenceOnly: byUnstable
+              .filter((r) => r.referenceOnlyPropRenders > 0)
+              .map((r) => ({
+                id: r.id,
+                name: r.name,
+                referenceOnlyPropRenders: r.referenceOnlyPropRenders,
                 renders: r.renders,
               })),
           }

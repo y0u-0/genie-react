@@ -46,6 +46,19 @@ import { Genie } from 'genie-react'
 
 `init` adds `<GenieScript />` to your root layout and creates `instrumentation.ts`, which starts a standalone hub alongside `next dev`. The hub serves the browser client to the page as one classic script.
 
+To add Query tools, render a small client component near `<GenieScript />` and pass the same client used by `QueryClientProvider`:
+
+```tsx
+'use client'
+
+import { Genie } from 'genie-react'
+import { queryClient } from './query-client'
+
+export function GenieRuntime() {
+  return process.env.NODE_ENV === 'production' ? null : <Genie queryClient={queryClient} />
+}
+```
+
 ### Other bundlers (CRA, Parcel, Rsbuild, …)
 
 Run `npx @genie-react/cli hub` and add one line first in `<head>`:
@@ -99,7 +112,23 @@ npx @genie-react/cli call router_navigate '{"to":"/dashboard"}'
 
 Run the CLI from the app directory. From a workspace root, it selects the only live Genie bridge. If several apps are live, it stops and lists each bridge instead of guessing.
 
-Render reports name the exact cause: a prop, state hook, context, query, router update, parent render, or mount. They also show a small value diff, for example `state[0] false→true`.
+Render reports show observed state, Context, Query, Router, children, parent-render, and mount evidence. Each cause says `exact`, `inferred`, or `unknown`. Arrays and documented store fields can include exact paths. Arbitrary object fields stay opaque and are marked incomplete.
+
+Genie never enumerates an arbitrary props container because it may be a Proxy. When its identity changes, `propsNotEnumerated` is true and input attribution is incomplete. Render counts and timings can still be complete. Use `react_inspect_component` with an explicit prop path when you need the value.
+
+Start each flow with `react_clear_renders`. It returns an observation ID. Render, effect, commit, Query observer, Router, subscriber, and component instance IDs let an agent follow that one observation without joining unrelated events by time.
+
+Use the focused follow-up tools:
+
+- `react_render_causes` shows changed inputs and observed behavior. `not-proven-safe` means the agent must still test DOM, ARIA, focus, URL, network, and transitions before removing a render.
+- `react_component_cohort` tells `mounted-idle`, `updated`, `unmounted`, and `absent` apart. It also reports omitted matches.
+- `react_effect_events` shows effects React scheduled. It does not claim that an effect or cleanup ran.
+- `react_effect_audit` reports the effect's source and sample-aware hotness. One update is `insufficient-data`; the 95% interval is useful only for this statistical hotness check.
+- Query causes include the matching observer and subscriber when public runtime identity proves them. `subscriberObservationStatus` says whether that subscriber belongs to the current measurement window. Private auto-tracked fields stay unavailable instead of being guessed.
+
+`coverage.complete` covers the tool's primary measurement. `coverage.inputAttributionComplete` covers render-cause inputs. A timing profile can be complete while props stay opaque. A stale report tells the agent to retry after commits settle. Render diffs report both baseline and current coverage; never use an incomplete side as proof that an optimization worked.
+
+Component source is often a JSX use site or definition fallback. Genie labels that location as inferred. Exact hook alignment can still report the app hook callsite, primitive hook source, and wrapper ancestry.
 
 Give each browser tab a stable name when several agents or tabs share a hub:
 
@@ -183,11 +212,13 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 - the component tree; find components by name
 - a component's props, state, hooks (each labeled: state / reducer / memo / callback / ref / effect), and the contexts it consumes
 - the DOM node(s) a component renders, each with a selector
-- what re-rendered, how often, and why — including unstable props that defeat `memo`
-- the causal event behind each render: props, state, context, query, router, or parent
-- which effects fired, who owns them, and whether enough samples prove they are hot
+- what re-rendered, how often, and which runtime input or parent was observed
+- the observed event behind each render: state, Context, Query, Router, children, or parent
+- stable component instance and mount identity, plus mounted, idle, updated, and unmounted cohorts
+- which effects React scheduled, who owns them, and whether enough samples prove they are hot
+- bounded array and known-store paths, with opaque objects reported as incomplete
 - caught errors and suspended boundaries — why a screen is blank or stuck
-- a profiler: slowest, most re-rendered, most wasted on unstable props
+- a profiler: peak render cost, cumulative window cost, render counts, and no-observed-input updates when attribution is complete
 - the TanStack Query cache: staleness, observers, refetch storms, cache churn
 - the Router: state, matches, params, loaders
 - the browser JS heap
@@ -207,7 +238,7 @@ Together your agent closes the loop on its own: make a change, drive the app, re
 
 The available tool count depends on the collectors in the running app. `read` tools are safe to call freely; `action` tools mutate the running app. Each tool documents itself — `tools <group>` lists a group, `tools <tool>` prints the full schema — so here are just the names:
 
-**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_render_causes`, `react_clear_renders`, `react_effect_audit`, `react_error_state`, `react_refresh_events`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
+**React** — read: `react_get_tree`, `react_find_components`, `react_inspect_component`, `react_inspect_context`, `react_dom_for_component`, `react_component_for_dom`, `react_get_renders`, `react_render_causes`, `react_component_cohort`, `react_clear_renders`, `react_effect_audit`, `react_effect_events`, `react_error_state`, `react_refresh_events`, `react_profile_start`, `react_profile_stop`, `react_profile_report`, `react_profile_snapshot`, `react_renders_diff`, `react_list_overrides`. action: `react_override_props`, `react_override_hook_state`, `react_override_context`, `react_toggle_suspense_fallback`, `react_force_error_boundary`, `react_reset_overrides`.
 
 **Query** — read: `query_list`, `query_get`, `query_get_data`, `query_is_fetching`, `query_list_mutations`, `mutation_get`. action: `query_invalidate`, `query_refetch`, `query_cancel`, `query_reset`, `query_remove`, `query_clear`, `query_set_data`, `query_simulate_state`, `query_restore_state`, `query_fetch`, `query_ensure`, `mutation_rerun`.
 

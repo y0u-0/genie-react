@@ -19,6 +19,7 @@ import {
   summarizeResetOverrides,
   summarizeRouterRoutes,
   summarizeRouterState,
+  summarizeSessionsOnly,
   summarizeStatus,
   summarizeTree,
 } from './agent'
@@ -72,19 +73,19 @@ const rendersPayload = {
 }
 
 describe('summarizeRenders', () => {
-  it('renders a header, unstable-prop line, and one padded line per component', () => {
+  it('renders reference-only prop evidence without implying a bad optimization verdict', () => {
     const lines = summarizeRenders(rendersPayload)?.split('\n')
     expect(lines?.[0]).toBe(
-      '6 commits · 2 components · 9 renders · 7 updates · 1 unstable · 1 unnecessary',
+      '6 commits · 2 components · 9 renders · 7 updates · 1 reference-only prop candidates · 1 no observed input change',
     )
-    expect(lines?.[1]).toBe('unstable props: onClick×3, style×2')
+    expect(lines?.[1]).toBe('reference-only props: onClick×3, style×2')
     expect(lines?.[2]).toBe(
-      '  Dashboard #1 5× (1m 4u) · 2 unnec · 3 unstable · self 1.2ms · ↻ props: onClick(unstable), count',
+      '  Dashboard #1 5× (1m 4u) · 2 no observed input change · 3 reference-only props · peak self 1.2ms · ↻ props: onClick(reference changed), count',
     )
     expect(lines?.[3]).toContain('Row')
-    expect(lines?.[3]).toContain('4× (4m 0u) · forget · self 0.4ms')
-    expect(lines?.[3]).not.toContain('unnec')
-    expect(lines?.[3]).not.toContain('unstable')
+    expect(lines?.[3]).toContain('4× (4m 0u) · memo cache · peak self 0.4ms')
+    expect(lines?.[3]).not.toContain('no observed input change')
+    expect(lines?.[3]).not.toContain('reference-only')
   })
 
   it('tolerates components both with and without the optional source field', () => {
@@ -128,7 +129,7 @@ describe('summarizeRenders', () => {
       ],
     }
     const line = summarizeRenders(payload)?.split('\n')[2]
-    expect(line).toContain('↻ props: style(unstable), onClick · state')
+    expect(line).toContain('↻ props: style(reference changed), onClick · state')
   })
 
   it('shows a bare legacy state marker when only state changed', () => {
@@ -217,11 +218,13 @@ const effectsPayload = {
 describe('summarizeEffects', () => {
   it('renders a header and one line per effect with flags and notes', () => {
     const lines = summarizeEffects(effectsPayload)?.split('\n')
-    expect(lines?.[0]).toBe('4 commits · 1 components with effects')
+    expect(lines?.[0]).toBe('4 commits · 1 component with effects')
     expect(lines?.[1]).toBe(
-      '  Search #7 [0] effect deps=list(2) fired 4/4 EVERY no-cleanup · ! refetch on every keystroke',
+      '  Search #7 [0] effect deps=list(2) scheduled 4/4 EVERY no cleanup function observed · ! refetch on every keystroke',
     )
-    expect(lines?.[2]).toBe('  Search #7 [1] layout deps=empty(0) fired 0/4 cleanup')
+    expect(lines?.[2]).toBe(
+      '  Search #7 [1] layout deps=empty(0) scheduled 0/4 cleanup function observed',
+    )
   })
 
   it('tolerates effects both with and without the optional source field', () => {
@@ -299,9 +302,11 @@ describe('summarizeEffects', () => {
     })
 
     expect(output).toContain('hot ≥3 updates @ 100%')
-    expect(output).toContain('fired 3/3 HOT no-cleanup · lib:@tanstack/react-query/exact')
     expect(output).toContain(
-      'fired 1/1 sample 1/3 no-cleanup · owner unknown (hook-count-mismatch)',
+      'scheduled 3/3 HOT no cleanup function observed · lib:@tanstack/react-query/exact',
+    )
+    expect(output).toContain(
+      'scheduled 1/1 sample 1/3 no cleanup function observed · owner unknown (hook-count-mismatch)',
     )
   })
 
@@ -371,6 +376,37 @@ describe('renderResult', () => {
     )
   })
 
+  it('uses new React summaries only for human output', () => {
+    const cohort = {
+      query: { component: 'Row', exact: true },
+      status: 'absent',
+      matched: 0,
+      mountedUpdated: 0,
+      mountedIdle: 0,
+      unmounted: 0,
+      returned: 0,
+      omittedByLimit: 0,
+      instances: [],
+      coverage: { complete: true },
+    }
+    const effectEvents = {
+      tracking: true,
+      documentCommitId: 4,
+      observation: null,
+      events: [],
+      droppedEvents: 0,
+    }
+
+    expect(renderResult('react_component_cohort', cohort)).toContain('"Row" · absent')
+    expect(renderResult('react_effect_events', effectEvents)).toBe(
+      '0 effect schedules · document commit 4',
+    )
+    expect(renderResult('react_component_cohort', cohort, true)).toBe(JSON.stringify(cohort))
+    expect(renderResult('react_effect_events', effectEvents, true)).toBe(
+      JSON.stringify(effectEvents),
+    )
+  })
+
   it('falls back to pretty JSON for an unknown tool', () => {
     const payload = { a: 1, b: [2, 3] }
     expect(renderResult('devtools_status', payload)).toBe(JSON.stringify(payload, null, 2))
@@ -424,8 +460,56 @@ describe('new summarizers', () => {
     expect(multi).toContain('2 sessions')
     expect(multi).toContain('aaa-111 · http://x/?_genie=a · (current)')
     expect(multi).toContain('--session <target>')
+    const pinned = summarizeStatus(
+      {
+        connected: true,
+        app: { name: 'Demo' },
+        toolCount: 51,
+        sessions: [
+          { sessionId: 'aaa-111', app: { url: 'http://x/?_genie=a' }, current: true },
+          { sessionId: 'bbb-222', app: { url: 'http://x/?_genie=b' }, current: false },
+        ],
+      },
+      { targetSessionId: 'bbb-222' },
+    )
+    expect(pinned).toContain('bbb-222 · http://x/?_genie=b · (target)')
+    expect(pinned).not.toContain('target one:')
     expect(summarizeStatus({ connected: false, sessions: [] })).toContain('not connected')
     expect(summarizeStatus({ nope: 1 })).toBeNull()
+  })
+
+  it('summarizeSessionsOnly: marks the requested target and exposes a stale heartbeat', () => {
+    const output = summarizeSessionsOnly(
+      {
+        connected: true,
+        ready: true,
+        sessionId: 'bbb-222',
+        sessions: [
+          {
+            sessionId: 'aaa-111',
+            sessionName: 'browser',
+            ready: true,
+            current: true,
+          },
+          {
+            sessionId: 'bbb-222',
+            sessionName: 'agent',
+            logicalSessionId: 'logical-agent',
+            documentGeneration: 3,
+            ready: true,
+            current: false,
+            staleMs: 12_400,
+          },
+        ],
+      },
+      { targetSessionId: 'bbb-222' },
+    )
+
+    expect(output.split('\n')).toEqual([
+      '2 sessions',
+      '  aaa-111 · name=browser · ready · current',
+      '  bbb-222 · name=agent · logical=logical-agent · generation=3 · ready · target · stale (no heartbeat for 12s)',
+    ])
   })
 
   it('summarizeQueryList: header flags + one line per query', () => {
@@ -490,13 +574,36 @@ describe('new summarizers', () => {
       slowest: [{ id: 1, name: 'Dash', selfTime: 12.06, renders: 5 }],
       mostRerendered: [{ id: 2, name: 'Row', renders: 9, unnecessary: 4 }],
       mostUnnecessary: [{ id: 2, name: 'Row', unnecessary: 4, renders: 9 }],
-      mostUnstable: [{ id: 3, name: 'Badge', unstableRenders: 3, renders: 5 }],
+      mostReferenceOnly: [{ id: 3, name: 'Badge', referenceOnlyPropRenders: 3, renders: 5 }],
+      coverage: { complete: false, skippedCommitFibers: 2 },
     })
     expect(outText).toContain('5 commits')
-    expect(outText).toContain('slowest: Dash 12.1ms×5')
+    expect(outText).toContain('slowest (peak): Dash 12.1ms×5')
     expect(outText).toContain('re-rendered: Row 9×')
-    expect(outText).toContain('unnecessary: Row 4/9')
-    expect(outText).toContain('unstable: Badge 3/5')
+    expect(outText).toContain('no observed input change: Row 4/9')
+    expect(outText).toContain('reference-only props: Badge 3/5')
+    expect(outText).toContain('coverage incomplete (2 commit fibers skipped)')
+  })
+
+  it('keeps measurement coverage valid while disclosing partial input attribution', () => {
+    const outText = summarizeProfile({
+      commits: 2,
+      tracking: true,
+      slowest: [],
+      mostRerendered: [],
+      mostUnnecessary: [],
+      mostReferenceOnly: [],
+      coverage: {
+        complete: true,
+        inputAttributionComplete: false,
+        propsNotEnumeratedFibers: 2,
+      },
+    })
+
+    expect(outText).toContain(
+      'input attribution partial (2 prop containers not enumerated; inspect an explicit prop or path)',
+    )
+    expect(outText).not.toContain('coverage incomplete')
   })
 
   it('summarizeFps: verdict, average, and stall detail on one line', () => {
@@ -558,6 +665,36 @@ describe('new summarizers', () => {
     })
     expect(outText).toContain('data: [50 items] first: {t, value}')
     expect(outText.length).toBeLessThan(200)
+  })
+
+  it('shows bounded Query observer and subscriber evidence', () => {
+    const outText = renderResult('query_get', {
+      queryHash: '["greeting"]',
+      queryKey: ['greeting'],
+      status: 'success',
+      fetchStatus: 'idle',
+      isStale: false,
+      observerCount: 7,
+      observers: Array.from({ length: 6 }, (_, index) => ({
+        observerId: `query-observer:${index + 1}`,
+        identityStatus: 'current',
+        notificationPolicy: { mode: 'auto-tracked', trackedFieldsAvailable: false },
+        deliveryEvidence: 'unavailable-private-tracking',
+        subscriberObservationStatus: index === 0 ? 'previous-observation' : 'current-observation',
+        subscriber: {
+          subscriberId: `subscriber:mount:2:${index}`,
+          componentId: 4,
+          componentName: 'App',
+          hookIndex: 7,
+        },
+      })),
+    })
+
+    expect(outText).toContain(
+      'observer query-observer:1 · current · auto tracked · delivery unavailable (private tracking) · ! subscriber previous observation · subscriber App #4 hook[7] · subscriber:mount:2:0',
+    )
+    expect(outText).not.toContain('query-observer:6')
+    expect(outText).toContain('+2 observers omitted')
   })
 
   it('small flat action results render as one line instead of pretty JSON', () => {
@@ -675,10 +812,18 @@ describe('override + diff summarizers', () => {
           after: { renders: 3, selfTime: 1.8 },
         },
       ],
+      coverage: {
+        baseline: { complete: false, truncatedInputFibers: 1 },
+        current: { complete: false, budgetExhaustedCommits: 1 },
+      },
     })
-    expect(outText).toContain('40ms → 25ms (-37.5%) · commits 10→6 · 1 regressed · 1 improved')
+    expect(outText).toContain(
+      'window self 40ms → 25ms (-37.5%) · commits 10→6 · 1 regressed · 1 improved',
+    )
     expect(outText).toContain('  Row +3.2ms')
     expect(outText).toContain('  Dashboard -18.2ms')
+    expect(outText).toContain('baseline coverage incomplete (1 component input scans truncated)')
+    expect(outText).toContain('current coverage incomplete (1 commit budgets exhausted)')
     expect(summarizeRendersDiff({ nope: 1 })).toBeNull()
   })
 
@@ -690,13 +835,22 @@ describe('override + diff summarizers', () => {
       regressed: [],
       improved: [],
     })
-    expect(outText).toContain('10ms → 22ms (+120%)')
+    expect(outText).toContain('window self 10ms → 22ms (+120%)')
   })
 
   it('summarizeProfileSnapshot: a single line', () => {
     expect(
       summarizeProfileSnapshot({ ok: true, label: 'baseline', commits: 6, components: 12 }),
     ).toBe('snapshot "baseline" · 6 commits · 12 components')
+    expect(
+      summarizeProfileSnapshot({
+        ok: true,
+        label: 'partial',
+        commits: 2,
+        components: 4,
+        coverage: { complete: false, analysisFailedFibers: 1 },
+      }),
+    ).toContain('coverage incomplete (1 component analyses failed)')
     expect(summarizeProfileSnapshot({ nope: 1 })).toBeNull()
   })
 })

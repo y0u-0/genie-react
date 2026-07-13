@@ -2,6 +2,12 @@ import type { QueryClient, QueryFunction } from '@tanstack/react-query'
 import { z } from 'zod'
 import { defineCollector, defineCollectorTool, type GenieCollector } from '../../client'
 import { defineAgentToolContract, dehydrate } from '../../protocol'
+import { registerQueryObserver } from '../causal/external-store-registry'
+import {
+  QUERY_OBSERVER_LIMIT,
+  queryObserverSummarySchema,
+  summarizeQueryObserver,
+} from './query-observers'
 
 type CachedQuery = ReturnType<ReturnType<QueryClient['getQueryCache']>['getAll']>[number]
 type CachedMutation = ReturnType<ReturnType<QueryClient['getMutationCache']>['getAll']>[number]
@@ -101,7 +107,7 @@ const queryGetContract = defineAgentToolContract({
   name: 'query_get',
   title: 'Get a TanStack query',
   description:
-    'Get the full state and depth-bounded data of one query by its queryHash or queryKey (from query_list). hasQueryFn tells you whether query_fetch / query_ensure can re-run it. fetchCount (total settled fetches) and recentFetches (fetches in the last 10s) together reveal a refetch storm (staleTime:0 / refetchInterval) in a single call.',
+    'Get the full state and depth-bounded data of one query by its queryHash or queryKey (from query_list). Each observer says whether its component subscriber was seen after the latest react_clear_renders, so old evidence cannot look current. hasQueryFn tells you whether query_fetch / query_ensure can re-run it. fetchCount (total settled fetches) and recentFetches (fetches in the last 10s) together reveal a refetch storm (staleTime:0 / refetchInterval) in a single call.',
   group: 'query',
   input: z
     .object({
@@ -122,6 +128,7 @@ const queryGetContract = defineAgentToolContract({
     isActive: z.boolean(),
     isInvalidated: z.boolean(),
     observerCount: z.number(),
+    observersOmitted: z.number().int().nonnegative(),
     hasQueryFn: z.boolean(),
     gcTime: z.number().optional(),
     staleTime: z.number().optional(),
@@ -139,6 +146,7 @@ const queryGetContract = defineAgentToolContract({
     fetchMeta: z.unknown(),
     error: z.string().optional(),
     data: z.unknown(),
+    observers: z.array(queryObserverSummarySchema),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -591,6 +599,9 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
     meta: { id: 'query', title: 'TanStack Query', description: 'Query + mutation cache' },
     capabilities: ['query'],
     start: (ctx) => {
+      for (const query of queryCache().getAll()) {
+        for (const observer of query.observers) registerQueryObserver(observer)
+      }
       let scheduled = false
       const push = () => {
         if (scheduled) return
@@ -601,6 +612,9 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
         })
       }
       const offQuery = queryCache().subscribe((event) => {
+        if (event.type === 'observerAdded' || event.type === 'observerOptionsUpdated') {
+          registerQueryObserver(event.observer)
+        }
         if (event.type === 'removed') {
           fetchActivity.delete(event.query.queryHash)
           if (simulationFor(event.query)) querySimulations.delete(event.query.queryHash)
@@ -662,6 +676,10 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
             fetchMeta: dehydrate(query.state.fetchMeta, { depth: 2 }),
             error: formatError(query.state.error),
             data: dehydrate(query.state.data, { depth, path }),
+            observersOmitted: Math.max(0, query.observers.length - QUERY_OBSERVER_LIMIT),
+            observers: query.observers
+              .slice(0, QUERY_OBSERVER_LIMIT)
+              .map((observer) => summarizeQueryObserver(observer as unknown as object)),
           }
         },
       }),

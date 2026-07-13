@@ -88,6 +88,17 @@ export function registerFiber(fiber: Fiber): NodeId {
 const committedRoots = new Map<FiberRoot, Fiber>()
 const ROOT_CANDIDATE_SCAN_LIMIT = 100
 const ROOT_SCORE_LIMIT = 2_000
+const COMMITTED_ROOT_SCOPE_LIMIT = 100
+
+export interface CommittedRootScope {
+  /** Unique live roots included in this bounded scope, in first-committed order. */
+  roots: Fiber[]
+  /** Number of roots in `roots`; a lower bound when `truncated` is true. */
+  rootCount: number
+  rootLimit: number
+  /** At least one additional unique committed root exists outside this scope. */
+  truncated: boolean
+}
 
 // DevTools semantics: a commit whose current has no child is that root unmounting, so it stops being a candidate (and stops being retained).
 export function noteCommittedRoot(root: FiberRoot): void {
@@ -102,6 +113,39 @@ export function noteCommittedRoot(root: FiberRoot): void {
 /** Test-only escape hatch: drop every tracked root. */
 export function forgetCommittedRoots(): void {
   committedRoots.clear()
+}
+
+/** Return every unique live root observed through the commit hook, up to a hard cap, for document-wide lifecycle reads. */
+export function findAllCommittedRootFibers(): CommittedRootScope {
+  const roots: Fiber[] = []
+  const seen = new Set<Fiber>()
+  let truncated = false
+
+  for (const [owner] of committedRoots) {
+    const current = owner.current
+    if (!current || current.child === null) {
+      committedRoots.delete(owner)
+      continue
+    }
+
+    // Read FiberRoot.current at query time so a missed observer turn cannot return an old buffer.
+    committedRoots.set(owner, current)
+    const root = climbToRoot(current)
+    if (seen.has(root)) continue
+    seen.add(root)
+    if (roots.length >= COMMITTED_ROOT_SCOPE_LIMIT) {
+      truncated = true
+      break
+    }
+    roots.push(root)
+  }
+
+  return {
+    roots,
+    rootCount: roots.length,
+    rootLimit: COMMITTED_ROOT_SCOPE_LIMIT,
+    truncated,
+  }
 }
 
 // Tree generation: bumped on every observed commit. Staying at 0 means commit delivery is unproven, which keeps the walk cache disabled rather than ever serving a stale tree.

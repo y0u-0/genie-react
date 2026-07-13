@@ -1,9 +1,22 @@
 import { isRecord } from './guards'
+import {
+  attributionSuffix,
+  coverageLabel,
+  coverageSuffix,
+  inputAttributionSuffix,
+  renderEventRetentionSuffix,
+} from './react-coverage-output'
+import { summarizeEffectEvents, summarizeEffects } from './react-effect-output'
+import { bounded, num, preferredCount, sourceSuffix } from './react-output-utils'
+
+export { summarizeEffectEvents, summarizeEffects } from './react-effect-output'
 
 export const reactSummarizers: Record<string, (result: unknown) => string | null> = {
   react_get_renders: summarizeRenders,
   react_render_causes: summarizeRenderCauses,
+  react_component_cohort: summarizeComponentCohort,
   react_effect_audit: summarizeEffects,
+  react_effect_events: summarizeEffectEvents,
   react_get_tree: summarizeTree,
   react_dom_for_component: summarizeDom,
   react_component_for_dom: summarizeComponentForDom,
@@ -23,17 +36,31 @@ export function summarizeRenders(result: unknown): string | null {
   if (!isRecord(summary) || !Array.isArray(components)) return null
 
   const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
+  const noObservedInputChangeComponents = preferredCount(
+    summary.noObservedInputChangeComponents,
+    summary.unnecessaryComponents,
+  )
+  const referenceOnlyPropComponents = preferredCount(
+    summary.referenceOnlyPropComponents,
+    summary.unstableComponents,
+  )
+  const omitted =
+    typeof result.omittedByLimit === 'number'
+      ? result.omittedByLimit
+      : Math.max(0, num(summary.trackedComponents) - components.length)
   const lines = [
-    `${num(summary.commits)} commits · ${num(summary.trackedComponents)} components · ${num(summary.totalRenders)} renders · ${num(summary.totalUpdates)} updates · ${num(summary.unstableComponents)} unstable · ${num(summary.unnecessaryComponents)} unnecessary${trackingOff}`,
+    `${num(summary.commits)} commits · ${num(summary.trackedComponents)} components · ${num(summary.totalRenders)} renders · ${num(summary.totalUpdates)} updates${referenceOnlyPropComponents > 0 ? ` · ${referenceOnlyPropComponents} reference-only prop candidates` : ''} · ${noObservedInputChangeComponents} no observed input change${omitted > 0 ? ` · ${omitted} omitted` : ''}${attributionSuffix(result.attribution)}${coverageSuffix(result.coverage)}${trackingOff}`,
   ]
 
-  const topUnstableProps = summary.topUnstableProps
-  if (Array.isArray(topUnstableProps) && topUnstableProps.length > 0) {
-    const props = topUnstableProps
+  const topReferenceOnlyProps = Array.isArray(summary.topReferenceOnlyProps)
+    ? summary.topReferenceOnlyProps
+    : summary.topUnstableProps
+  if (Array.isArray(topReferenceOnlyProps) && topReferenceOnlyProps.length > 0) {
+    const props = topReferenceOnlyProps
       .filter(isRecord)
       .map((prop) => `${String(prop.name)}×${num(prop.count)}`)
       .join(', ')
-    lines.push(`unstable props: ${props}`)
+    lines.push(`reference-only props: ${props}`)
   }
 
   const records = components.filter(isRecord)
@@ -42,11 +69,21 @@ export function summarizeRenders(result: unknown): string | null {
     const parts = [
       `  ${String(component.name).padEnd(width)} #${num(component.id)} ${num(component.renders)}× (${num(component.mounts)}m ${num(component.updates)}u)`,
     ]
-    if (num(component.unnecessary) > 0) parts.push(`· ${num(component.unnecessary)} unnec`)
-    if (num(component.unstableRenders) > 0)
-      parts.push(`· ${num(component.unstableRenders)} unstable`)
-    if (component.forget === true) parts.push('· forget')
-    parts.push(`· self ${round(num(component.selfTime))}ms`)
+    const noObservedInputChange = preferredCount(
+      component.noObservedInputChange,
+      component.unnecessary,
+    )
+    if (noObservedInputChange > 0) parts.push(`· ${noObservedInputChange} no observed input change`)
+    const referenceOnlyPropRenders = preferredCount(
+      component.referenceOnlyPropRenders,
+      component.unstableRenders,
+    )
+    if (referenceOnlyPropRenders > 0)
+      parts.push(`· ${referenceOnlyPropRenders} reference-only props`)
+    if (hasMemoCacheEvidence(component)) parts.push('· memo cache')
+    const assessment = renderAssessmentEvidence(component.assessment)
+    if (assessment) parts.push(`· ${assessment}`)
+    parts.push(`· peak self ${round(num(component.selfTime))}ms`)
     const cause = renderCausalEvidence(component.causes) ?? renderCause(component.changes)
     if (cause) parts.push(`· ↻ ${cause}`)
     lines.push(parts.join(' ') + sourceSuffix(component))
@@ -63,31 +100,35 @@ function renderCausalEvidence(causes: unknown): string | null {
 }
 
 function renderCausalCause(cause: Record<string, unknown>): string {
-  const inferred = cause.evidence === 'inferred' ? ' (inferred)' : ''
+  const evidence = evidenceSuffix(cause.evidence)
   switch (cause.kind) {
     case 'mount':
-      return 'mount'
+      return `mount${evidence}`
     case 'props':
-      return `prop ${String(cause.name)}${cause.unstable === true ? ' (unstable)' : ''}`
+      return `prop ${String(cause.name)}${cause.referenceOnly === true ? ' (reference-only)' : cause.referenceChanged === true || cause.unstable === true ? ' (reference changed)' : ''}${changedPathsSuffix(cause.deepDiff)}${evidence}`
     case 'state':
-      return `${String(cause.name)} ${renderChangeValue(cause.before)}→${renderChangeValue(cause.after)}`
+      return `${String(cause.name)} ${renderChangeValue(cause.before)}→${renderChangeValue(cause.after)}${evidence}`
     case 'children':
-      return 'children'
+      return `children${evidence}`
     case 'context':
-      return `context ${String(cause.name)} ${renderChangeValue(cause.before)}→${renderChangeValue(cause.after)}`
+      return `context ${String(cause.name)} ${renderChangeValue(cause.before)}→${renderChangeValue(cause.after)}${evidence}`
     case 'query': {
-      const hash = typeof cause.queryHash === 'string' ? ` ${cause.queryHash}` : ''
-      return `query${hash}${changedFieldsSuffix(cause.changedFields)}${inferred}`
+      const hash = typeof cause.queryHash === 'string' ? ` ${bounded(cause.queryHash)}` : ''
+      return `query${hash}${changedFieldsSuffix(cause.changedFields)}${changedPathsSuffix(cause.deepDiff)}${identitySuffix(cause)}${hookProvenanceSuffix(cause.hookProvenance)}${evidence}`
     }
     case 'router':
-      return `router${changedFieldsSuffix(cause.changedFields)}${inferred}`
+      return `router${changedFieldsSuffix(cause.changedFields)}${changedPathsSuffix(cause.deepDiff)}${identitySuffix(cause)}${hookProvenanceSuffix(cause.hookProvenance)}${evidence}`
     case 'external-store':
-      return `external store hook[${num(cause.hookIndex)}]${changedFieldsSuffix(cause.changedFields)}`
+      return `external store hook[${num(cause.hookIndex)}]${changedFieldsSuffix(cause.changedFields)}${changedPathsSuffix(cause.deepDiff)}${identitySuffix(cause)}${hookProvenanceSuffix(cause.hookProvenance)}${evidence}`
     case 'parent':
-      return `parent ${String(cause.parentName)} #${num(cause.parentId)}${inferred}`
+      return `parent ${String(cause.parentName)} #${num(cause.parentId)}${evidence}`
     default:
-      return 'unknown cause'
+      return `unknown cause${evidence}`
   }
+}
+
+function evidenceSuffix(value: unknown): string {
+  return value === 'exact' || value === 'inferred' || value === 'unknown' ? ` (${value})` : ''
 }
 
 function changedFieldsSuffix(fields: unknown): string {
@@ -96,79 +137,169 @@ function changedFieldsSuffix(fields: unknown): string {
   return names.length > 0 ? ` changed ${names.slice(0, 5).join(',')}` : ''
 }
 
+function changedPathsSuffix(diff: unknown): string {
+  if (!isRecord(diff) || !Array.isArray(diff.changes)) return ''
+  const paths = [...new Set(diff.changes.filter(isRecord).map((change) => change.path))].filter(
+    (path): path is string => typeof path === 'string',
+  )
+  const incomplete = diff.truncated === true ? ' (incomplete)' : ''
+  if (paths.length === 0) return incomplete ? ` paths unavailable${incomplete}` : ''
+  const shown = paths.slice(0, 3).map((path) => path || '<root>')
+  return ` paths ${shown.join(',')}${paths.length > shown.length ? `,+${paths.length - shown.length}` : ''}${incomplete}`
+}
+
+function identitySuffix(cause: Record<string, unknown>): string {
+  const parts: string[] = []
+  if (typeof cause.observerId === 'string') parts.push(`observer ${cause.observerId}`)
+  if (typeof cause.subscriberId === 'string') parts.push(`subscriber ${cause.subscriberId}`)
+  if (typeof cause.routerId === 'string') parts.push(cause.routerId)
+  return parts.length > 0 ? ` · ${parts.join(' · ')}` : ''
+}
+
+function hookProvenanceSuffix(provenance: unknown): string {
+  if (!isRecord(provenance)) return ''
+  if (provenance.status === 'unavailable' && typeof provenance.reason === 'string') {
+    return ` · hook source unknown (${bounded(provenance.reason)})`
+  }
+  if (provenance.status !== 'exact' || !isRecord(provenance.callsite)) return ''
+  const source = provenance.callsite
+  if (typeof source.file !== 'string') return ''
+  const base = source.file.split('/').filter(Boolean).pop() || source.file
+  return ` · hook ${base}${typeof source.line === 'number' ? `:${source.line}` : ''}`
+}
+
 export function summarizeRenderCauses(result: unknown): string | null {
   if (!isRecord(result) || !Array.isArray(result.events)) return null
   const events = result.events.filter(isRecord)
   const lines = [
-    `${events.length} causal render event${events.length === 1 ? '' : 's'} · ${num(result.commits)} commits`,
+    `${events.length} causal render event${events.length === 1 ? '' : 's'} · ${num(result.commits)} commits${num(result.omittedByLimit) > 0 ? ` · ${num(result.omittedByLimit)} omitted` : ''}${attributionSuffix(result.attribution)}${renderEventRetentionSuffix(result.renderEventRetention)}${coverageSuffix(result.coverage)}`,
   ]
   for (const event of events) {
     const cause = renderCausalEvidence(event.causes) ?? 'unknown cause'
+    const evidence =
+      renderAssessmentEvidence(event.assessment) ?? renderLegacyNecessity(event.necessity)
     lines.push(
-      `  commit ${num(event.commitId)} · ${String(event.componentName)} #${num(event.componentId)} · ${String(event.necessity)} · ↻ ${cause}${sourceSuffix(event)}`,
+      `  commit ${num(event.commitId)} · ${String(event.componentName)} #${num(event.componentId)} · ${evidence} · ↻ ${cause}${sourceSuffix(event)}`,
     )
   }
   return lines.join('\n')
 }
 
-export function summarizeEffects(result: unknown): string | null {
-  if (!isRecord(result)) return null
-  const { components } = result
-  if (!Array.isArray(components)) return null
+function renderAssessmentEvidence(assessment: unknown): string | null {
+  if (!isRecord(assessment)) return null
 
-  const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
-  const criteria = isRecord(result.hotnessCriteria) ? result.hotnessCriteria : null
-  const threshold = criteria
-    ? ` · hot ≥${num(criteria.minUpdates)} updates @ ${Math.round(num(criteria.minFireRate) * 100)}%`
-    : ''
-  const lines = [
-    `${num(result.commits)} commits · ${components.length} components with effects${threshold}${trackingOff}`,
+  let input: string
+  switch (assessment.inputEvidence) {
+    case 'mount':
+      input = 'mount'
+      break
+    case 'changed':
+      input = 'changed'
+      break
+    case 'none-observed':
+      input = 'no observed input change'
+      break
+    case 'incomplete':
+      input = 'incomplete'
+      break
+    default:
+      input = 'unknown'
+  }
+
+  const needsSafety =
+    assessment.optimizationSafety === 'not-proven-safe' &&
+    (assessment.inputEvidence === 'none-observed' ||
+      assessment.inputEvidence === 'incomplete' ||
+      input === 'unknown')
+  return `input: ${input}${needsSafety ? ' · not proven safe' : ''}`
+}
+
+function renderLegacyNecessity(necessity: unknown): string {
+  if (necessity === 'unnecessary') return 'no observed input change'
+  if (necessity === 'necessary' || necessity === 'unknown') return necessity
+  return 'unknown'
+}
+
+function hasMemoCacheEvidence(component: Record<string, unknown>): boolean {
+  if (isRecord(component.compiler)) return component.compiler.memoCacheObserved === true
+  return component.forget === true
+}
+
+export function summarizeComponentCohort(result: unknown): string | null {
+  if (!isRecord(result) || !isRecord(result.query) || !Array.isArray(result.instances)) return null
+  if (typeof result.query.component !== 'string') return null
+
+  const target = bounded(JSON.stringify(result.query.component))
+  if (result.status === 'not-started') {
+    return `${target} · measurement not started · run react_clear_renders`
+  }
+
+  const status = cohortStatus(result.status)
+  const parts = [
+    target,
+    status,
+    `${num(result.matched)} matched`,
+    `${num(result.mountedUpdated)} updated`,
+    `${num(result.mountedIdle)} mounted idle`,
+    `${num(result.mountedUnknown)} mounted unknown`,
+    `${num(result.unmounted)} unmounted`,
   ]
-  for (const component of components) {
-    if (!isRecord(component) || !Array.isArray(component.effects)) continue
-    const head = `${String(component.name)} #${num(component.id)}`
-    for (const effect of component.effects) {
-      if (!isRecord(effect)) continue
-      const parts = [
-        `  ${head} [${num(effect.index)}] ${String(effect.kind)} deps=${String(effect.depsMode)}(${num(effect.depCount)}) fired ${num(effect.fired)}/${num(effect.updates)}`,
-      ]
-      const hotness = isRecord(effect.hotness) ? effect.hotness : null
-      if (hotness?.label === 'hot') parts.push('HOT')
-      else if (hotness?.label === 'insufficient-data')
-        parts.push(`sample ${num(hotness.samples)}/${num(hotness.minUpdates)}`)
-      else if (!hotness && effect.firesEveryUpdate === true) parts.push('EVERY')
-      parts.push(effect.hasCleanup === true ? 'cleanup' : 'no-cleanup')
-      if (typeof effect.note === 'string' && effect.note.length > 0)
-        parts.push(`· ! ${effect.note}`)
-      const provenance = isRecord(effect.provenance) ? effect.provenance : null
-      const evidence = provenanceEvidence(provenance)
-      if (provenance?.ownership === 'library')
-        parts.push(
-          typeof provenance.packageName === 'string'
-            ? `· lib:${provenance.packageName}/${evidence}`
-            : `· library/${evidence}`,
-        )
-      else if (provenance?.ownership === 'app') parts.push(`· app/${evidence}`)
-      else if (provenance?.ownership === 'unknown')
-        parts.push(`· owner unknown (${String(provenance.reason)})`)
-      else if (!provenance && effect.isLibrary === true) parts.push('· lib')
-      lines.push(parts.join(' ') + sourceSuffix(effect))
-    }
+  if (num(result.omittedByLimit) > 0) parts.push(`${num(result.omittedByLimit)} omitted`)
+  const coverage = coverageLabel(result.coverage)
+  if (coverage) parts.push(coverage)
+
+  const lines = [parts.join(' · ')]
+  for (const entry of result.instances) {
+    if (!isRecord(entry) || !isRecord(entry.instance)) continue
+    const instance = entry.instance
+    const line = [
+      `  ${cohortInstanceStatus(entry.status)}`,
+      cohortInstanceLabel(entry, instance),
+      `mount ${String(instance.mountId)}`,
+      `generation ${num(instance.mountGeneration)}${instance.mountGenerationEvidence === 'unknown' ? ' (unknown)' : ''}`,
+    ]
+    if (typeof instance.logicalIdentityEvidence === 'string')
+      line.push(instance.logicalIdentityEvidence)
+    if (typeof instance.logicalPath === 'string') line.push(bounded(instance.logicalPath))
+    lines.push(line.join(' · '))
   }
   return lines.join('\n')
 }
 
-function provenanceEvidence(provenance: Record<string, unknown> | null): string {
-  if (
-    provenance?.evidence === 'exact' ||
-    provenance?.evidence === 'inferred' ||
-    provenance?.evidence === 'unknown'
-  ) {
-    return provenance.evidence
+function cohortStatus(value: unknown): string {
+  switch (value) {
+    case 'mounted-idle':
+      return 'mounted idle'
+    case 'updated':
+      return 'updated'
+    case 'unmounted':
+      return 'unmounted'
+    case 'mixed':
+      return 'mixed'
+    case 'absent':
+      return 'absent'
+    default:
+      return 'unknown'
   }
-  if (provenance?.confidence === 'high') return 'exact'
-  if (provenance?.confidence === 'medium') return 'inferred'
+}
+
+function cohortInstanceStatus(value: unknown): string {
+  if (value === 'mounted-updated') return 'updated'
+  if (value === 'mounted-idle') return 'mounted idle'
+  if (value === 'mounted-unknown') return 'mounted unknown'
+  if (value === 'unmounted') return 'unmounted'
   return 'unknown'
+}
+
+function cohortInstanceLabel(
+  entry: Record<string, unknown>,
+  instance: Record<string, unknown>,
+): string {
+  const name = String(entry.componentName)
+  if (typeof instance.key === 'string')
+    return `${name} key=${bounded(JSON.stringify(instance.key))}`
+  if (typeof instance.siblingIndex === 'number') return `${name} index=${instance.siblingIndex}`
+  return name
 }
 
 export function summarizeDom(result: unknown): string | null {
@@ -237,7 +368,10 @@ function renderCause(changes: unknown): string | null {
 
   const propNames = records
     .filter((change) => change.kind === 'props')
-    .map((change) => `${String(change.name)}${change.unstable === true ? '(unstable)' : ''}`)
+    .map(
+      (change) =>
+        `${String(change.name)}${change.referenceOnly === true ? '(reference-only)' : change.referenceChanged === true || change.unstable === true ? '(reference changed)' : ''}`,
+    )
   const stateChanges = records.filter((change) => change.kind === 'state')
 
   const segments: string[] = []
@@ -344,7 +478,9 @@ export function summarizeErrorState(result: unknown): string | null {
 export function summarizeProfile(result: unknown): string | null {
   if (!isRecord(result) || !Array.isArray(result.slowest)) return null
   const trackingOff = result.tracking === false ? ' · ! tracking off (run react_profile_start)' : ''
-  const lines = [`${num(result.commits)} commits${trackingOff}`]
+  const lines = [
+    `${num(result.commits)} commits${attributionSuffix(result.attribution)}${coverageSuffix(result.coverage)}${inputAttributionSuffix(result.coverage)}${trackingOff}`,
+  ]
   const row = (
     label: string,
     items: unknown,
@@ -354,7 +490,7 @@ export function summarizeProfile(result: unknown): string | null {
     lines.push(`${label}: ${items.filter(isRecord).slice(0, 5).map(format).join(', ')}`)
   }
   row(
-    'slowest',
+    'slowest (peak)',
     result.slowest,
     (record) => `${String(record.name)} ${round(num(record.selfTime))}ms×${num(record.renders)}`,
   )
@@ -364,14 +500,19 @@ export function summarizeProfile(result: unknown): string | null {
     (record) => `${String(record.name)} ${num(record.renders)}×`,
   )
   row(
-    'unnecessary',
+    'no observed input change',
     result.mostUnnecessary,
-    (record) => `${String(record.name)} ${num(record.unnecessary)}/${num(record.renders)}`,
+    (record) =>
+      `${String(record.name)} ${preferredCount(record.noObservedInputChange, record.unnecessary)}/${num(record.renders)}`,
   )
+  const referenceOnly = Array.isArray(result.mostReferenceOnly)
+    ? result.mostReferenceOnly
+    : result.mostUnstable
   row(
-    'unstable',
-    result.mostUnstable,
-    (record) => `${String(record.name)} ${num(record.unstableRenders)}/${num(record.renders)}`,
+    'reference-only props',
+    referenceOnly,
+    (record) =>
+      `${String(record.name)} ${preferredCount(record.referenceOnlyPropRenders, record.unstableRenders)}/${num(record.renders)}`,
   )
   return lines.join('\n')
 }
@@ -414,8 +555,14 @@ export function summarizeRendersDiff(result: unknown): string | null {
   const improved = Array.isArray(result.improved) ? result.improved.filter(isRecord) : []
   const pct = self.pct === null ? 'n/a' : `${num(self.pct) > 0 ? '+' : ''}${round(num(self.pct))}%`
   const lines = [
-    `${round(num(self.before))}ms → ${round(num(self.after))}ms (${pct}) · commits ${num(commits.before)}→${num(commits.after)} · ${regressed.length} regressed · ${improved.length} improved`,
+    `window self ${round(num(self.before))}ms → ${round(num(self.after))}ms (${pct}) · commits ${num(commits.before)}→${num(commits.after)} · ${regressed.length} regressed · ${improved.length} improved`,
   ]
+  if (isRecord(result.coverage)) {
+    const baselineCoverage = coverageLabel(result.coverage.baseline)
+    const currentCoverage = coverageLabel(result.coverage.current)
+    if (baselineCoverage) lines.push(`  baseline ${baselineCoverage}`)
+    if (currentCoverage) lines.push(`  current ${currentCoverage}`)
+  }
   const clears = num(result.clearsSinceBaseline)
   if (clears > 0)
     lines.push(
@@ -430,19 +577,7 @@ export function summarizeRendersDiff(result: unknown): string | null {
 
 export function summarizeProfileSnapshot(result: unknown): string | null {
   if (!isRecord(result) || typeof result.label !== 'string') return null
-  return `snapshot "${result.label}" · ${num(result.commits)} commits · ${num(result.components)} components`
-}
-
-const GENERIC_BASENAMES = /^(index|main|app|page|layout|route)\.[jt]sx?$/i
-
-function sourceSuffix(record: Record<string, unknown>): string {
-  const { source } = record
-  if (!isRecord(source) || typeof source.file !== 'string') return ''
-  const segments = source.file.split('/').filter(Boolean)
-  const base = segments.pop() || source.file
-  const parent = GENERIC_BASENAMES.test(base) ? segments.pop() : undefined
-  const label = parent ? `${parent}/${base}` : base
-  return typeof source.line === 'number' ? ` (${label}:${source.line})` : ` (${label})`
+  return `snapshot "${result.label}" · ${num(result.commits)} commits · ${num(result.components)} components${coverageSuffix(result.coverage)}`
 }
 
 function recordPreview(value: unknown): string {
@@ -472,11 +607,5 @@ function recordPreview(value: unknown): string {
   return parts.join(', ')
 }
 
-function bounded(raw: string | undefined): string {
-  if (!raw) return '(none)'
-  return raw.length > 120 ? `${raw.slice(0, 120)}…` : raw
-}
-
-const num = (value: unknown): number => (typeof value === 'number' ? value : 0)
 const round = (value: number): number => Math.round(value * 10) / 10
 const signed = (value: number): string => (value > 0 ? `+${round(value)}` : String(round(value)))

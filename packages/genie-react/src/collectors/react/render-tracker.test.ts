@@ -1,5 +1,11 @@
-import type { Fiber, RenderPhase } from 'bippy'
+import { type Fiber, getFiberId, type RenderPhase } from 'bippy'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  querySubscriberFor,
+  registerQueryObserver,
+  registerRouterStore,
+} from '../causal/external-store-registry'
+import { wasInstanceObserved } from './instance-identity'
 import {
   childrenChanged,
   clearRenders,
@@ -9,10 +15,21 @@ import {
   diffExternalStoreChanges,
   diffProps,
   diffStateChanges,
+  finalizeCommitAnalysisBudget,
+  getAnalysisFailedFiberCount,
+  getBudgetExhaustedCommitCount,
+  getBudgetExhaustedSubsystems,
+  getDroppedPendingUnmountFiberCount,
+  getPropsNotEnumeratedFiberCount,
   getRenderCauseEventsReport,
+  getRenderCauseMeasurement,
   getRenders,
+  getRendersLeaderboardsMeasurement,
+  getRendersMeasurement,
   getSkippedCommitFiberCount,
+  getTruncatedInputFiberCount,
   isTracking,
+  queuePendingUnmount,
   recordCommitFiber,
   recordRender,
   rendersDiff,
@@ -68,7 +85,7 @@ beforeAll(() => {
 beforeEach(() => clearRenders())
 
 describe('diffProps', () => {
-  it('ignores the children key', () => {
+  it('leaves children to the fixed-key comparison', () => {
     const fiber = asFiber({
       memoizedProps: { a: 1, children: {} },
       alternate: { memoizedProps: { a: 1, children: {} } },
@@ -76,20 +93,12 @@ describe('diffProps', () => {
     expect(diffProps(fiber)).toEqual([])
   })
 
-  it('flags a non-primitive prop whose reference changed as unstable', () => {
-    const fiber = asFiber({
-      memoizedProps: { data: {} },
-      alternate: { memoizedProps: { data: {} } },
-    })
-    expect(diffProps(fiber)).toEqual([{ name: 'data', kind: 'props', unstable: true }])
-  })
-
-  it('does not flag a changed primitive as unstable', () => {
+  it('does not guess arbitrary prop fields from an identity change', () => {
     const fiber = asFiber({
       memoizedProps: { n: 2 },
       alternate: { memoizedProps: { n: 1 } },
     })
-    expect(diffProps(fiber)).toEqual([{ name: 'n', kind: 'props', unstable: false }])
+    expect(diffProps(fiber)).toEqual([])
   })
 
   it('returns nothing on first render (no alternate props)', () => {
@@ -197,9 +206,11 @@ describe('diffStateChanges safety bounds', () => {
     const [change] = diffStateChanges(stateFiber([after], [before]))
     expect(change?.before).not.toBe(before)
     expect(change?.after).not.toBe(after)
-    expect(change?.before).toMatchObject({
-      nested: { value: { __genie_dehydrated__: true, preview: '{…}' } },
-      self: { __genie_dehydrated__: true, preview: '[Circular]' },
+    expect(change?.before).toEqual({
+      __genie_dehydrated__: true,
+      kind: 'object',
+      preview: '[object fields not inspected]',
+      path: [],
     })
   })
 })
@@ -272,7 +283,7 @@ describe('causal render attribution', () => {
     })
   })
 
-  it('labels Query-shaped snapshots with changed fields and a nearby query hash', () => {
+  it('keeps Query shape fallback inferred without guessing a nearby hash', () => {
     const observer = (queryHash: string): Omit<HookNode, 'next'> => ({
       memoizedState: { options: { queryHash } },
     })
@@ -295,10 +306,142 @@ describe('causal render attribution', () => {
         kind: 'query',
         evidence: 'inferred',
         hookIndex: 1,
-        queryHash: '["todos"]',
-        changedFields: ['fetchStatus', 'dataUpdatedAt'],
+        changedFields: ['dataUpdatedAt', 'fetchStatus'],
       },
     ])
+  })
+
+  it('joins each useQuery snapshot to the exact public observer result', () => {
+    const beforeA = { status: 'success', fetchStatus: 'idle', dataUpdatedAt: 1, data: 'a1' }
+    const afterA = { ...beforeA, dataUpdatedAt: 2, data: 'a2' }
+    const beforeB = { status: 'success', fetchStatus: 'idle', dataUpdatedAt: 1, data: 'b1' }
+    const afterB = { ...beforeB, dataUpdatedAt: 2, data: 'b2' }
+    const observer = (queryHash: string, queryKey: unknown[], result: unknown) => ({
+      options: { queryHash, queryKey },
+      getCurrentQuery: () => ({ queryHash, queryKey }),
+      getCurrentResult: () => result,
+      subscribe: () => () => {},
+    })
+    const observerA = observer('["a"]', ['a'], afterA)
+    const observerB = observer('["b"]', ['b'], afterB)
+    registerQueryObserver(observerA)
+    registerQueryObserver(observerB)
+
+    const causes = diffExternalStoreChanges(
+      causalFiber(
+        'TwoQueries',
+        [
+          { memoizedState: observerA },
+          externalStoreHook(afterA),
+          { memoizedState: observerB },
+          externalStoreHook(afterB),
+        ],
+        [
+          { memoizedState: observerA },
+          externalStoreHook(beforeA),
+          { memoizedState: observerB },
+          externalStoreHook(beforeB),
+        ],
+      ),
+    )
+
+    expect(causes).toMatchObject([
+      {
+        kind: 'query',
+        evidence: 'exact',
+        reason: 'query-observer-result-identity',
+        queryHash: '["a"]',
+        identityStatus: 'current',
+      },
+      {
+        kind: 'query',
+        evidence: 'exact',
+        reason: 'query-observer-result-identity',
+        queryHash: '["b"]',
+        identityStatus: 'current',
+      },
+    ])
+  })
+
+  it('keeps Query identity exact but omits a stale hash during a key transition', () => {
+    const before = { status: 'success', fetchStatus: 'idle', dataUpdatedAt: 1 }
+    const after = { ...before, dataUpdatedAt: 2 }
+    const observer = {
+      options: { queryHash: '["item",1]' },
+      getCurrentQuery: () => ({ queryHash: '["item",2]', queryKey: ['item', 2] }),
+      getCurrentResult: () => after,
+      subscribe: () => () => {},
+    }
+    registerQueryObserver(observer)
+    const [cause] = diffExternalStoreChanges(
+      causalFiber(
+        'ChangingQuery',
+        [{ memoizedState: observer }, externalStoreHook(after)],
+        [{ memoizedState: observer }, externalStoreHook(before)],
+      ),
+    )
+    expect(cause).toMatchObject({
+      kind: 'query',
+      evidence: 'exact',
+      identityStatus: 'transitioning',
+    })
+    expect(cause).not.toHaveProperty('queryHash')
+  })
+
+  it('joins the Query subscriber to the exact retained render event and commits', async () => {
+    const before = { status: 'success', fetchStatus: 'idle', dataUpdatedAt: 1 }
+    const after = { ...before, dataUpdatedAt: 2 }
+    const observer = {
+      options: { queryHash: '["joined"]', queryKey: ['joined'] },
+      getCurrentQuery: () => ({ queryHash: '["joined"]', queryKey: ['joined'] }),
+      getCurrentResult: () => after,
+      subscribe: () => () => {},
+    }
+    registerQueryObserver(observer)
+    render(
+      causalFiber(
+        'JoinedQuery',
+        [{ memoizedState: observer }, externalStoreHook(after)],
+        [{ memoizedState: observer }, externalStoreHook(before)],
+      ),
+      'update',
+    )
+
+    const [event] = (await getRenderCauseEventsReport({ component: 'JoinedQuery', limit: 1 }))
+      .events
+    expect(querySubscriberFor(observer)).toMatchObject({
+      renderEventId: event?.renderEventId,
+      commitId: event?.commitId,
+      documentCommitId: event?.documentCommitId,
+      observationId: event?.observationId,
+    })
+  })
+
+  it('does not publish a Query subscriber when the render event fails to prepare', async () => {
+    const before = { status: 'success', fetchStatus: 'idle', dataUpdatedAt: 1 }
+    const after = { ...before, dataUpdatedAt: 2 }
+    const observer = {
+      options: { queryHash: '["atomic"]', queryKey: ['atomic'] },
+      getCurrentQuery: () => ({ queryHash: '["atomic"]', queryKey: ['atomic'] }),
+      getCurrentResult: () => after,
+      subscribe: () => () => {},
+    }
+    registerQueryObserver(observer)
+    const fiber = causalFiber(
+      'AtomicQuery',
+      [{ memoizedState: observer }, externalStoreHook(after)],
+      [{ memoizedState: observer }, externalStoreHook(before)],
+    )
+    const clone = vi.spyOn(globalThis, 'structuredClone').mockImplementationOnce(() => {
+      throw new Error('clone failed')
+    })
+
+    expect(() => render(fiber, 'update')).toThrow('clone failed')
+    clone.mockRestore()
+    expect(querySubscriberFor(observer)).toBeNull()
+    expect(
+      (await getRenderCauseEventsReport({ component: 'AtomicQuery', limit: 1 })).events,
+    ).toEqual([])
   })
 
   it('labels Router-shaped snapshots without guessing at scalar selectors', () => {
@@ -325,6 +468,52 @@ describe('causal render attribution', () => {
     ).toMatchObject([{ kind: 'external-store', evidence: 'exact' }])
   })
 
+  it('keeps a scalar selection inferred even when a registered Router store is nearby', () => {
+    const store = {}
+    const { routerId } = registerRouterStore(store)
+    const cause = diffExternalStoreChanges(
+      causalFiber(
+        'PathnameConsumer',
+        [{ memoizedState: { deps: [store] } }, externalStoreHook('/settings')],
+        [{ memoizedState: { deps: [store] } }, externalStoreHook('/')],
+      ),
+    )
+    expect(cause).toMatchObject([
+      {
+        kind: 'router',
+        evidence: 'inferred',
+        reason: 'registered-router-store-nearby',
+        routerId,
+        before: '/',
+        after: '/settings',
+      },
+    ])
+  })
+
+  it('uses exact Router attribution only when the registered store returns that snapshot', () => {
+    const before = { location: { pathname: '/' }, matches: [] }
+    const after = { location: { pathname: '/settings' }, matches: [] }
+    const store = {}
+    const { routerId } = registerRouterStore(store, () => after)
+
+    expect(
+      diffExternalStoreChanges(
+        causalFiber(
+          'RouterStateConsumer',
+          [{ memoizedState: { deps: [store] } }, externalStoreHook(after)],
+          [{ memoizedState: { deps: [store] } }, externalStoreHook(before)],
+        ),
+      ),
+    ).toMatchObject([
+      {
+        kind: 'router',
+        evidence: 'exact',
+        reason: 'registered-router-store',
+        routerId,
+      },
+    ])
+  })
+
   it('retains exact Context before/after evidence and its display name', () => {
     const context = { displayName: 'Theme' }
     const fiber = asFiber({
@@ -345,17 +534,53 @@ describe('causal render attribution', () => {
         name: 'Theme',
         before: 'light',
         after: 'dark',
+        deepDiff: {
+          changes: [{ kind: 'value', path: '', before: 'light', after: 'dark' }],
+          visited: 1,
+          truncated: false,
+        },
       },
     ])
   })
 
+  it('does not zip different Context dependencies into a false exact cause', () => {
+    const fiber = asFiber({
+      dependencies: {
+        firstContext: {
+          context: { displayName: 'CurrentTheme' },
+          memoizedValue: 'dark',
+          next: null,
+        },
+      },
+      alternate: {
+        dependencies: {
+          firstContext: {
+            context: { displayName: 'PreviousLocale' },
+            memoizedValue: 'en',
+            next: null,
+          },
+        },
+      },
+    })
+    expect(diffContextChanges(fiber)).toEqual([])
+  })
+
   it('distinguishes nearest-parent propagation from an explicit unknown cause', async () => {
-    const parent = componentFiber({ name: 'Parent', props: {}, prevProps: {} })
+    const parentProps = {}
+    const parent = componentFiber({ name: 'Parent', props: parentProps, prevProps: parentProps })
     Object.assign(parent, { flags: 1 })
-    const child = componentFiber({ name: 'Child', props: {}, prevProps: {} })
+    const childProps = {}
+    const child = componentFiber({ name: 'Child', props: childProps, prevProps: childProps })
     Object.assign(child, { return: parent })
-    render(child, 'update')
-    const unknown = componentFiber({ name: 'Unknown', props: {}, prevProps: {} })
+    const budget = createCommitAnalysisBudget()
+    budget.currentCommitEvidence.renderedFibers.add(parent)
+    recordRender(child, 'update', undefined, budget.work, budget.currentCommitEvidence)
+    const unknownProps = {}
+    const unknown = componentFiber({
+      name: 'Unknown',
+      props: unknownProps,
+      prevProps: unknownProps,
+    })
     render(unknown, 'update')
 
     const reports = new Map(
@@ -368,6 +593,67 @@ describe('causal render attribution', () => {
     expect(reports.get('Unknown')).toMatchObject({
       necessity: 'unnecessary',
       causes: [{ kind: 'unknown', evidence: 'unknown' }],
+      assessment: {
+        inputEvidence: 'none-observed',
+        optimizationSafety: 'not-proven-safe',
+      },
+    })
+  })
+
+  it('uses current traversal membership without reading stale parent flags', async () => {
+    const parentProps = {}
+    const parent = new Proxy(
+      componentFiber({ name: 'BrokenParent', props: parentProps, prevProps: parentProps }),
+      {
+        get(target, key, receiver) {
+          if (key === 'flags') throw new Error('unreadable parent flags')
+          return Reflect.get(target, key, receiver)
+        },
+      },
+    )
+    const childProps = {}
+    const child = componentFiber({
+      name: 'GuardedChild',
+      props: childProps,
+      prevProps: childProps,
+    })
+    Object.assign(child, { return: parent })
+    const budget = createCommitAnalysisBudget()
+    budget.currentCommitEvidence.renderedFibers.add(parent)
+
+    recordRender(child, 'update', undefined, budget.work, budget.currentCommitEvidence)
+
+    expect((await getRenders({ sort: 'renders', limit: 10 }))[0]).toMatchObject({
+      necessity: 'unknown',
+      causes: [{ kind: 'parent', reason: 'nearest-rendered-ancestor' }],
+    })
+    expect(getAnalysisFailedFiberCount()).toBe(0)
+  })
+
+  it('does not reuse a parent render from an earlier commit', async () => {
+    const parentProps = {}
+    const childProps = {}
+    const parent = componentFiber({
+      name: 'EarlierParent',
+      props: parentProps,
+      prevProps: parentProps,
+    })
+    const child = componentFiber({ name: 'LaterChild', props: childProps, prevProps: childProps })
+    Object.assign(child, { return: parent })
+
+    const firstCommit = createCommitAnalysisBudget()
+    firstCommit.currentCommitEvidence.renderedFibers.add(parent)
+    recordRender(child, 'update', undefined, firstCommit.work, firstCommit.currentCommitEvidence)
+    expect((await getRenders({ sort: 'renders', limit: 10 }))[0]?.causes[0]).toMatchObject({
+      kind: 'parent',
+      parentName: 'EarlierParent',
+    })
+
+    const secondCommit = createCommitAnalysisBudget()
+    recordRender(child, 'update', undefined, secondCommit.work, secondCommit.currentCommitEvidence)
+    expect((await getRenders({ sort: 'renders', limit: 10 }))[0]?.causes[0]).toMatchObject({
+      kind: 'unknown',
+      reason: 'no-observable-fiber-input-change',
     })
   })
 
@@ -376,12 +662,44 @@ describe('causal render attribution', () => {
     render(causalFiber('SecondRow', [externalStoreHook(3)], [externalStoreHook(2)]), 'update')
     const result = await getRenderCauseEventsReport({ component: 'second', limit: 1 })
     expect(result.libraryHidden).toBe(0)
+    expect(result.omittedByLimit).toBe(0)
     expect(result.events).toMatchObject([
       {
         componentName: 'SecondRow',
         causes: [{ kind: 'external-store' }],
       },
     ])
+
+    const bounded = await getRenderCauseEventsReport({ limit: 1 })
+    expect(bounded.events).toHaveLength(1)
+    expect(bounded.omittedByLimit).toBe(1)
+  })
+
+  it('keeps cause rows and metadata on the same call-start state', async () => {
+    render(causalFiber('BeforeRead', [externalStoreHook(2)], [externalStoreHook(1)]), 'update')
+    const pending = getRenderCauseMeasurement({ limit: 10 })
+    render(causalFiber('AfterRead', [externalStoreHook(3)], [externalStoreHook(2)]), 'update')
+
+    const report = await pending
+    expect(report.events).toHaveLength(1)
+    expect(report.events[0]?.componentName).toBe('BeforeRead')
+  })
+
+  it('makes retained-history eviction explicit even when a filtered read is empty', async () => {
+    const fiber = causalFiber('RetainedRow', [externalStoreHook(2)], [externalStoreHook(1)])
+    for (let index = 0; index < 1_001; index += 1) render(fiber, 'update')
+
+    const report = await getRenderCauseMeasurement({
+      component: 'MissingRow',
+      limit: 1,
+      appOnly: false,
+    })
+    expect(report.events).toEqual([])
+    expect(report.renderEventRetention).toEqual({
+      evictedEvents: 1,
+      earliestDocumentCommitId: 0,
+      latestDocumentCommitId: 0,
+    })
   })
 })
 
@@ -473,11 +791,11 @@ describe('recordRender unnecessary accounting', () => {
         tag: 0,
         type,
         memoizedProps: {},
-        memoizedState: hook({ count: 2 }),
+        memoizedState: hook([2]),
         actualDuration: 0,
         selfBaseDuration: 0,
         child: null,
-        alternate: { memoizedProps: {}, memoizedState: hook({ count: 1 }) },
+        alternate: { memoizedProps: {}, memoizedState: hook([1]) },
       }),
       'update',
     )
@@ -488,13 +806,18 @@ describe('recordRender unnecessary accounting', () => {
         kind: 'state',
         unstable: false,
         hook: { index: 0, stateIndex: 0, kind: 'state' },
-        before: { count: 1 },
-        after: { count: 2 },
+        before: [1],
+        after: [2],
+        deepDiff: {
+          changes: [{ kind: 'value', path: '/0', before: 1, after: 2 }],
+          visited: 2,
+          truncated: false,
+        },
       },
     ])
   })
 
-  it('reports changed class state without pretending it is a hook', async () => {
+  it('reports changed class state without claiming unsafe deep paths', async () => {
     const type = function Counter(): null {
       return null
     }
@@ -517,8 +840,23 @@ describe('recordRender unnecessary accounting', () => {
         name: 'class state',
         kind: 'state',
         unstable: false,
-        before: { count: 1 },
-        after: { count: 2 },
+        before: {
+          __genie_dehydrated__: true,
+          kind: 'object',
+          preview: '[object fields not inspected]',
+          path: [],
+        },
+        after: {
+          __genie_dehydrated__: true,
+          kind: 'object',
+          preview: '[object fields not inspected]',
+          path: [],
+        },
+        deepDiff: {
+          changes: [{ kind: 'reference-only', path: '' }],
+          visited: 1,
+          truncated: true,
+        },
       },
     ])
   })
@@ -552,7 +890,7 @@ describe('recordRender unnecessary accounting', () => {
         memoizedState: chain([
           stateHook(false, basicStateReducer),
           memoHook({ derived: 2 }),
-          stateHook({ items: 2 }, cartReducer),
+          stateHook([2], cartReducer),
         ]),
         actualDuration: 0,
         selfBaseDuration: 0,
@@ -562,7 +900,7 @@ describe('recordRender unnecessary accounting', () => {
           memoizedState: chain([
             stateHook(false, basicStateReducer),
             memoHook({ derived: 1 }),
-            stateHook({ items: 1 }, cartReducer),
+            stateHook([1], cartReducer),
           ]),
         },
       }),
@@ -575,8 +913,13 @@ describe('recordRender unnecessary accounting', () => {
         kind: 'state',
         unstable: false,
         hook: { index: 2, stateIndex: 1, kind: 'reducer' },
-        before: { items: 1 },
-        after: { items: 2 },
+        before: [1],
+        after: [2],
+        deepDiff: {
+          changes: [{ kind: 'value', path: '/0', before: 1, after: 2 }],
+          visited: 2,
+          truncated: false,
+        },
       },
     ])
   })
@@ -584,18 +927,19 @@ describe('recordRender unnecessary accounting', () => {
   it('does not misreport a changed memo value as the cause of a render', async () => {
     const memoHook = (value: unknown) => ({ memoizedState: [value, []], next: null })
     const type = (): null => null
+    const props = {}
     Object.assign(type, { displayName: 'DerivedOnly' })
 
     render(
       asFiber({
         tag: 0,
         type,
-        memoizedProps: {},
+        memoizedProps: props,
         memoizedState: memoHook({ derived: 2 }),
         actualDuration: 0,
         selfBaseDuration: 0,
         child: null,
-        alternate: { memoizedProps: {}, memoizedState: memoHook({ derived: 1 }) },
+        alternate: { memoizedProps: props, memoizedState: memoHook({ derived: 1 }) },
       }),
       'update',
     )
@@ -603,13 +947,14 @@ describe('recordRender unnecessary accounting', () => {
     expect((await byName()).get('DerivedOnly')).toMatchObject({ changes: [], unnecessary: 1 })
   })
 
-  it('counts an update unnecessary only when nothing changed and children held', async () => {
+  it('claims no observed input change only when the props container is stable', async () => {
     const shared = { node: true }
+    const pureProps = { a: 1, children: shared }
     render(
       componentFiber({
         name: 'Pure',
-        props: { a: 1, children: shared },
-        prevProps: { a: 1, children: shared },
+        props: pureProps,
+        prevProps: pureProps,
       }),
       'update',
     )
@@ -635,7 +980,15 @@ describe('recordRender unnecessary accounting', () => {
     expect(records.get('Pure')?.changes).toEqual([])
 
     expect(records.get('Changed')?.unnecessary).toBe(0)
-    expect(records.get('Changed')?.changes.map((c) => c.name)).toContain('a')
+    expect(records.get('Changed')).toMatchObject({
+      changes: [],
+      inputCoverage: {
+        complete: false,
+        scanTruncated: false,
+        propsNotEnumerated: true,
+      },
+      assessment: { inputEvidence: 'incomplete' },
+    })
 
     expect(records.get('ChildOnly')?.unnecessary).toBe(0)
     expect(records.get('ChildOnly')?.changes).toEqual([])
@@ -645,6 +998,16 @@ describe('recordRender unnecessary accounting', () => {
     render(asFiber({ tag: 5, type: 'div' }), 'update')
     render(componentFiber({ name: 'Gone', props: {} }), 'unmount')
     expect(await getRenders({ sort: 'renders', limit: 50 })).toEqual([])
+  })
+
+  it('does not delete a mounted record for a traversal-only unmount phase', async () => {
+    const fiber = componentFiber({ name: 'SuspendedRow', props: {} })
+    render(fiber, 'mount')
+    render(fiber, 'unmount')
+
+    expect(await getRenders({ sort: 'renders', limit: 10 })).toMatchObject([
+      { name: 'SuspendedRow', mounts: 1, renders: 1 },
+    ])
   })
 })
 
@@ -669,37 +1032,109 @@ describe('commit analysis budget', () => {
     expect(budget.processed).toBe(1)
     expect(budget.skipped).toBe(0)
   })
+
+  it('contains a per-fiber analyzer failure without publishing a partial update', async () => {
+    const throwingHook = new Proxy(
+      { memoizedState: 1, queue: { dispatch: () => {} }, next: null },
+      {
+        get(target, key, receiver) {
+          if (key === 'next') throw new Error('broken hook chain')
+          return Reflect.get(target, key, receiver)
+        },
+      },
+    )
+    const fiber = componentFiber({ name: 'BrokenAnalysis', props: {} })
+    recordRender(fiber, 'mount')
+    Object.assign(fiber, {
+      memoizedState: throwingHook,
+      alternate: { memoizedProps: {}, memoizedState: throwingHook },
+    })
+    const budget = createCommitAnalysisBudget()
+
+    expect(recordCommitFiber(fiber, 'update', budget)).toBe(false)
+    expect(budget.failed).toBe(1)
+    expect(getAnalysisFailedFiberCount()).toBe(1)
+    expect((await getRenders({ sort: 'renders', limit: 10 }))[0]).toMatchObject({
+      name: 'BrokenAnalysis',
+      renders: 1,
+      mounts: 1,
+      updates: 0,
+    })
+  })
+
+  it('does not publish instance identity when render preparation fails', () => {
+    const fiber = new Proxy(componentFiber({ name: 'BrokenBeforePublish', props: {} }), {
+      get(target, key, receiver) {
+        if (key === 'updateQueue') throw new Error('memo cache unavailable')
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    const fiberId = getFiberId(fiber)
+
+    expect(() => recordRender(fiber, 'mount')).toThrow('memo cache unavailable')
+    expect(wasInstanceObserved(fiberId)).toBe(false)
+  })
+
+  it('shares one operation guard across analyzers and discloses exhausted subsystems', async () => {
+    const budget = createCommitAnalysisBudget(250, {
+      operationLimit: 2,
+      timeLimitMs: 100,
+      now: () => 0,
+    })
+    recordCommitFiber(
+      componentFiber({ name: 'GloballyBounded', props: { value: 2 }, prevProps: { value: 1 } }),
+      'update',
+      budget,
+    )
+    finalizeCommitAnalysisBudget(budget)
+
+    expect(getBudgetExhaustedCommitCount()).toBe(1)
+    expect(getBudgetExhaustedSubsystems().map(({ subsystem }) => subsystem)).toContain(
+      'instance-ancestry',
+    )
+    expect((await getRenders({ sort: 'renders', limit: 10 }))[0]?.inputCoverage.complete).toBe(
+      false,
+    )
+  })
 })
 
-describe('recordRender unstable-render accounting', () => {
+describe('pending component unmount coverage', () => {
+  it('ignores host unmounts and reports bounded component overflow', () => {
+    const host = asFiber({ tag: 5, type: 'div' })
+    for (let index = 0; index < 1_100; index += 1) queuePendingUnmount(1, host)
+    expect(getDroppedPendingUnmountFiberCount()).toBe(0)
+
+    const row = componentFiber({ name: 'UnmountedRow', props: {} })
+    for (let index = 0; index < 1_001; index += 1) queuePendingUnmount(1, row)
+    expect(getDroppedPendingUnmountFiberCount()).toBe(1)
+  })
+})
+
+describe('recordRender reference-only prop accounting', () => {
   const byName = async () =>
     new Map((await getRenders({ sort: 'renders', limit: 50 })).map((r) => [r.name, r]))
 
-  it('flags an update whose only changes are unstable-reference props', async () => {
+  it('does not claim an allocation from opaque prop containers', async () => {
     const shared = { node: true }
     render(
       componentFiber({
         name: 'UnstableOnly',
-        props: { onClick: () => {}, children: shared },
-        prevProps: { onClick: () => {}, children: shared },
+        props: { items: [1, 2], children: shared },
+        prevProps: { items: [1, 2], children: shared },
       }),
       'update',
     )
     const record = (await byName()).get('UnstableOnly')
-    expect(record?.unstableRenders).toBe(1)
+    expect(record?.referenceOnlyPropRenders).toBe(0)
+    expect(record?.unstableRenders).toBe(0)
     expect(record?.unnecessary).toBe(0)
-  })
-
-  it('does not flag when a stable (primitive) prop also changed', async () => {
-    render(
-      componentFiber({
-        name: 'MixedProps',
-        props: { onClick: () => {}, count: 2 },
-        prevProps: { onClick: () => {}, count: 1 },
-      }),
-      'update',
-    )
-    expect((await byName()).get('MixedProps')?.unstableRenders).toBe(0)
+    expect(record?.changes).toEqual([])
+    expect(record?.inputCoverage).toEqual({
+      complete: false,
+      omittedInputs: 0,
+      scanTruncated: false,
+      propsNotEnumerated: true,
+    })
   })
 
   it('does not flag when state also changed', async () => {
@@ -740,6 +1175,29 @@ describe('recordRender unstable-render accounting', () => {
       'update',
     )
     expect((await byName()).get('WithChildren')?.unstableRenders).toBe(0)
+  })
+})
+
+describe('bounded render input evidence', () => {
+  it('marks arbitrary prop-field discovery incomplete without retaining guesses', async () => {
+    const before = Object.fromEntries(Array.from({ length: 55 }, (_, index) => [`p${index}`, 0]))
+    const after = Object.fromEntries(Array.from({ length: 55 }, (_, index) => [`p${index}`, 1]))
+    render(componentFiber({ name: 'ManyInputs', props: after, prevProps: before }), 'update')
+
+    const report = (await getRenders({ sort: 'renders', limit: 10 }))[0]
+    expect(report?.causes).toMatchObject([
+      { kind: 'unknown', reason: 'causal-analysis-incomplete' },
+    ])
+    expect(report?.inputCoverage).toEqual({
+      complete: false,
+      omittedInputs: 0,
+      scanTruncated: false,
+      propsNotEnumerated: true,
+    })
+    expect(report?.assessment.inputEvidence).toBe('incomplete')
+    expect(report?.unnecessary).toBe(0)
+    expect(getTruncatedInputFiberCount()).toBe(0)
+    expect(getPropsNotEnumeratedFiberCount()).toBe(1)
   })
 })
 
@@ -789,30 +1247,52 @@ describe('getRenders', () => {
     expect((await getRenders({ sort: 'selfTime', limit: 10 }))[0]?.name).toBe('Beta')
   })
 
-  it('sorts by unstable-render count when requested', async () => {
+  it('does not manufacture unstable candidates for the legacy sort', async () => {
     clearRenders()
-    const stableHandler = () => {}
+    const stableItems = [1]
     const calm = componentFiber({
       name: 'Calm',
-      props: { onClick: stableHandler },
-      prevProps: { onClick: stableHandler },
+      props: { items: stableItems },
+      prevProps: { items: stableItems },
     })
     render(calm, 'mount')
     render(calm, 'update')
 
     const churny = componentFiber({
       name: 'Churny',
-      props: { onClick: () => {} },
-      prevProps: { onClick: () => {} },
+      props: { items: [1] },
+      prevProps: { items: [1] },
     })
     render(churny, 'mount')
     render(churny, 'update')
     render(churny, 'update')
 
     const ranked = await getRenders({ sort: 'unstable', limit: 10 })
-    expect(ranked[0]?.name).toBe('Churny')
-    expect(ranked[0]?.unstableRenders).toBe(2)
-    expect(ranked.find((r) => r.name === 'Calm')?.unstableRenders).toBe(0)
+    expect(ranked.map((record) => record.name)).toEqual(['Calm', 'Churny'])
+    expect(ranked.every((record) => record.unstableRenders === 0)).toBe(true)
+  })
+})
+
+describe('render measurement snapshot', () => {
+  it('keeps summary and component rows on the same call-start state', async () => {
+    const fiber = componentFiber({
+      name: 'ConcurrentRow',
+      props: { value: 1 },
+      prevProps: { value: 0 },
+    })
+    render(fiber, 'update')
+
+    const pending = getRendersMeasurement({ sort: 'renders', limit: 10, appOnly: true })
+    Object.assign(fiber, {
+      memoizedProps: { value: 2 },
+      alternate: { memoizedProps: { value: 1 }, memoizedState: null },
+    })
+    render(fiber, 'update')
+
+    const report = await pending
+    expect(report.summary.totalRenders).toBe(1)
+    expect(report.components).toHaveLength(1)
+    expect(report.components[0]).toMatchObject({ name: 'ConcurrentRow', renders: 1 })
   })
 })
 
@@ -835,9 +1315,13 @@ describe('snapshot + rendersDiff', () => {
     clearSnapshots()
   })
 
-  // A fiber with a STABLE identity (hence stable bippy id) whose selfTime can be re-measured; recordRender takes a running max, so drive it low→snapshot→high for regressions, or clearRenders between for improvements.
-  const makeMeasured = (name: string) => {
-    const type = (): null => null
+  // A Fiber with stable physical identity whose peak and cumulative timing can be re-measured.
+  const makeMeasured = (
+    name: string,
+    source?: { fileName: string; lineNumber: number; columnNumber: number },
+    sharedType?: () => null,
+  ) => {
+    const type = sharedType ?? ((): null => null)
     Object.assign(type, { displayName: name })
     const fiber = asFiber({
       tag: 0,
@@ -848,6 +1332,7 @@ describe('snapshot + rendersDiff', () => {
       selfBaseDuration: 0,
       child: null,
       alternate: null,
+      _debugSource: source,
     })
     return (selfTime: number, phase: RenderPhase) => {
       Object.assign(fiber, { actualDuration: selfTime, selfBaseDuration: selfTime })
@@ -860,10 +1345,47 @@ describe('snapshot + rendersDiff', () => {
     await expect(rendersDiff('nope', 0.5)).rejects.toThrow(/Stored labels: before/)
   })
 
+  it('keeps incomplete analysis visible in profile reports and both sides of a diff', async () => {
+    const budget = createCommitAnalysisBudget(0)
+    recordCommitFiber(componentFiber({ name: 'Skipped', props: {} }), 'mount', budget)
+
+    const report = await getRendersLeaderboardsMeasurement(10)
+    expect(report.coverage).toMatchObject({ complete: false, skippedCommitFibers: 1 })
+
+    const baseline = await takeSnapshot('partial')
+    expect(baseline.coverage).toMatchObject({ complete: false, skippedCommitFibers: 1 })
+
+    clearRenders()
+    render(componentFiber({ name: 'Current', props: {} }), 'mount')
+    const diff = await rendersDiff('partial', 0.5)
+    expect(diff.coverage.baseline).toMatchObject({ complete: false, skippedCommitFibers: 1 })
+    expect(diff.coverage.current).toMatchObject({ complete: true, skippedCommitFibers: 0 })
+  })
+
+  it('keeps exact timing coverage complete when only prop attribution is opaque', async () => {
+    render(componentFiber({ name: 'Row', props: { value: 2 }, prevProps: { value: 1 } }), 'update')
+
+    const snapshot = await takeSnapshot('opaque-props')
+    expect(snapshot.coverage).toMatchObject({
+      complete: true,
+      inputAttributionComplete: false,
+      truncatedInputFibers: 0,
+      propsNotEnumeratedFibers: 1,
+    })
+
+    const diff = await rendersDiff('opaque-props', 0.5)
+    expect(diff.coverage.current).toMatchObject({
+      complete: true,
+      inputAttributionComplete: false,
+      propsNotEnumeratedFibers: 1,
+    })
+  })
+
   it('flags a component that got slower past the threshold as regressed', async () => {
     const slow = makeMeasured('Slowpoke')
     slow(1, 'mount')
     await takeSnapshot('base')
+    clearRenders()
     slow(11, 'update')
 
     const diff = await rendersDiff('base', 0.5)
@@ -941,11 +1463,64 @@ describe('snapshot + rendersDiff', () => {
     const base = makeMeasured('Base')
     base(10, 'mount')
     await takeSnapshot('nonzero')
+    clearRenders()
     base(15, 'update')
     const withBase = await rendersDiff('nonzero', 0.5)
     expect(withBase.selfTimeMs.before).toBe(10)
     expect(withBase.selfTimeMs.delta).toBe(5)
     expect(withBase.selfTimeMs.pct).toBe(50)
+  })
+
+  it('compares cumulative work when render count changes but peak time does not', async () => {
+    const row = makeMeasured('RepeatedWork')
+    for (let index = 0; index < 100; index += 1) row(2, index === 0 ? 'mount' : 'update')
+    await takeSnapshot('base')
+
+    clearRenders()
+    row(2, 'mount')
+    const diff = await rendersDiff('base', 0.5)
+    const improvement = diff.improved.find((entry) => entry.name === 'RepeatedWork')
+    expect(improvement).toMatchObject({
+      deltaMs: -198,
+      before: { renders: 100, selfTime: 200 },
+      after: { renders: 1, selfTime: 2 },
+    })
+  })
+
+  it('aggregates repeated instances by full component definition', async () => {
+    const source = { fileName: '/src/rows.tsx', lineNumber: 10, columnNumber: 2 }
+    const rowType = (): null => null
+    for (let index = 0; index < 100; index += 1) {
+      makeMeasured('Row', source, rowType)(1, 'mount')
+    }
+
+    const snapshot = await takeSnapshot('rows')
+    const diff = await rendersDiff('rows', 0.5)
+    expect(snapshot.components).toBe(1)
+    expect(diff.selfTimeMs).toMatchObject({ before: 100, after: 100, delta: 0 })
+  })
+
+  it('keeps distinct source-less component definitions separate', async () => {
+    makeMeasured('Row')(1, 'mount')
+    makeMeasured('Row')(2, 'mount')
+
+    const snapshot = await takeSnapshot('source-less-rows')
+    expect(snapshot.components).toBe(2)
+  })
+
+  it('keeps same basename and line from different directories distinct', async () => {
+    makeMeasured('Panel', {
+      fileName: '/src/admin/index.tsx',
+      lineNumber: 10,
+      columnNumber: 1,
+    })(1, 'mount')
+    makeMeasured('Panel', {
+      fileName: '/src/customer/index.tsx',
+      lineNumber: 10,
+      columnNumber: 1,
+    })(1, 'mount')
+
+    expect((await takeSnapshot('collisions')).components).toBe(2)
   })
 
   it('overwrites a snapshot re-used under the same label', async () => {

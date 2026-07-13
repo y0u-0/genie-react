@@ -8,6 +8,15 @@ import {
   type RenderPhase,
   SimpleMemoComponentTag,
 } from 'bippy'
+import type { HooksNode } from 'bippy/source'
+import { type CommitWorkBudget, consumeCommitWork } from './commit-budget'
+import {
+  clearEffectEvents,
+  type PreparedEffectSchedule,
+  prepareEffectSchedule,
+  publishEffectSchedule,
+} from './effect-events'
+import type { InstanceDescriptor } from './instance-identity'
 import {
   classifyFibersWithinBudget,
   type EffectSourceResolution,
@@ -24,7 +33,9 @@ const HOOK_INSERTION = 0b0010
 const HOOK_LAYOUT = 0b0100
 const HOOK_PASSIVE = 0b1000
 
-const EFFECT_WALK_LIMIT = 1000
+const EFFECT_WALK_LIMIT = 100
+const EFFECT_DEP_SCAN_LIMIT = 200
+const EFFECT_REPORT_LIMIT = 500
 const EFFECT_SOURCE_ATTRIBUTION_LIMIT = 80
 const EFFECT_SOURCE_ATTRIBUTION_BUDGET_MS = 500
 const DEFAULT_HOT_MIN_UPDATES = 3
@@ -44,7 +55,7 @@ interface EffectStat {
   depsMode: DepsMode
   depCount: number
   updates: number
-  fired: number
+  scheduled: number
   hasCleanup: boolean
   lastChangedDep: number | null
   /** Whether the last changed dep held a primitive — a value that legitimately changed, not an unstable reference. */
@@ -60,33 +71,79 @@ interface EffectRecord {
 }
 
 const records = new Map<number, EffectRecord>()
+let truncatedEffectLists = 0
 
 export function clearEffects(): void {
   records.clear()
+  truncatedEffectLists = 0
+  clearEffectEvents()
+}
+
+export interface EffectScheduleObservation {
+  scheduled: number
+  complete: boolean
+}
+
+export interface PreparedEffectObservation {
+  observation: EffectScheduleObservation
+  publish: (instance?: InstanceDescriptor) => void
 }
 
 /** Records at commit time which effects will run this commit (the same `HasEffect` bit React's commit phase checks) and which dependency drove them. */
-export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
-  if (!EFFECT_TAGS.has(fiber.tag)) return
+export function recordEffect(
+  fiber: Fiber,
+  phase: RenderPhase,
+  profileCommitId = 0,
+  budget?: CommitWorkBudget,
+): EffectScheduleObservation {
+  const prepared = prepareEffect(fiber, phase, profileCommitId, budget)
+  prepared.publish()
+  return prepared.observation
+}
+
+/** Build effect stats/events without mutating shared stores; publish only with the render record. */
+export function prepareEffect(
+  fiber: Fiber,
+  phase: RenderPhase,
+  profileCommitId = 0,
+  budget?: CommitWorkBudget,
+): PreparedEffectObservation {
+  if (!EFFECT_TAGS.has(fiber.tag)) return preparedEffect({ scheduled: 0, complete: true }, null)
 
   const id = getFiberId(fiber)
   if (phase === 'unmount') {
-    records.delete(id)
-    return
+    // Traversal unmounts can be Suspense visibility changes; the DevTools unmount callback owns exact deletion.
+    return preparedEffect({ scheduled: 0, complete: true }, null)
   }
 
-  const effects = listEffects(fiber)
-  if (effects.length === 0) return
-  const prev = listEffects(fiber.alternate)
-
-  let record = records.get(id)
-  if (!record) {
-    record = { id, name: getDisplayName(fiber.type) ?? 'Anonymous', stats: [], fiber }
-    records.set(id, record)
+  const currentList = listEffects(fiber, budget)
+  let truncations = currentList.truncated ? 1 : 0
+  if (currentList.effects.length === 0) {
+    return preparedEffect({ scheduled: 0, complete: !currentList.truncated }, null, [], truncations)
   }
+  const previousList = listEffects(fiber.alternate, budget)
+  if (previousList.truncated) truncations += 1
+  const effects = currentList.effects
+  const prev = previousList.effects
+
+  const existing = records.get(id)
+  const record: EffectRecord = existing
+    ? { ...existing, stats: existing.stats.map((stat) => (stat ? { ...stat } : stat)) }
+    : { id, name: getDisplayName(fiber.type) ?? 'Anonymous', stats: [], fiber }
   record.fiber = fiber
+  let scheduledCount = 0
+  const schedules: PreparedEffectSchedule[] = []
 
   for (let i = 0; i < effects.length; i++) {
+    if (!consumeCommitWork(budget, 'effects')) {
+      truncations += 1
+      return preparedEffect(
+        { scheduled: scheduledCount, complete: false },
+        record,
+        schedules,
+        truncations,
+      )
+    }
     const effect = effects[i]
     if (!effect) continue
     const kind = effectKind(effect.tag)
@@ -102,7 +159,7 @@ export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
         depsMode,
         depCount,
         updates: 0,
-        fired: 0,
+        scheduled: 0,
         hasCleanup: false,
         lastChangedDep: null,
         lastChangedDepIsPrimitive: null,
@@ -117,22 +174,85 @@ export function recordEffect(fiber: Fiber, phase: RenderPhase): void {
     // Turns true once a previous run returned a cleanup — React 18.3+/19 store it at `effect.inst.destroy`, older React at `effect.destroy`.
     if (hasCleanupFn(effect)) stat.hasCleanup = true
 
+    const scheduled = (effect.tag & HOOK_HAS_EFFECT) !== 0
+    if (scheduled) {
+      scheduledCount += 1
+      const prepared = prepareEffectSchedule({
+        fiber,
+        profileCommitId,
+        phase,
+        effectIndex: i,
+        kind,
+        dependencies: effect.deps,
+        previousDependencies: prev[i]?.deps ?? null,
+        budget,
+      })
+      if (prepared) schedules.push(prepared)
+    }
+
     if (phase === 'update') {
       stat.updates += 1
-      if ((effect.tag & HOOK_HAS_EFFECT) !== 0) {
-        stat.fired += 1
-        stat.lastChangedDep = changedDepIndex(effect.deps, prev[i]?.deps ?? null)
+      if (scheduled) {
+        stat.scheduled += 1
+        stat.lastChangedDep = changedDepIndex(effect.deps, prev[i]?.deps ?? null, budget)
         stat.lastChangedDepIsPrimitive =
-          stat.lastChangedDep === null ? null : isPrimitive(effect.deps?.[stat.lastChangedDep])
+          stat.lastChangedDep === null
+            ? null
+            : dependencyIsPrimitive(effect.deps, stat.lastChangedDep)
       }
     }
   }
+  return preparedEffect(
+    {
+      scheduled: scheduledCount,
+      complete: !currentList.truncated && !previousList.truncated,
+    },
+    record,
+    schedules,
+    truncations,
+  )
+}
+
+function preparedEffect(
+  observation: EffectScheduleObservation,
+  record: EffectRecord | null,
+  schedules: PreparedEffectSchedule[] = [],
+  truncations = 0,
+): PreparedEffectObservation {
+  let published = false
+  return {
+    observation,
+    publish(instance) {
+      if (published) return
+      published = true
+      truncatedEffectLists += truncations
+      if (record) records.set(record.id, record)
+      for (const schedule of schedules) publishEffectSchedule(schedule, instance)
+    },
+  }
+}
+
+/** Remove an effect owner only after React's exact onCommitFiberUnmount callback. */
+export function removeEffectRecord(fiber: Fiber): void {
+  if (EFFECT_TAGS.has(fiber.tag)) records.delete(getFiberId(fiber))
+}
+
+/** Exact commit-time count of this component's effects scheduled by React. */
+export function scheduledEffectCount(fiber: Fiber): number {
+  if (!EFFECT_TAGS.has(fiber.tag)) return 0
+  return listEffects(fiber).effects.filter(
+    (effect) => effectKind(effect.tag) !== null && (effect.tag & HOOK_HAS_EFFECT) !== 0,
+  ).length
+}
+
+export function getEffectTrackingCoverage(): { truncatedEffectLists: number } {
+  return { truncatedEffectLists }
 }
 
 export interface EffectAuditQuery {
   component?: string
   limit: number
-  /** Only components with an effect that re-runs every update or has no deps array. */
+  /** Only components with an effect scheduled at the configured hot rate. */
   onlyHot?: boolean
   /** Exclude library components (node_modules, incl. Vite pre-bundled deps). Default true. */
   appOnly?: boolean
@@ -142,6 +262,12 @@ export interface EffectAuditQuery {
   minUpdates?: number
   /** Minimum observed effect fire rate across updates before it is classified hot. */
   minFireRate?: number
+  /** Preferred name for the minimum observed schedule rate. */
+  minScheduleRate?: number
+  /** Internal guard: false means live Fiber attribution advanced while this report awaited source maps. */
+  isAttributionCurrent?: () => boolean
+  /** Internal dependency injection for a hook tree retained without re-running the component. */
+  getRetainedHookTree?: (fiber: Fiber) => HooksNode[] | null
 }
 
 export type EffectOwnership = 'app' | 'library' | 'unknown'
@@ -153,7 +279,10 @@ export type EffectProvenanceReason =
   | 'hook-count-mismatch'
   | 'hook-source-unresolved'
   | 'hook-inspection-unavailable'
+  | 'inspection-truncated'
+  | 'shadow-render-disabled'
   | 'attribution-budget-exhausted'
+  | 'report-state-advanced'
 
 export interface EffectProvenance {
   ownership: EffectOwnership
@@ -161,17 +290,33 @@ export interface EffectProvenance {
   reason: EffectProvenanceReason
   hookSource: ResolvedSource | null
   packageName: string | null
+  hookAncestry: EffectHookAncestryFrame[]
+}
+
+export interface EffectHookAncestryFrame {
+  name: string
+  source: ResolvedSource | null
+  ownership: EffectOwnership
+  packageName: string | null
 }
 
 export type EffectHotnessLabel = 'hot' | 'not-hot' | 'insufficient-data'
+export type EffectScheduleReason =
+  | 'meets-threshold'
+  | 'below-schedule-rate'
+  | 'below-minimum-updates'
 
 export interface EffectHotness {
   label: EffectHotnessLabel
   samples: number
   observedRate: number
   minUpdates: number
+  minScheduleRate: number
+  /** Legacy alias for minScheduleRate. */
   minFireRate: number
   confidenceInterval: { level: number; lower: number; upper: number }
+  scheduleReason: EffectScheduleReason
+  /** Legacy alias whose below-fire-rate value means below schedule rate, not execution. */
   reason: 'meets-threshold' | 'below-fire-rate' | 'below-minimum-updates'
 }
 
@@ -180,10 +325,15 @@ export interface EffectFinding {
   kind: EffectKind
   depsMode: DepsMode
   depCount: number
+  scheduled: number
+  schedulesEveryUpdate: boolean
+  /** Legacy aliases retained for wire compatibility; both mean scheduled, not executed. */
   fired: number
   updates: number
   firesEveryUpdate: boolean
   lastChangedDep: number | null
+  cleanupFunctionObserved: boolean
+  /** Legacy alias for cleanupFunctionObserved. */
   hasCleanup: boolean
   note?: string
   /** This effect's own call-site (the `useEffect` call), or null when it cannot be attributed. */
@@ -206,10 +356,13 @@ export interface EffectAuditRecord {
     source: ResolvedSource | null
   }
   effects: EffectFinding[]
+  effectsOmitted: number
 }
 
 export interface EffectHotnessCriteria {
   minUpdates: number
+  minScheduleRate: number
+  /** Legacy alias for minScheduleRate. */
   minFireRate: number
   confidenceLevel: number
 }
@@ -220,6 +373,8 @@ const totalEffects = (findings: EffectAuditRecord[]): number =>
 /** The audited components plus the count of library-origin effects appOnly hid — for react_effect_audit's filteredNote. */
 export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
   components: EffectAuditRecord[]
+  omittedByLimit: number
+  effectsOmittedByLimit: number
   libraryEffectsHidden: number
   hotnessCriteria: EffectHotnessCriteria
   packageFilter?: {
@@ -229,23 +384,35 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
     unknownPackageEffects: number
   }
 }> {
-  let list = [...records.values()]
+  let list = snapshotEffectRecords()
   if (query.component) {
     const needle = query.component.toLowerCase()
     list = list.filter((record) => record.name.toLowerCase().includes(needle))
   }
 
   const appOnly = query.appOnly ?? true
+  const minScheduleRate = query.minScheduleRate ?? query.minFireRate ?? DEFAULT_HOT_MIN_FIRE_RATE
   const hotnessCriteria: EffectHotnessCriteria = {
     minUpdates: query.minUpdates ?? DEFAULT_HOT_MIN_UPDATES,
-    minFireRate: query.minFireRate ?? DEFAULT_HOT_MIN_FIRE_RATE,
+    minScheduleRate,
+    minFireRate: minScheduleRate,
     confidenceLevel: HOTNESS_CONFIDENCE_LEVEL,
   }
-  const { classes } = await classifyFibersWithinBudget(
-    list.map((record) => record.fiber),
-    { limit: EFFECT_SOURCE_ATTRIBUTION_LIMIT, budgetMs: EFFECT_SOURCE_ATTRIBUTION_BUDGET_MS },
-  )
-  const effectSourcesByIndex = await resolveEffectSourcesWithinBudget(list)
+  const [{ classes: resolvedClasses }, resolvedEffectSourcesByIndex] = await Promise.all([
+    classifyFibersWithinBudget(
+      list.map((record) => record.fiber),
+      {
+        limit: EFFECT_SOURCE_ATTRIBUTION_LIMIT,
+        budgetMs: EFFECT_SOURCE_ATTRIBUTION_BUDGET_MS,
+      },
+    ),
+    resolveEffectSourcesWithinBudget(list, query.getRetainedHookTree),
+  ])
+  const attributionCurrent = query.isAttributionCurrent?.() !== false
+  const classes = attributionCurrent ? resolvedClasses : list.map(() => UNCLASSIFIED_FIBER)
+  const effectSourcesByIndex = attributionCurrent
+    ? resolvedEffectSourcesByIndex
+    : list.map(staleReportResolution)
   const all: EffectAuditRecord[] = list.map((record, index) => {
     const { source, isLibrary } = classes[index] ?? UNCLASSIFIED_FIBER
     const name = record.name === 'Anonymous' ? (sourceLabel(source) ?? record.name) : record.name
@@ -272,6 +439,7 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
           provenance,
         }
       }),
+      effectsOmitted: 0,
     }
   })
 
@@ -296,6 +464,7 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
         effects: record.effects.filter(
           (effect) => effect.provenance.packageName === query.packageName,
         ),
+        effectsOmitted: record.effectsOmitted,
       }))
       .filter((record) => record.effects.length > 0)
     const matchedEffects = totalEffects(findings)
@@ -311,6 +480,7 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
       .map((record) => ({
         ...record,
         effects: record.effects.filter((effect) => effect.provenance.ownership !== 'library'),
+        effectsOmitted: record.effectsOmitted,
       }))
       .filter(
         (record) =>
@@ -325,20 +495,42 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
       .map((record) => ({
         ...record,
         effects: record.effects.filter((effect) => effect.hotness.label === 'hot'),
+        effectsOmitted: record.effectsOmitted,
       }))
       .filter((record) => record.effects.length > 0)
   }
   findings.sort((a, b) => score(b) - score(a))
+  const omittedByLimit = Math.max(0, findings.length - query.limit)
+  const selected = findings.slice(0, query.limit)
+  let remainingEffects = EFFECT_REPORT_LIMIT
+  let effectsOmittedByLimit = 0
+  const components = selected.map((record) => {
+    const effects = record.effects.slice(0, remainingEffects)
+    const effectsOmitted = record.effectsOmitted + record.effects.length - effects.length
+    remainingEffects -= effects.length
+    effectsOmittedByLimit += effectsOmitted
+    return { ...record, effects, effectsOmitted }
+  })
   return {
-    components: findings.slice(0, query.limit),
+    components,
+    omittedByLimit,
+    effectsOmittedByLimit,
     libraryEffectsHidden,
     hotnessCriteria,
     ...(packageFilter === undefined ? {} : { packageFilter }),
   }
 }
 
+function snapshotEffectRecords(): EffectRecord[] {
+  return [...records.values()].map((record) => ({
+    ...record,
+    stats: record.stats.map((stat) => (stat ? { ...stat } : stat)),
+  }))
+}
+
 async function resolveEffectSourcesWithinBudget(
   recordsToAttribute: EffectRecord[],
+  getRetainedHookTree?: (fiber: Fiber) => HooksNode[] | null,
 ): Promise<EffectSourceResolution[]> {
   const sources = recordsToAttribute.map(budgetExceededResolution)
   const startedAt = Date.now()
@@ -350,7 +542,19 @@ async function resolveEffectSourcesWithinBudget(
 
     const record = recordsToAttribute[index]
     if (!record) break
-    sources[index] = await resolveEffectSourceResolutionBeforeDeadline(record.fiber, remaining)
+    let retainedHooks: HooksNode[] | null | undefined
+    if (getRetainedHookTree) {
+      try {
+        retainedHooks = getRetainedHookTree(record.fiber)
+      } catch {
+        retainedHooks = null
+      }
+    }
+    sources[index] = await resolveEffectSourceResolutionBeforeDeadline(
+      record.fiber,
+      remaining,
+      retainedHooks,
+    )
   }
 
   return sources
@@ -361,7 +565,7 @@ function score(record: EffectAuditRecord): number {
   let total = 0
   for (const effect of record.effects) {
     if (effect.hotness.label === 'hot') total += 1_000_000
-    total += effect.fired
+    total += effect.scheduled
   }
   return total
 }
@@ -370,17 +574,20 @@ function toFinding(
   stat: EffectStat,
   criteria: EffectHotnessCriteria,
 ): Omit<EffectFinding, 'source' | 'isLibrary' | 'provenance'> {
-  const firesEveryUpdate = stat.updates > 0 && stat.fired === stat.updates
+  const schedulesEveryUpdate = stat.updates > 0 && stat.scheduled === stat.updates
   const hotness = classifyHotness(stat, criteria)
   return {
     index: stat.index,
     kind: stat.kind,
     depsMode: stat.depsMode,
     depCount: stat.depCount,
-    fired: stat.fired,
+    scheduled: stat.scheduled,
+    schedulesEveryUpdate,
+    fired: stat.scheduled,
     updates: stat.updates,
-    firesEveryUpdate,
+    firesEveryUpdate: schedulesEveryUpdate,
     lastChangedDep: stat.lastChangedDep,
+    cleanupFunctionObserved: stat.hasCleanup,
     hasCleanup: stat.hasCleanup,
     note: noteFor(stat, hotness),
     hotness,
@@ -390,52 +597,54 @@ function toFinding(
 function noteFor(stat: EffectStat, hotness: EffectHotness): string | undefined {
   if (hotness.label !== 'hot') return undefined
   const hookName = stat.kind === 'layout' ? 'useLayoutEffect' : 'useEffect'
-  if (stat.depsMode === 'none' && stat.fired > 0) {
-    return `no dependency array — this ${hookName} runs after every render (ran on ${stat.fired}/${stat.updates} updates); add a deps array if it should not`
+  if (stat.depsMode === 'none' && stat.scheduled > 0) {
+    return `no dependency array — React scheduled this ${hookName} on ${stat.scheduled}/${stat.updates} updates; add dependencies only if repeated scheduling is unintended`
   }
   if (stat.depsMode === 'list') {
     const slot =
       stat.lastChangedDep === null ? 'a dependency' : `dependency [${stat.lastChangedDep}]`
     // A changed primitive is a real value change (maybe intended); only reference churn is fixable with memoization.
     return stat.lastChangedDepIsPrimitive
-      ? `re-runs on ${stat.fired}/${stat.updates} updates — ${slot} changes value; intended for state that changes per interaction, a loop smell if this effect also sets that state`
-      : `re-runs on ${stat.fired}/${stat.updates} updates — ${slot} changes reference (likely unstable); stabilize it with useMemo/useCallback or drop it from deps`
+      ? `scheduled on ${stat.scheduled}/${stat.updates} updates — ${slot} changes value; verify whether that synchronization is intended and whether it writes the same value`
+      : `scheduled on ${stat.scheduled}/${stat.updates} updates — ${slot} changes reference; trace its producer before deciding whether to stabilize it`
   }
   return undefined
 }
 
 function classifyHotness(stat: EffectStat, criteria: EffectHotnessCriteria): EffectHotness {
   const samples = stat.updates
-  const observedRate = samples === 0 ? 0 : stat.fired / samples
-  const reason =
+  const observedRate = samples === 0 ? 0 : stat.scheduled / samples
+  const scheduleReason: EffectScheduleReason =
     samples < criteria.minUpdates
       ? 'below-minimum-updates'
-      : observedRate >= criteria.minFireRate
+      : observedRate >= criteria.minScheduleRate
         ? 'meets-threshold'
-        : 'below-fire-rate'
+        : 'below-schedule-rate'
   const label: EffectHotnessLabel =
-    reason === 'below-minimum-updates'
+    scheduleReason === 'below-minimum-updates'
       ? 'insufficient-data'
-      : reason === 'meets-threshold'
+      : scheduleReason === 'meets-threshold'
         ? 'hot'
         : 'not-hot'
-  const [lower, upper] = wilsonInterval(stat.fired, samples)
+  const [lower, upper] = wilsonInterval(stat.scheduled, samples)
   return {
     label,
     samples,
     observedRate: roundRate(observedRate),
     minUpdates: criteria.minUpdates,
+    minScheduleRate: criteria.minScheduleRate,
     minFireRate: criteria.minFireRate,
     confidenceInterval: {
       level: criteria.confidenceLevel,
       lower: roundRate(lower),
       upper: roundRate(upper),
     },
-    reason,
+    scheduleReason,
+    reason: scheduleReason === 'below-schedule-rate' ? 'below-fire-rate' : scheduleReason,
   }
 }
 
-/** 95% Wilson score interval for a binomial firing rate; stable even at 0/n and n/n. */
+/** 95% Wilson score interval for a binomial schedule rate; stable even at 0/n and n/n. */
 function wilsonInterval(successes: number, samples: number): [number, number] {
   if (samples === 0) return [0, 1]
   const z = 1.959963984540054
@@ -453,7 +662,11 @@ function roundRate(value: number): number {
 }
 
 function budgetExceededResolution(): EffectSourceResolution {
-  return { status: 'deadline-exceeded', sources: null }
+  return { status: 'deadline-exceeded', sources: null, callsites: null }
+}
+
+function staleReportResolution(): EffectSourceResolution {
+  return { status: 'report-state-advanced', sources: null, callsites: null }
 }
 
 function effectProvenance(
@@ -461,11 +674,20 @@ function effectProvenance(
   effectCount: number,
   position: number,
 ): EffectProvenance {
+  if (resolution.status === 'report-state-advanced') {
+    return unknownProvenance('report-state-advanced')
+  }
   if (resolution.status === 'deadline-exceeded') {
     return unknownProvenance('attribution-budget-exhausted')
   }
   if (resolution.status === 'inspection-unavailable') {
     return unknownProvenance('hook-inspection-unavailable')
+  }
+  if (resolution.status === 'inspection-truncated') {
+    return unknownProvenance('inspection-truncated')
+  }
+  if (resolution.status === 'shadow-render-disabled') {
+    return unknownProvenance('shadow-render-disabled')
   }
   if (resolution.status === 'no-user-effects') {
     return {
@@ -474,13 +696,15 @@ function effectProvenance(
       reason: 'no-user-effect-callsite',
       hookSource: null,
       packageName: null,
+      hookAncestry: [],
     }
   }
 
   const sources = resolution.sources ?? []
   if (sources.length === effectCount) {
     const hookSource = sources[position] ?? null
-    if (!hookSource) return unknownProvenance('hook-source-unresolved')
+    const hookAncestry = effectHookAncestry(resolution, position)
+    if (!hookSource) return unknownProvenance('hook-source-unresolved', hookAncestry)
     const ownership: EffectOwnership = isLibraryFile(hookSource.file) ? 'library' : 'app'
     return {
       ownership,
@@ -488,6 +712,7 @@ function effectProvenance(
       reason: 'exact-hook-order',
       hookSource,
       packageName: ownership === 'library' ? packageNameFromFile(hookSource.file) : null,
+      hookAncestry,
     }
   }
 
@@ -498,13 +723,44 @@ function effectProvenance(
       reason: 'library-only-hook-tree',
       hookSource: null,
       packageName: commonPackageName(sources),
+      hookAncestry: [],
     }
   }
   return unknownProvenance('hook-count-mismatch')
 }
 
-function unknownProvenance(reason: EffectProvenanceReason): EffectProvenance {
-  return { ownership: 'unknown', evidence: 'unknown', reason, hookSource: null, packageName: null }
+function unknownProvenance(
+  reason: EffectProvenanceReason,
+  hookAncestry: EffectHookAncestryFrame[] = [],
+): EffectProvenance {
+  return {
+    ownership: 'unknown',
+    evidence: 'unknown',
+    reason,
+    hookSource: null,
+    packageName: null,
+    hookAncestry,
+  }
+}
+
+function effectHookAncestry(
+  resolution: EffectSourceResolution,
+  position: number,
+): EffectHookAncestryFrame[] {
+  return (resolution.callsites?.[position]?.hookAncestry ?? []).map((frame) => {
+    const ownership: EffectOwnership = frame.source
+      ? isLibraryFile(frame.source.file)
+        ? 'library'
+        : 'app'
+      : 'unknown'
+    return {
+      name: frame.name,
+      source: frame.source,
+      ownership,
+      packageName:
+        ownership === 'library' && frame.source ? packageNameFromFile(frame.source.file) : null,
+    }
+  })
 }
 
 function commonPackageName(sources: (ResolvedSource | null)[]): string | null {
@@ -534,20 +790,29 @@ function packageNameFromFile(file: string): string | null {
   return first.startsWith('@') && second ? `${first}/${second}` : first
 }
 
-function listEffects(fiber: Fiber | null | undefined): Effect[] {
+function listEffects(
+  fiber: Fiber | null | undefined,
+  budget?: CommitWorkBudget,
+): {
+  effects: Effect[]
+  truncated: boolean
+} {
   const last: Effect | null = fiber?.updateQueue?.lastEffect ?? null
   const first = last?.next ?? null
-  if (!first) return []
+  if (!first) return { effects: [], truncated: false }
   const list: Effect[] = []
   let effect: Effect | null = first
   let guard = 0
   while (effect && guard < EFFECT_WALK_LIMIT) {
+    if (!consumeCommitWork(budget, 'effect-list')) {
+      return { effects: list, truncated: true }
+    }
     list.push(effect)
     effect = effect.next
     guard += 1
     if (effect === first) break
   }
-  return list
+  return { effects: list, truncated: effect !== first }
 }
 
 function hasCleanupFn(effect: Effect): boolean {
@@ -572,11 +837,28 @@ function isPrimitive(value: unknown): boolean {
   return (typeof value !== 'object' && typeof value !== 'function') || value === null
 }
 
-function changedDepIndex(next: unknown[] | null, prev: unknown[] | null): number | null {
+function changedDepIndex(
+  next: unknown[] | null,
+  prev: unknown[] | null,
+  budget?: CommitWorkBudget,
+): number | null {
   if (!Array.isArray(next) || !Array.isArray(prev)) return null
-  const len = Math.min(next.length, prev.length)
+  const len = Math.min(next.length, prev.length, EFFECT_DEP_SCAN_LIMIT)
   for (let i = 0; i < len; i++) {
-    if (!Object.is(next[i], prev[i])) return i
+    if (!consumeCommitWork(budget, 'effect-dependencies')) return null
+    try {
+      if (!Object.is(next[i], prev[i])) return i
+    } catch {
+      return null
+    }
   }
   return null
+}
+
+function dependencyIsPrimitive(dependencies: unknown[] | null, index: number): boolean | null {
+  try {
+    return isPrimitive(dependencies?.[index])
+  } catch {
+    return null
+  }
 }
