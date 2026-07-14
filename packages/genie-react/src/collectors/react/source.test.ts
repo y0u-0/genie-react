@@ -39,6 +39,7 @@ const {
   resolveExternalStoreSourceResolution,
   resolveSource,
   scheduleClassificationWarmup,
+  sourceProvenanceForSource,
   sourceLabel,
 } = await import('./source')
 
@@ -97,6 +98,42 @@ describe('sourceLabel', () => {
       }),
     ).toBe('cmdk.js:1998')
     expect(sourceLabel(null)).toBeNull()
+  })
+})
+
+describe('sourceProvenanceForSource', () => {
+  it('keeps definition and allocation provenance unknown when only a fallback source exists', () => {
+    expect(
+      sourceProvenanceForSource({
+        file: '/src/App.tsx',
+        line: 10,
+        column: 2,
+        functionName: 'App',
+        sourceMapConfidence: 'mapped',
+      }),
+    ).toMatchObject({
+      definitionSource: null,
+      allocationCallsite: null,
+      hookDefinitionOwner: null,
+      hookCallsite: null,
+      package: null,
+      sourceMapConfidence: 'mapped',
+      failureReason: 'definition-and-allocation-not-distinguished',
+      usageOrDefinitionFallback: { file: '/src/App.tsx' },
+    })
+  })
+
+  it('returns an explicit unresolved provenance record', () => {
+    expect(sourceProvenanceForSource(null)).toEqual({
+      definitionSource: null,
+      allocationCallsite: null,
+      hookDefinitionOwner: null,
+      hookCallsite: null,
+      package: null,
+      sourceMapConfidence: 'unknown',
+      failureReason: 'source-unresolved',
+      usageOrDefinitionFallback: null,
+    })
   })
 })
 

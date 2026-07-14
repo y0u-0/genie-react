@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import {
   devtoolsStatusContract,
@@ -32,6 +33,7 @@ const VITE_CONFIG_FILES = [
 const GENIE_PACKAGE = 'genie-react'
 const VITE_PLUGIN_SPECIFIER = 'genie-react/vite'
 const CLI_PACKAGE = '@genie-react/cli'
+const AGENT_SKILL_PATH = '.agents/skills/genie/SKILL.md'
 const VITE_IMPORT_LINE = `import { genie } from '${VITE_PLUGIN_SPECIFIER}'`
 const GENIE_IMPORT_LINE = `import { Genie } from '${GENIE_PACKAGE}'`
 const GENIE_RENDER_SNIPPET = '{import.meta.env.DEV && <Genie />}'
@@ -123,6 +125,24 @@ export interface DoctorResult {
   framework: Framework
   checks: DoctorCheck[]
   bridge: BridgeDiscovery | null
+  versions: {
+    cli: string
+    runtime: string | null
+    bundledSkill: string | null
+    activeSkill: string | null
+  }
+  skill: {
+    path: string | null
+    bundledHash: string | null
+    activeHash: string | null
+    current: boolean
+  }
+  bridgeCandidates: BridgeDiscovery[]
+  remediation: string[]
+  live?: {
+    sessionHealth: SessionProbe | null
+    sourceMapHealth: SourceMapHealth | null
+  }
 }
 
 export function runInit(options: InitOptions = {}): InitResult {
@@ -144,6 +164,7 @@ export function runInit(options: InitOptions = {}): InitResult {
   if (framework === 'unknown' && viteConfig.action === 'missing') {
     printUniversalSetup(log)
     ensureGenieIgnored(ctx)
+    ensureAgentSkill(ctx)
     printUniversalNextSteps(log, packageManagerHints(cwd))
     return {
       ok: true,
@@ -162,6 +183,7 @@ export function runInit(options: InitOptions = {}): InitResult {
     )
   }
   ensureGenieIgnored(ctx)
+  ensureAgentSkill(ctx)
   printNextSteps(log, framework, rootRoute, packageManagerHints(cwd))
   if (!dryRun && !options.yes) {
     log.info(
@@ -229,6 +251,38 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
     })
   }
 
+  const cliVersion = packageVersionAt(new URL('../package.json', import.meta.url)) ?? '0.0.0'
+  const runtimeDirectory = findPackageDir(cwd, GENIE_PACKAGE)
+  const runtimeVersion = runtimeDirectory
+    ? packageVersionAt(join(runtimeDirectory, 'package.json'))
+    : null
+  const bundledSkill = readBundledSkill()
+  const activeSkillPath = findActiveSkill(cwd)
+  const activeSkill = activeSkillPath ? readFileSafe(activeSkillPath) : ''
+  const bundledHash = bundledSkill ? sha256(bundledSkill) : null
+  const activeHash = activeSkill ? sha256(activeSkill) : null
+  const bundledSkillVersion = skillVersion(bundledSkill)
+  const activeSkillVersion = skillVersion(activeSkill)
+  const skillCurrent = bundledHash !== null && activeHash === bundledHash
+  checks.push({
+    label: 'agent skill matches the bundled CLI guidance',
+    ok: skillCurrent,
+    critical: true,
+    detail: skillCurrent
+      ? `${relative(cwd, activeSkillPath ?? '')} · sha256 ${activeHash?.slice(0, 12)}`
+      : activeSkillPath
+        ? `${relative(cwd, activeSkillPath)} is ${activeSkillVersion ?? 'unversioned'} / ${activeHash?.slice(0, 12)}; run: npx ${CLI_PACKAGE} init`
+        : `${AGENT_SKILL_PATH} missing; run: npx ${CLI_PACKAGE} init`,
+  })
+  if (runtimeVersion) {
+    checks.push({
+      label: 'CLI and runtime package versions agree',
+      ok: runtimeVersion === cliVersion,
+      critical: true,
+      detail: `cli ${cliVersion} · runtime ${runtimeVersion}`,
+    })
+  }
+
   let bridge = readBridgeDiscovery(cwd)
   let staleBridgePid: number | null = null
   if (bridge?.pid !== undefined && !isPidAlive(bridge.pid)) {
@@ -260,7 +314,29 @@ export function runDoctor(options: DoctorOptions = {}): DoctorResult {
     log.info("\nSome checks failed. Run 'npx @genie-react/cli init' to wire things up.")
   }
 
-  return { ok, framework, checks, bridge }
+  const remediation = checks
+    .filter((check) => !check.ok)
+    .map((check) => check.detail ?? `Resolve failed check: ${check.label}`)
+  return {
+    ok,
+    framework,
+    checks,
+    bridge,
+    versions: {
+      cli: cliVersion,
+      runtime: runtimeVersion,
+      bundledSkill: bundledSkillVersion,
+      activeSkill: activeSkillVersion,
+    },
+    skill: {
+      path: activeSkillPath ? relative(cwd, activeSkillPath) : null,
+      bundledHash,
+      activeHash,
+      current: skillCurrent,
+    },
+    bridgeCandidates: bridge ? [bridge] : [],
+    remediation,
+  }
 }
 
 export interface LiveDoctorOptions extends DoctorOptions {
@@ -275,6 +351,8 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
   const timeoutMs = options.timeoutMs ?? 2_000
   const staticResult = runDoctor(options)
   const checks: DoctorCheck[] = []
+  let sessionHealth: SessionProbe | null = null
+  let sourceMapHealth: SourceMapHealth | null = null
 
   const { url, source } = await resolveBridge(cwd)
   const origin = httpOriginOf(url)
@@ -317,6 +395,7 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
 
     if (hub.kind !== 'unreachable') {
       const session = await probeSession(url, timeoutMs)
+      sessionHealth = session
       checks.push({
         label: 'bridge accepts agent connections',
         ok: session !== null,
@@ -324,6 +403,7 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
         detail: session ? undefined : 'WebSocket round-trip failed',
       })
       if (session) {
+        sourceMapHealth = session.sourceMapHealth
         checks.push({
           label: session.connected ? 'an app session is connected' : 'no app session connected yet',
           ok: session.connected,
@@ -346,6 +426,14 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
             detail: `react_find_components answered in ${session.roundTripMs}ms`,
           })
         }
+        if (session.sourceMapHealth) {
+          checks.push({
+            label: 'React source-map health',
+            ok: session.sourceMapHealth.status !== 'unhealthy',
+            critical: false,
+            detail: `${session.sourceMapHealth.status} · mapped ${session.sourceMapHealth.mapped} · served ${session.sourceMapHealth.served} · unknown ${session.sourceMapHealth.unknown}`,
+          })
+        }
       }
     }
   }
@@ -363,6 +451,14 @@ export async function runLiveDoctor(options: LiveDoctorOptions = {}): Promise<Do
     framework: staticResult.framework,
     checks: [...staticResult.checks, ...checks],
     bridge: staticResult.bridge,
+    versions: staticResult.versions,
+    skill: staticResult.skill,
+    bridgeCandidates: staticResult.bridgeCandidates,
+    remediation: [
+      ...staticResult.remediation,
+      ...checks.filter((check) => !check.ok).map((check) => check.detail ?? check.label),
+    ],
+    live: { sessionHealth, sourceMapHealth },
   }
 }
 
@@ -411,6 +507,14 @@ interface SessionProbe {
   app: string | null
   reactVersion: string | null
   roundTripMs: number | null
+  sourceMapHealth: SourceMapHealth | null
+}
+
+interface SourceMapHealth {
+  status: 'healthy' | 'partial' | 'unhealthy' | 'unavailable'
+  mapped: number
+  served: number
+  unknown: number
 }
 
 async function probeSession(url: string, timeoutMs: number): Promise<SessionProbe | null> {
@@ -423,12 +527,17 @@ async function probeSession(url: string, timeoutMs: number): Promise<SessionProb
   try {
     const status = await link.invoke(devtoolsStatusContract, {})
     let roundTripMs: number | null = null
+    let sourceMapHealth: SourceMapHealth | null = null
     if (status.connected && status.domains.includes('react')) {
       const started = Date.now()
       roundTripMs = await link
         .invoke('react_find_components', { query: '__genie_live_doctor__' })
         .then(() => Date.now() - started)
         .catch(() => null)
+      const provenance = await link
+        .invoke('react_provenance', { limit: 50, appOnly: false })
+        .catch(() => null)
+      sourceMapHealth = sourceMapHealthOf(provenance)
     }
     return {
       connected: status.connected,
@@ -436,11 +545,36 @@ async function probeSession(url: string, timeoutMs: number): Promise<SessionProb
       app: status.app?.name ?? null,
       reactVersion: status.app?.reactVersion ?? null,
       roundTripMs,
+      sourceMapHealth,
     }
   } catch {
     return null
   } finally {
     link.close()
+  }
+}
+
+export function sourceMapHealthOf(value: unknown): SourceMapHealth | null {
+  if (!isRecord(value) || !isRecord(value.summary) || !isRecord(value.summary.sourceMaps)) {
+    return null
+  }
+  const maps = value.summary.sourceMaps
+  const mapped = typeof maps.mapped === 'number' ? maps.mapped : 0
+  const served = typeof maps.served === 'number' ? maps.served : 0
+  const unknown = typeof maps.unknown === 'number' ? maps.unknown : 0
+  const total = mapped + served + unknown
+  return {
+    status:
+      total === 0
+        ? 'unavailable'
+        : mapped + served === 0
+          ? 'unhealthy'
+          : unknown > 0 || served > 0
+            ? 'partial'
+            : 'healthy',
+    mapped,
+    served,
+    unknown,
   }
 }
 
@@ -740,6 +874,7 @@ function runNextInit(ctx: ApplyContext, options: InitOptions): InitResult {
   applyNextLayoutOutcome(layout, ctx)
   applyInstrumentationOutcome(instrumentation, ctx)
   ensureGenieIgnored(ctx)
+  ensureAgentSkill(ctx)
   printNextStepsForNext(log, packageManagerHints(cwd))
   if (!dryRun && !options.yes) {
     log.info("\nTip: run 'npx @genie-react/cli doctor' to verify the wiring.")
@@ -962,6 +1097,63 @@ function ensureGenieIgnored(ctx: ApplyContext): void {
   log.info(`${OK} added .genie/ to .gitignore`)
 }
 
+function ensureAgentSkill(ctx: ApplyContext): void {
+  const bundled = readBundledSkill()
+  if (!bundled) {
+    ctx.log.info(`${WARN} bundled Genie skill is unavailable; reinstall ${CLI_PACKAGE}`)
+    return
+  }
+  const path = join(ctx.cwd, AGENT_SKILL_PATH)
+  if (readFileSafe(path) === bundled) return
+  if (ctx.dryRun) {
+    ctx.log.info(`${PREVIEW}Would install the versioned agent skill at ${AGENT_SKILL_PATH}`)
+    return
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, bundled)
+  ctx.log.info(`${OK} installed the versioned agent skill at ${AGENT_SKILL_PATH}`)
+}
+
+function readBundledSkill(): string {
+  try {
+    return readFileSync(new URL('../skill/SKILL.md', import.meta.url), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+function findActiveSkill(cwd: string): string | null {
+  const candidates = [
+    AGENT_SKILL_PATH,
+    '.codex/skills/genie/SKILL.md',
+    '.claude/skills/genie/SKILL.md',
+  ]
+  let directory = cwd
+  while (true) {
+    for (const candidate of candidates) {
+      const path = join(directory, candidate)
+      if (existsSync(path)) return path
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return null
+    directory = parent
+  }
+}
+
+function skillVersion(contents: string): string | null {
+  const match = /^\s*version:\s*["']?([^\s"']+)/m.exec(contents)
+  return match?.[1] ?? null
+}
+
+function sha256(contents: string): string {
+  return createHash('sha256').update(contents).digest('hex')
+}
+
+function packageVersionAt(path: string | URL): string | null {
+  const parsed = parseJson(readFileSafe(path))
+  return isRecord(parsed) && typeof parsed.version === 'string' ? parsed.version : null
+}
+
 // Walks up because monorepo apps keep `.git` at the repo root; worktrees/submodules use a `.git` file, which existsSync also covers.
 function inGitRepo(cwd: string): boolean {
   let dir = cwd
@@ -1009,7 +1201,7 @@ function rel(ctx: ApplyContext, path: string): string {
   return relative(ctx.cwd, path) || path
 }
 
-function readFileSafe(path: string): string {
+function readFileSafe(path: string | URL): string {
   try {
     return readFileSync(path, 'utf8')
   } catch {

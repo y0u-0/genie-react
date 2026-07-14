@@ -1,4 +1,5 @@
 export * from './bridge'
+export { captureIntegrityDigest, verifyCaptureIntegrity } from './capture-manager'
 export * from './discovery'
 export * from './standalone'
 export * from './start'

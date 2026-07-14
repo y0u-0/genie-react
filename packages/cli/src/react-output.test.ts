@@ -3,11 +3,37 @@ import {
   summarizeComponentCohort,
   summarizeEffectEvents,
   summarizeEffects,
+  summarizeProvenance,
   summarizeRenderCauses,
   summarizeRenders,
 } from './react-output'
 
 describe('react output', () => {
+  it('renders incomplete aggregate counts as lower bounds and refuses comparability', () => {
+    const output = summarizeRenders({
+      tracking: true,
+      commits: 1,
+      comparable: false,
+      notComparableReasons: ['render-measurement-incomplete'],
+      summary: {
+        semantics: 'lower-bound',
+        commits: 1,
+        trackedComponents: 1,
+        totalRenders: 3,
+        totalUpdates: 2,
+        unstableComponents: 0,
+        unnecessaryComponents: 0,
+      },
+      components: [],
+      coverage: { complete: false, skippedCommitFibers: 7 },
+    })
+
+    expect(output).toContain('≥3 renders (lower bound)')
+    expect(output).toContain('≥2 updates (lower bound)')
+    expect(output).toContain('not comparable (render-measurement-incomplete)')
+    expect(output).toContain('coverage incomplete (7 commit fibers skipped)')
+  })
+
   it('summarizes commit-scoped Query and parent causes', () => {
     const output = summarizeRenderCauses({
       commits: 12,
@@ -442,6 +468,110 @@ describe('react output', () => {
     ])
     expect(output).not.toContain('fired')
     expect(summarizeEffectEvents({ events: 'nope' })).toBeNull()
+  })
+
+  it('surfaces exact effect execution, cleanup, consequence IDs, and inferred commits', () => {
+    const output = summarizeEffectEvents({
+      tracking: false,
+      documentCommitId: 15,
+      observation: { id: 'observation:effect' },
+      events: [
+        {
+          documentCommitId: 14,
+          commitId: 2,
+          componentName: 'Search',
+          componentId: 4,
+          effectIndex: 0,
+          kind: 'effect',
+          phase: 'update',
+          changedDependencySlots: [],
+          execution: { status: 'observed', outcome: 'completed', durationMs: 1.24 },
+          cleanupExecution: {
+            status: 'unobserved',
+            reason: 'no-cleanup-returned',
+          },
+          consequences: {
+            status: 'instrumented',
+            events: [
+              {
+                kind: 'notification',
+                domain: 'query-notification',
+                notificationId: 'query-notification:7',
+                evidence: 'exact',
+              },
+              {
+                kind: 'resulting-commit',
+                documentCommitId: 15,
+                evidence: 'inferred',
+              },
+            ],
+            unobservedDomains: [
+              'state-update',
+              'external-store-write',
+              'network',
+              'event-listener',
+              'navigation',
+            ],
+          },
+        },
+      ],
+    })
+
+    expect(output).toContain('execution observed completed 1.2ms')
+    expect(output).toContain('cleanup unobserved (no cleanup returned)')
+    expect(output).toContain('query notification query-notification:7 (exact)')
+    expect(output).toContain('commit 15 (inferred)')
+    expect(output).toContain(
+      'unobserved state-update,external-store-write,network,event-listener,navigation',
+    )
+  })
+
+  it('summarizes split provenance, source-map health, wrappers, and unresolved reasons', () => {
+    const output = summarizeProvenance({
+      records: [
+        {
+          id: 4,
+          name: 'SearchRow',
+          ownership: 'unknown',
+          source: null,
+          wrapperAncestry: [
+            { kind: 'memo', name: 'Memo' },
+            { kind: 'forward-ref', name: 'SearchRow' },
+          ],
+          provenance: {
+            definitionSource: null,
+            allocationCallsite: null,
+            hookDefinitionOwner: null,
+            hookCallsite: null,
+            package: null,
+            sourceMapConfidence: 'unknown',
+            failureReason: 'definition-and-allocation-not-distinguished',
+            usageOrDefinitionFallback: {
+              file: '/src/SearchRow.tsx',
+              line: 18,
+              column: 2,
+              functionName: 'SearchRow',
+            },
+          },
+        },
+      ],
+      summary: {
+        returned: 1,
+        resolved: 0,
+        unresolved: 1,
+        ownership: { app: 0, library: 0, unknown: 1 },
+        sourceMaps: { mapped: 0, served: 0, unknown: 1, status: 'degraded' },
+      },
+      hiddenByOwnership: 0,
+      omittedByLimit: 0,
+      truncated: false,
+    })
+
+    expect(output).toContain('source maps degraded')
+    expect(output).toContain('fallback SearchRow.tsx:18')
+    expect(output).toContain('provenance definition-and-allocation-not-distinguished')
+    expect(output).toContain('owner unknown')
+    expect(output).toContain('wrappers Memo→SearchRow')
   })
 
   it('prefers schedule fields and makes every incomplete effect coverage counter actionable', () => {

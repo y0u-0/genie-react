@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   isRegisteredQueryObserver,
+  queryNotificationFor,
   queryObserverId,
   querySubscriberFor,
   querySubscriberObservationFor,
+  recordQueryNotification,
   registeredRouterStore,
   registerQueryObserver,
   registerQuerySubscriber,
@@ -110,5 +112,28 @@ describe('external store identity registry', () => {
 
     expect(registeredRouterStore(store)?.routerId).toBe('router:1')
     expect(registeredRouterStore(store)?.readSnapshot?.()).toBe('current')
+  })
+
+  it('joins only the exact delivered Query result identity to a notification ID', () => {
+    const observer = {}
+    const before = { data: { id: 1 }, status: 'success' }
+    const after = { data: before.data, status: 'success', isFetching: false }
+    registerQueryObserver(observer)
+
+    const event = recordQueryNotification(observer, before, after, {
+      trackedFields: ['data', 'isFetching'],
+      trackedFieldsCoverage: 'exact',
+      fanout: 1,
+    })
+
+    expect(event).toMatchObject({
+      notificationId: 'query-notification:1',
+      observerId: 'query-observer:1',
+      trackedFields: ['data', 'isFetching'],
+      changedResultFields: ['isFetching'],
+      structuralSharing: { reusedFields: ['data', 'status'], changedFields: ['isFetching'] },
+    })
+    expect(queryNotificationFor(observer, after)?.notificationId).toBe('query-notification:1')
+    expect(queryNotificationFor(observer, { ...after })).toBeNull()
   })
 })

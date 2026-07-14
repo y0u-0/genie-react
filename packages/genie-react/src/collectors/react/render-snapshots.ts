@@ -19,6 +19,8 @@ export interface ComponentAggregate {
 export interface RenderTrackingCoverage {
   complete: boolean
   inputAttributionComplete: boolean
+  semantics: 'exact' | 'lower-bound'
+  coverageDomain: 'render-measurement' | 'render-causality'
   skippedCommitFibers: number
   droppedUnmountFibers: number
   analysisFailedFibers: number
@@ -26,11 +28,34 @@ export interface RenderTrackingCoverage {
   propsNotEnumeratedFibers: number
   budgetExhaustedCommits: number
   budgetExhaustedSubsystems: { subsystem: string; commits: number }[]
+  targeted?: {
+    components: string[]
+    roots: number[]
+    processedFibers: number
+    skippedFibers: number
+    complete: boolean
+  }
+  observationBudget?: {
+    adaptive: boolean
+    adaptiveScale: number
+    fiberLimit: number
+    operationLimit: number
+    timeLimitMs: number
+    targetOperationReserve: number
+    targetTimeReserveMs: number
+    lifecycleBufferLimit: number
+    lifecycleTargetReserve: number
+  }
 }
 
 type RenderTrackingCoverageInput = Omit<
   RenderTrackingCoverage,
-  'complete' | 'inputAttributionComplete'
+  | 'complete'
+  | 'inputAttributionComplete'
+  | 'semantics'
+  | 'coverageDomain'
+  | 'targeted'
+  | 'observationBudget'
 >
 
 export function buildRenderTrackingCoverage(
@@ -48,7 +73,34 @@ export function buildRenderTrackingCoverage(
     ...input,
     complete: scope === 'measurement' ? measurementComplete : inputAttributionComplete,
     inputAttributionComplete,
+    semantics: (scope === 'measurement' ? measurementComplete : inputAttributionComplete)
+      ? 'exact'
+      : 'lower-bound',
+    coverageDomain: scope === 'measurement' ? 'render-measurement' : 'render-causality',
   }
+}
+
+export function renderSummarySemantics(
+  coverage: RenderTrackingCoverage,
+  observedRenders: number,
+): 'exact' | 'lower-bound' | 'unknown' {
+  if (coverage.complete) return 'exact'
+  return observedRenders > 0 ? 'lower-bound' : 'unknown'
+}
+
+export function renderEvidenceComparability(
+  coverage: RenderTrackingCoverage,
+  attributionStatus: 'current' | 'stale',
+): { comparable: boolean; notComparableReasons: string[] } {
+  const reasons: string[] = []
+  if (coverage.skippedCommitFibers > 0) reasons.push('skipped-commit-fibers')
+  if (coverage.droppedUnmountFibers > 0) reasons.push('dropped-unmount-fibers')
+  if (coverage.analysisFailedFibers > 0) reasons.push('fiber-analysis-failed')
+  if (coverage.truncatedInputFibers > 0) reasons.push('render-input-scan-truncated')
+  if (coverage.propsNotEnumeratedFibers > 0) reasons.push('render-props-not-enumerated')
+  if (coverage.budgetExhaustedCommits > 0) reasons.push('commit-analysis-budget-exhausted')
+  if (attributionStatus === 'stale') reasons.push('report-attribution-stale')
+  return { comparable: reasons.length === 0, notComparableReasons: reasons }
 }
 
 interface Snapshot {

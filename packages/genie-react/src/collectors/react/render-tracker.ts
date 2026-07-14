@@ -19,6 +19,7 @@ import {
   setExternalStoreObservation,
 } from '../causal/external-store-registry'
 import { type CommitWorkBudget, commitWorkExhaustions, consumeCommitWork } from './commit-budget'
+import { recordResultingEffectCommit } from './effect-events'
 import {
   clearEffects,
   type EffectScheduleObservation,
@@ -141,11 +142,59 @@ let budgetExhaustedCommits = 0
 const budgetExhaustedSubsystems = new Map<string, number>()
 let droppedRenderEvents = 0
 let clears = 0
+let targetedFibersProcessed = 0
+let targetedFibersSkipped = 0
+let droppedTargetUnmountFibers = 0
+let adaptiveBudgetScale = 1
+
+export interface RenderObservationOptions {
+  components?: string[]
+  roots?: number[]
+  budget?: {
+    fiberLimit?: number
+    operationLimit?: number
+    timeLimitMs?: number
+    targetOperationReserve?: number
+    targetTimeReserveMs?: number
+    adaptive?: boolean
+  }
+  lifecycle?: { bufferLimit?: number; targetReserve?: number }
+}
+
+interface RenderObservationConfiguration {
+  components: string[]
+  roots: number[]
+  budget: {
+    fiberLimit: number
+    operationLimit: number
+    timeLimitMs: number
+    targetOperationReserve: number
+    targetTimeReserveMs: number
+    adaptive: boolean
+  }
+  lifecycle: { bufferLimit: number; targetReserve: number }
+}
+
+const DEFAULT_OBSERVATION_CONFIGURATION: RenderObservationConfiguration = {
+  components: [],
+  roots: [],
+  budget: {
+    fiberLimit: 250,
+    operationLimit: 20_000,
+    timeLimitMs: 8,
+    targetOperationReserve: 4_000,
+    targetTimeReserveMs: 4,
+    adaptive: true,
+  },
+  lifecycle: { bufferLimit: 1_000, targetReserve: 100 },
+}
+
+let observationConfiguration = structuredClone(DEFAULT_OBSERVATION_CONFIGURATION)
+let observationRootIds = new Set<number>()
 
 const DID_CAPTURE = 0b1000_0000
 const RECENT_CAUSE_EVENT_LIMIT = 1_000
-const PENDING_UNMOUNT_LIMIT = 1_000
-const pendingUnmounts: { rendererId: number; fiber: Fiber }[] = []
+const pendingUnmounts: { rendererId: number; fiber: Fiber; targeted: boolean }[] = []
 const pendingHostUnmountRenderers = new Set<number>()
 let uncertainTraversalRoots = new WeakSet<FiberRoot>()
 
@@ -185,6 +234,7 @@ export function startRenderTracking(): boolean {
           return
         }
         noteDocumentCommit()
+        recordResultingEffectCommit(getDocumentCommitId())
         if (paused) {
           discardPendingUnmounts(rendererId)
           advanceExcludedCommitBaseline(root)
@@ -196,15 +246,36 @@ export function startRenderTracking(): boolean {
           return
         }
         commits += 1
-        const budget = createCommitAnalysisBudget()
-        recordPendingUnmounts(rendererId, budget.work)
+        const effective = effectiveObservationBudget()
+        const budget = createCommitAnalysisBudget(
+          effective.fiberLimit,
+          {
+            operationLimit: effective.operationLimit,
+            timeLimitMs: effective.timeLimitMs,
+          },
+          {
+            operationLimit: effective.targetOperationReserve,
+            timeLimitMs: effective.targetTimeReserveMs,
+          },
+        )
+        recordPendingUnmounts(rendererId, budget)
         budget.currentCommitEvidence.hostMutationCaptureComplete = !hostUnmountObserved
         const candidates: { fiber: Fiber; phase: RenderPhase }[] = []
+        const targetedCandidates: { fiber: Fiber; phase: RenderPhase }[] = []
         traverseRenderedFibers(root, (fiber, phase) => {
-          if (!consumeCommitWork(budget.work, 'commit-traversal')) {
+          const targeted = isObservationTarget(fiber)
+          const traversalWork = targeted ? budget.targetWork : budget.work
+          if (
+            !consumeCommitWork(traversalWork, targeted ? 'target-traversal' : 'commit-traversal')
+          ) {
             budget.currentCommitEvidence.hostMutationCaptureComplete = false
             if (shouldAnalyzeCommitFiber(fiber)) {
-              budget.skipped += 1
+              if (targeted) {
+                budget.targetSkipped += 1
+                targetedFibersSkipped += 1
+              } else {
+                budget.skipped += 1
+              }
               skippedCommitFibers += 1
             }
             return
@@ -221,6 +292,10 @@ export function startRenderTracking(): boolean {
             }
           }
           if (!shouldAnalyzeCommitFiber(fiber)) return
+          if (targeted) {
+            targetedCandidates.push({ fiber, phase })
+            return
+          }
           if (candidates.length >= budget.limit) {
             budget.skipped += 1
             skippedCommitFibers += 1
@@ -228,6 +303,9 @@ export function startRenderTracking(): boolean {
           }
           candidates.push({ fiber, phase })
         })
+        for (const candidate of targetedCandidates) {
+          recordCommitFiber(candidate.fiber, candidate.phase, budget, true)
+        }
         for (const candidate of candidates) {
           recordCommitFiber(candidate.fiber, candidate.phase, budget)
         }
@@ -288,7 +366,7 @@ export const getDroppedRenderEventCount = (): number => droppedRenderEvents
 export function getRenderTrackingCoverage(
   scope: 'causal' | 'measurement' = 'causal',
 ): RenderTrackingCoverage {
-  return buildRenderTrackingCoverage(
+  const coverage = buildRenderTrackingCoverage(
     {
       skippedCommitFibers,
       droppedUnmountFibers: getDroppedUnmountEvidenceCount(),
@@ -300,6 +378,17 @@ export function getRenderTrackingCoverage(
     },
     scope,
   )
+  return {
+    ...coverage,
+    targeted: {
+      components: [...observationConfiguration.components],
+      roots: [...observationConfiguration.roots],
+      processedFibers: targetedFibersProcessed,
+      skippedFibers: targetedFibersSkipped,
+      complete: targetedFibersSkipped === 0 && droppedTargetUnmountFibers === 0,
+    },
+    observationBudget: getRenderObservationConfig(),
+  }
 }
 
 function getDroppedUnmountEvidenceCount(): number {
@@ -311,7 +400,8 @@ function getDroppedUnmountEvidenceCount(): number {
   )
 }
 
-export function clearRenders(): ObservationWindow {
+export function clearRenders(options: RenderObservationOptions = {}): ObservationWindow {
+  configureRenderObservation(options)
   records.clear()
   recentCauseEvents.length = 0
   commits = 0
@@ -323,6 +413,10 @@ export function clearRenders(): ObservationWindow {
   budgetExhaustedCommits = 0
   budgetExhaustedSubsystems.clear()
   droppedRenderEvents = 0
+  targetedFibersProcessed = 0
+  targetedFibersSkipped = 0
+  droppedTargetUnmountFibers = 0
+  adaptiveBudgetScale = 1
   for (const pending of pendingUnmounts) discardExcludedInstanceUnmount(pending.fiber)
   pendingUnmounts.length = 0
   clears++
@@ -333,6 +427,90 @@ export function clearRenders(): ObservationWindow {
   setExternalStoreObservation(observation)
   beginInstanceObservation(observation.id)
   return observation
+}
+
+export function getRenderObservationConfig(): NonNullable<
+  RenderTrackingCoverage['observationBudget']
+> {
+  const effective = effectiveObservationBudget()
+  return {
+    adaptive: observationConfiguration.budget.adaptive,
+    adaptiveScale: adaptiveBudgetScale,
+    fiberLimit: effective.fiberLimit,
+    operationLimit: effective.operationLimit,
+    timeLimitMs: effective.timeLimitMs,
+    targetOperationReserve: effective.targetOperationReserve,
+    targetTimeReserveMs: effective.targetTimeReserveMs,
+    lifecycleBufferLimit: observationConfiguration.lifecycle.bufferLimit,
+    lifecycleTargetReserve: observationConfiguration.lifecycle.targetReserve,
+  }
+}
+
+function configureRenderObservation(options: RenderObservationOptions): void {
+  observationConfiguration = {
+    components: [...new Set(options.components ?? [])].map((name) => name.toLowerCase()),
+    roots: [...new Set(options.roots ?? [])],
+    budget: {
+      fiberLimit: options.budget?.fiberLimit ?? DEFAULT_OBSERVATION_CONFIGURATION.budget.fiberLimit,
+      operationLimit:
+        options.budget?.operationLimit ?? DEFAULT_OBSERVATION_CONFIGURATION.budget.operationLimit,
+      timeLimitMs:
+        options.budget?.timeLimitMs ?? DEFAULT_OBSERVATION_CONFIGURATION.budget.timeLimitMs,
+      targetOperationReserve:
+        options.budget?.targetOperationReserve ??
+        DEFAULT_OBSERVATION_CONFIGURATION.budget.targetOperationReserve,
+      targetTimeReserveMs:
+        options.budget?.targetTimeReserveMs ??
+        DEFAULT_OBSERVATION_CONFIGURATION.budget.targetTimeReserveMs,
+      adaptive: options.budget?.adaptive ?? DEFAULT_OBSERVATION_CONFIGURATION.budget.adaptive,
+    },
+    lifecycle: {
+      bufferLimit:
+        options.lifecycle?.bufferLimit ?? DEFAULT_OBSERVATION_CONFIGURATION.lifecycle.bufferLimit,
+      targetReserve:
+        options.lifecycle?.targetReserve ??
+        DEFAULT_OBSERVATION_CONFIGURATION.lifecycle.targetReserve,
+    },
+  }
+  observationRootIds = new Set(observationConfiguration.roots)
+}
+
+function effectiveObservationBudget(): RenderObservationConfiguration['budget'] {
+  const scale = observationConfiguration.budget.adaptive ? adaptiveBudgetScale : 1
+  return {
+    ...observationConfiguration.budget,
+    fiberLimit: Math.min(5_000, observationConfiguration.budget.fiberLimit * scale),
+    operationLimit: Math.min(200_000, observationConfiguration.budget.operationLimit * scale),
+    timeLimitMs: Math.min(50, observationConfiguration.budget.timeLimitMs * scale),
+  }
+}
+
+function isObservationTarget(fiber: Fiber): boolean {
+  if (
+    observationConfiguration.components.length === 0 &&
+    observationConfiguration.roots.length === 0
+  ) {
+    return false
+  }
+  if (
+    observationConfiguration.components.length > 0 &&
+    observationConfiguration.components.some((needle) =>
+      nameOf(fiber).toLowerCase().includes(needle),
+    )
+  ) {
+    return true
+  }
+  if (observationConfiguration.roots.length === 0) return false
+  let current: Fiber | null = fiber
+  for (let depth = 0; current && depth < 100; depth += 1) {
+    try {
+      if (observationRootIds.has(getFiberId(current))) return true
+    } catch {
+      return false
+    }
+    current = current.return
+  }
+  return false
 }
 
 export async function getRenders(query: RenderQuery): Promise<RenderReport[]> {
@@ -573,28 +751,47 @@ export function recordCommitFiber(
   fiber: Fiber,
   phase: RenderPhase,
   budget: CommitAnalysisBudget,
+  targeted = isObservationTarget(fiber),
 ): boolean {
   if (!shouldAnalyzeCommitFiber(fiber)) return false
-  if (budget.processed >= budget.limit) {
+  if (!targeted && budget.processed >= budget.limit) {
     budget.skipped += 1
     skippedCommitFibers += 1
     return false
   }
-  if (!consumeCommitWork(budget.work, 'commit-fibers')) {
-    budget.skipped += 1
-    skippedCommitFibers += 1
-    return false
-  }
-  budget.processed += 1
-  try {
-    const effectPreparation = prepareEffect(fiber, phase, commits, budget.work)
-    if (!consumeCommitWork(budget.work, 'render-record')) {
+  const work = targeted ? budget.targetWork : budget.work
+  if (!consumeCommitWork(work, targeted ? 'target-fibers' : 'commit-fibers')) {
+    if (targeted) {
+      budget.targetSkipped += 1
+      targetedFibersSkipped += 1
+    } else {
       budget.skipped += 1
+    }
+    skippedCommitFibers += 1
+    return false
+  }
+  if (targeted) {
+    budget.targetProcessed += 1
+    targetedFibersProcessed += 1
+  } else {
+    budget.processed += 1
+  }
+  try {
+    const effectPreparation = prepareEffect(fiber, phase, commits, work)
+    if (!consumeCommitWork(work, targeted ? 'target-render-record' : 'render-record')) {
+      if (targeted) {
+        budget.targetSkipped += 1
+        targetedFibersSkipped += 1
+      } else {
+        budget.skipped += 1
+      }
       skippedCommitFibers += 1
       return false
     }
-    recordRender(fiber, phase, effectPreparation, budget.work, budget.currentCommitEvidence)
-    if (consumeCommitWork(budget.work, 'error-state')) recordErrorState(fiber)
+    recordRender(fiber, phase, effectPreparation, work, budget.currentCommitEvidence)
+    if (consumeCommitWork(work, targeted ? 'target-error-state' : 'error-state')) {
+      recordErrorState(fiber)
+    }
     return true
   } catch {
     budget.failed += 1
@@ -847,11 +1044,18 @@ function prepareCauseEventEvidence(
   }
 }
 
-function recordPendingUnmounts(rendererId: number, budget?: CommitWorkBudget): void {
-  const retained: { rendererId: number; fiber: Fiber }[] = []
+function recordPendingUnmounts(rendererId: number, budget: CommitAnalysisBudget): void {
+  const retained: { rendererId: number; fiber: Fiber; targeted: boolean }[] = []
   for (const pending of pendingUnmounts) {
-    if (!consumeCommitWork(budget, 'pending-unmounts')) {
+    const work = pending.targeted ? budget.targetWork : budget.work
+    if (
+      !consumeCommitWork(work, pending.targeted ? 'target-pending-unmounts' : 'pending-unmounts')
+    ) {
       retained.push(pending)
+      if (pending.targeted) {
+        budget.targetSkipped += 1
+        targetedFibersSkipped += 1
+      }
       continue
     }
     if (pending.rendererId !== rendererId) {
@@ -864,7 +1068,7 @@ function recordPendingUnmounts(rendererId: number, budget?: CommitWorkBudget): v
       'unmount',
       commits,
       getDocumentCommitId(),
-      budget,
+      work,
     )
     removeEffectRecord(pending.fiber)
     records.delete(instance.fiberId)
@@ -876,14 +1080,27 @@ function recordPendingUnmounts(rendererId: number, budget?: CommitWorkBudget): v
 /** Queue only component lifecycles; host-node unmounts cannot produce cohort tombstones. */
 export function queuePendingUnmount(rendererId: number, fiber: Fiber): void {
   if (!isCompositeFiber(fiber)) return
-  pendingUnmounts.push({ rendererId, fiber })
-  if (pendingUnmounts.length <= PENDING_UNMOUNT_LIMIT) return
-  pendingUnmounts.shift()
+  const targeted = isObservationTarget(fiber)
+  pendingUnmounts.push({ rendererId, fiber, targeted })
+  if (pendingUnmounts.length <= observationConfiguration.lifecycle.bufferLimit) return
+  const protectedTargetIndices = new Set<number>()
+  let remainingReservation = observationConfiguration.lifecycle.targetReserve
+  for (let index = pendingUnmounts.length - 1; index >= 0 && remainingReservation > 0; index -= 1) {
+    if (!pendingUnmounts[index]?.targeted) continue
+    protectedTargetIndices.add(index)
+    remainingReservation -= 1
+  }
+  const evictionIndex = Math.max(
+    0,
+    pendingUnmounts.findIndex((_, index) => !protectedTargetIndices.has(index)),
+  )
+  const [dropped] = pendingUnmounts.splice(evictionIndex, 1)
+  if (dropped?.targeted) droppedTargetUnmountFibers += 1
   droppedPendingUnmountFibers += 1
 }
 
 function discardPendingUnmounts(rendererId: number): void {
-  const retained: { rendererId: number; fiber: Fiber }[] = []
+  const retained: { rendererId: number; fiber: Fiber; targeted: boolean }[] = []
   for (const pending of pendingUnmounts) {
     if (pending.rendererId === rendererId) discardExcludedInstanceUnmount(pending.fiber)
     else retained.push(pending)
@@ -926,11 +1143,17 @@ function publishCauseEvent(
 
 /** Finalize once after traversal so report coverage names every subsystem the shared guard stopped. */
 export function finalizeCommitAnalysisBudget(budget: CommitAnalysisBudget): void {
-  const exhausted = commitWorkExhaustions(budget.work)
+  const exhausted = [
+    ...commitWorkExhaustions(budget.work),
+    ...commitWorkExhaustions(budget.targetWork).map((subsystem) => `target:${subsystem}`),
+  ]
   if (exhausted.length === 0) return
   budgetExhaustedCommits += 1
   for (const subsystem of exhausted) {
     budgetExhaustedSubsystems.set(subsystem, (budgetExhaustedSubsystems.get(subsystem) ?? 0) + 1)
+  }
+  if (observationConfiguration.budget.adaptive && adaptiveBudgetScale < 4) {
+    adaptiveBudgetScale += 1
   }
 }
 

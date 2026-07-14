@@ -14,6 +14,11 @@ import {
   captureComparisonSchema,
   devtoolsCaptureCompareContract,
   devtoolsCaptureCreateContract,
+  devtoolsCapturePinContract,
+  devtoolsCaptureReadContract,
+  devtoolsInteractionBeginContract,
+  devtoolsInteractionStopContract,
+  devtoolsWaitContract,
 } from './tools'
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -219,6 +224,23 @@ describe('capture protocol', () => {
     ).toMatchObject({ schemaVersion: '1.0', captureId: 'cap_1' })
   })
 
+  it('defaults capture reads to summaries and validates pinning', () => {
+    expect(devtoolsCaptureReadContract.input.parse({ captureId: 'cap_1' })).toEqual({
+      captureId: 'cap_1',
+      view: 'summary',
+    })
+    expect(() =>
+      devtoolsCaptureReadContract.input.parse({
+        captureId: 'cap_1',
+        sections: ['react'],
+      }),
+    ).toThrow(/sections requires view/)
+    expect(devtoolsCapturePinContract.input.parse({ captureId: 'cap_1' })).toEqual({
+      captureId: 'cap_1',
+      pinned: true,
+    })
+  })
+
   it('defaults repeated comparisons and rejects ambiguous cohorts or budgets', () => {
     expect(
       devtoolsCaptureCompareContract.input.parse({
@@ -229,7 +251,11 @@ describe('capture protocol', () => {
       baselineCaptureIds: ['cap_before'],
       candidateCaptureIds: ['cap_after'],
       metrics: [...CAPTURE_METRICS],
-      minimumRuns: 3,
+      minimumRuns: 5,
+      warmupRuns: 1,
+      outlierThreshold: 3.5,
+      confidenceLevel: 0.95,
+      minimumEffectPct: 5,
       budgets: [],
     })
 
@@ -264,7 +290,17 @@ describe('capture protocol', () => {
         kind: 'capture-comparison',
         comparisonId: 'cmp_1',
         createdAt: '2026-07-13T09:00:00.000Z',
-        minimumRuns: 3,
+        minimumRuns: 5,
+        policy: {
+          warmupRuns: 1,
+          outlierThreshold: 3.5,
+          confidenceLevel: 0.95,
+          minimumEffectPct: 5,
+        },
+        excluded: {
+          warmupBaselineCaptureIds: [],
+          warmupCandidateCaptureIds: [],
+        },
         baselineCaptureIds: ['cap_before'],
         candidateCaptureIds: ['cap_after'],
         overall: 'informational',
@@ -273,5 +309,52 @@ describe('capture protocol', () => {
         warnings: [],
       }),
     ).toMatchObject({ kind: 'capture-comparison', comparisonId: 'cmp_1' })
+  })
+})
+
+describe('wait protocol', () => {
+  it('defaults to a bounded React settle scope and validates multi-domain requests', () => {
+    expect(devtoolsWaitContract.input.parse({ condition: 'settled' })).toMatchObject({
+      condition: 'settled',
+      domains: ['react'],
+      quietMs: 500,
+      timeoutMs: 10_000,
+    })
+    expect(() =>
+      devtoolsWaitContract.input.parse({
+        condition: 'settled',
+        domains: ['react', 'react'],
+      }),
+    ).toThrow()
+    expect(() =>
+      devtoolsWaitContract.input.parse({
+        condition: 'component',
+        name: 'Map',
+        domains: ['query'],
+      }),
+    ).toThrow()
+  })
+})
+
+describe('interaction protocol', () => {
+  it('bounds targeted observation and settle inputs', () => {
+    expect(devtoolsInteractionBeginContract.input.parse({ name: 'open details' })).toMatchObject({
+      name: 'open details',
+      components: [],
+      roots: [],
+      lifecycle: { bufferLimit: 1_000, targetReserve: 100 },
+    })
+    expect(devtoolsInteractionStopContract.input.parse({ interactionId: 'int_1' })).toEqual({
+      interactionId: 'int_1',
+      domains: ['react'],
+      quietMs: 500,
+      timeoutMs: 10_000,
+    })
+    expect(() =>
+      devtoolsInteractionStopContract.input.parse({
+        interactionId: 'int_1',
+        domains: ['react', 'react'],
+      }),
+    ).toThrow()
   })
 })

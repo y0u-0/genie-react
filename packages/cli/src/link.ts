@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -51,8 +51,12 @@ export function runLink(opts: LinkOptions = {}): number {
   }
 
   const binPath = missingDist ? null : dropGenieBin(cwd, packagesDir)
+  const skillPath = installAgentSkill(cwd, packagesDir)
   out(`✓ Linked ${linked} package${linked === 1 ? '' : 's'}`)
   if (binPath) out(`  Binary   ${binPath}`)
+  if (skillPath) out(`  Skill    ${skillPath}`)
+  else
+    err('! Bundled Genie skill is missing from the checkout; reinstall or rebuild the CLI package.')
   if (missingDist) {
     err('! Some packages have no dist/. Run `pnpm -r build` in the Genie checkout.')
   }
@@ -68,6 +72,15 @@ export function runLink(opts: LinkOptions = {}): number {
   out('       pnpm genie-react status')
   out('       npx genie-react status')
   return 0
+}
+
+function installAgentSkill(cwd: string, packagesDir: string): string | null {
+  const source = join(packagesDir, 'cli', 'skill', 'SKILL.md')
+  if (!existsSync(source)) return null
+  const destination = join(cwd, '.agents', 'skills', 'genie', 'SKILL.md')
+  mkdirSync(dirname(destination), { recursive: true })
+  writeFileSync(destination, readFileSync(source))
+  return destination
 }
 
 function dropGenieBin(cwd: string, packagesDir: string): string | null {

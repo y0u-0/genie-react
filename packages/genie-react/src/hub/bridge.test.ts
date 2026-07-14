@@ -74,7 +74,7 @@ describe('GenieBridge', () => {
     const statusAfter = await agentInbox.wait(isResult(statusId2))
     expect(statusAfter.result.connected).toBe(true)
     expect(statusAfter.result.app.name).toBe('demo')
-    expect(statusAfter.result.toolCount).toBe(7) // 1 app tool + 6 bridge meta tools
+    expect(statusAfter.result.toolCount).toBe(10) // 1 app tool + 9 bridge meta tools
     const names = statusAfter.result.tools.map((tool: { name: string }) => tool.name)
     expect(names).toEqual([
       'echo',
@@ -83,7 +83,10 @@ describe('GenieBridge', () => {
       'devtools_capture_create',
       'devtools_capture_list',
       'devtools_capture_read',
+      'devtools_capture_pin',
       'devtools_capture_compare',
+      'devtools_interaction_begin',
+      'devtools_interaction_stop',
     ]) // catalog carries bridge meta tools too
   })
 
@@ -92,7 +95,8 @@ describe('GenieBridge', () => {
     const toolResults: Record<string, unknown> = {
       react_get_renders: {
         commits: 7,
-        summary: { totalRenders: 10, totalUpdates: 8 },
+        comparable: true,
+        summary: { totalRenders: 10, totalUpdates: 8, semantics: 'exact' },
         components: [],
       },
       react_render_causes: { commits: 7, events: [] },
@@ -214,6 +218,7 @@ describe('GenieBridge', () => {
         candidateCaptureIds: [createdAfter.result.captureId],
         metrics: ['react.renders'],
         minimumRuns: 1,
+        warmupRuns: 0,
         budgets: [{ metric: 'react.renders', maxRegressionPct: 0 }],
       },
     })
@@ -539,6 +544,125 @@ describe('GenieBridge', () => {
     })
   })
 
+  it('pauses ambiguous logical routing and auto-forks persistent cloned browser state', async () => {
+    const collisionHandle = createStandaloneBridge({ logicalCollisionGraceMs: 500 })
+    const collisionUrl = (await collisionHandle.listen()).url
+    try {
+      const { ws: original } = await open(`${collisionUrl}?role=app`)
+      send(original, {
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId: 'original-physical',
+        logicalSessionId: 'cloned-logical',
+        documentGeneration: 4,
+        sessionName: 'cloned-marker',
+        app: { name: 'original' },
+        capabilities: [],
+        tools: [],
+      })
+      const { ws: clone, inbox: cloneInbox } = await open(`${collisionUrl}?role=app`)
+      send(clone, {
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId: 'clone-physical',
+        logicalSessionId: 'cloned-logical',
+        documentGeneration: 4,
+        sessionName: 'cloned-marker',
+        app: { name: 'clone' },
+        capabilities: [],
+        tools: [],
+      })
+
+      await expect.poll(() => collisionHandle.bridge.getStatus().warnings.length).toBe(1)
+      const ambiguous = collisionHandle.bridge.getStatus()
+      expect(ambiguous.sessionId).toBeNull()
+      expect(ambiguous.sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            logicalSessionCollision: true,
+            collisionWithSessionIds: expect.any(Array),
+          }),
+        ]),
+      )
+
+      const { ws: agent, inbox: agentInbox } = await open(`${collisionUrl}?role=agent`)
+      const ambiguousId = newId()
+      send(agent, {
+        kind: 'agent/invoke',
+        id: ambiguousId,
+        tool: 'devtools_status',
+        args: {},
+        sessionId: 'cloned-logical',
+      })
+      const rejected = await agentInbox.wait(isResult(ambiguousId))
+      expect(rejected).toMatchObject({ ok: false, errorCode: 'unknown-session' })
+      expect(rejected.error).toContain('identity collision')
+
+      const fork = await cloneInbox.wait((frame) => frame.kind === 'bridge/session-fork', 1_000)
+      expect(fork).toMatchObject({
+        expectedLogicalSessionId: 'cloned-logical',
+        documentGeneration: 1,
+        reason: 'logical-session-collision',
+        collisionWithSessionIds: ['original-physical'],
+      })
+      await expect.poll(() => collisionHandle.bridge.getStatus().warnings).toEqual([])
+      const recovered = collisionHandle.bridge.getStatus()
+      expect(recovered.sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: 'clone-physical',
+            logicalSessionId: fork.logicalSessionId,
+            forkedFromLogicalSessionId: 'cloned-logical',
+            logicalSessionCollision: false,
+          }),
+        ]),
+      )
+    } finally {
+      await collisionHandle.close()
+    }
+  })
+
+  it('treats a short concurrent reload overlap as lineage instead of a clone', async () => {
+    const overlapHandle = createStandaloneBridge({ logicalCollisionGraceMs: 200 })
+    const overlapUrl = (await overlapHandle.listen()).url
+    try {
+      const { ws: oldDocument } = await open(`${overlapUrl}?role=app`)
+      send(oldDocument, {
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId: 'overlap-old',
+        logicalSessionId: 'overlap-logical',
+        documentGeneration: 2,
+        app: { name: 'old' },
+        capabilities: [],
+        tools: [],
+      })
+      const { ws: newDocument } = await open(`${overlapUrl}?role=app`)
+      send(newDocument, {
+        kind: 'app/hello',
+        protocol: 1,
+        sessionId: 'overlap-new',
+        logicalSessionId: 'overlap-logical',
+        documentGeneration: 3,
+        app: { name: 'new' },
+        capabilities: [],
+        tools: [],
+      })
+      await expect.poll(() => overlapHandle.bridge.getStatus().warnings.length).toBe(1)
+      oldDocument.close()
+      await expect.poll(() => overlapHandle.bridge.getStatus().warnings).toEqual([])
+      await delay(250)
+
+      expect(overlapHandle.bridge.getStatus().sessions[0]).toMatchObject({
+        sessionId: 'overlap-new',
+        logicalSessionId: 'overlap-logical',
+        predecessorSessionId: 'overlap-old',
+      })
+    } finally {
+      await overlapHandle.close()
+    }
+  })
+
   it('re-hello on a new socket fails in-flight requests and refreshes session recency', async () => {
     const { ws: agent, inbox } = await open(`${url}?role=agent`)
 
@@ -660,6 +784,11 @@ describe('GenieBridge', () => {
       expect(result.errorCode).toBe('busy')
       expect(result.retryInMs).toBe(500)
       expect(result.error).toContain('main thread busy')
+      expect(result.busyTelemetry).toMatchObject({
+        queueDepth: 1,
+        pendingWorkClass: 'unknown',
+        tool: 'never_responds',
+      })
       expect(Date.now() - started).toBeLessThan(3000)
     } finally {
       await fastHandle.close()

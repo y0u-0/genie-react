@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   formatAgentFailure,
+  operationIdOf,
   parseBatchItems,
   projectFields,
   renderResult,
@@ -979,8 +980,17 @@ describe('bridge-local tools', () => {
     expect(requiresReadySession('devtools_capture_list')).toBe(false)
     expect(requiresReadySession('devtools_capture_read')).toBe(false)
     expect(requiresReadySession('devtools_capture_compare')).toBe(false)
+    expect(requiresReadySession('devtools_capture_pin')).toBe(false)
     expect(requiresReadySession('devtools_capture_create')).toBe(true)
     expect(requiresReadySession('react_get_renders')).toBe(true)
+  })
+})
+
+describe('operation recovery IDs', () => {
+  it('extracts durable IDs from successful mutation results', () => {
+    expect(operationIdOf({ captureId: 'cap_123' })).toBe('cap_123')
+    expect(operationIdOf({ interactionId: 'int_123' })).toBe('int_123')
+    expect(operationIdOf({ ok: true })).toBeUndefined()
   })
 })
 

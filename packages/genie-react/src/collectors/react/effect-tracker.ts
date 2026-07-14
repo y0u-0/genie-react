@@ -12,9 +12,13 @@ import type { HooksNode } from 'bippy/source'
 import { type CommitWorkBudget, consumeCommitWork } from './commit-budget'
 import {
   clearEffectEvents,
+  markEffectInstrumentationUnavailable,
+  markEffectWithoutCleanup,
   type PreparedEffectSchedule,
   prepareEffectSchedule,
   publishEffectSchedule,
+  runObservedEffectCleanup,
+  runObservedEffectCreate,
 } from './effect-events'
 import type { InstanceDescriptor } from './instance-identity'
 import {
@@ -41,7 +45,10 @@ const EFFECT_SOURCE_ATTRIBUTION_BUDGET_MS = 500
 const DEFAULT_HOT_MIN_UPDATES = 3
 const DEFAULT_HOT_MIN_FIRE_RATE = 1
 const HOTNESS_CONFIDENCE_LEVEL = 0.95
-const UNCLASSIFIED_FIBER: FiberClassification = { source: null, isLibrary: false }
+const UNCLASSIFIED_FIBER: FiberClassification = {
+  source: null,
+  isLibrary: false,
+}
 
 // Fibers that own a hook effect list; MemoComponentTag wraps an inner fiber that carries the effects as one of these tags, so it's not listed.
 const EFFECT_TAGS = new Set<number>([FunctionComponentTag, ForwardRefTag, SimpleMemoComponentTag])
@@ -128,11 +135,15 @@ export function prepareEffect(
 
   const existing = records.get(id)
   const record: EffectRecord = existing
-    ? { ...existing, stats: existing.stats.map((stat) => (stat ? { ...stat } : stat)) }
+    ? {
+        ...existing,
+        stats: existing.stats.map((stat) => (stat ? { ...stat } : stat)),
+      }
     : { id, name: getDisplayName(fiber.type) ?? 'Anonymous', stats: [], fiber }
   record.fiber = fiber
   let scheduledCount = 0
   const schedules: PreparedEffectSchedule[] = []
+  const passiveInstrumentation: { effect: Effect; effectEventId: string }[] = []
 
   for (let i = 0; i < effects.length; i++) {
     if (!consumeCommitWork(budget, 'effects')) {
@@ -142,6 +153,7 @@ export function prepareEffect(
         record,
         schedules,
         truncations,
+        passiveInstrumentation,
       )
     }
     const effect = effects[i]
@@ -188,6 +200,12 @@ export function prepareEffect(
         budget,
       })
       if (prepared) schedules.push(prepared)
+      if (prepared && kind === 'effect') {
+        passiveInstrumentation.push({
+          effect,
+          effectEventId: prepared.effectEventId,
+        })
+      }
     }
 
     if (phase === 'update') {
@@ -210,6 +228,7 @@ export function prepareEffect(
     record,
     schedules,
     truncations,
+    passiveInstrumentation,
   )
 }
 
@@ -218,6 +237,7 @@ function preparedEffect(
   record: EffectRecord | null,
   schedules: PreparedEffectSchedule[] = [],
   truncations = 0,
+  passiveInstrumentation: { effect: Effect; effectEventId: string }[] = [],
 ): PreparedEffectObservation {
   let published = false
   return {
@@ -228,7 +248,42 @@ function preparedEffect(
       truncatedEffectLists += truncations
       if (record) records.set(record.id, record)
       for (const schedule of schedules) publishEffectSchedule(schedule, instance)
+      for (const instrumentation of passiveInstrumentation) {
+        instrumentPassiveEffect(instrumentation.effect, instrumentation.effectEventId)
+      }
     },
+  }
+}
+
+const ORIGINAL_EFFECT_CREATE = Symbol('genie-react:original-effect-create')
+type InstrumentedCreate = ((...args: unknown[]) => unknown) & {
+  [ORIGINAL_EFFECT_CREATE]?: (...args: unknown[]) => unknown
+}
+
+function instrumentPassiveEffect(effect: Effect, effectEventId: string): void {
+  const mutable = effect as Effect & { create?: InstrumentedCreate }
+  const current = mutable.create
+  if (typeof current !== 'function') {
+    markEffectInstrumentationUnavailable(effectEventId)
+    return
+  }
+  const original = current[ORIGINAL_EFFECT_CREATE] ?? current
+  const wrapped: InstrumentedCreate = function (this: unknown, ...args: unknown[]): unknown {
+    const cleanup = runObservedEffectCreate(effectEventId, () => original.apply(this, args))
+    if (typeof cleanup !== 'function') {
+      markEffectWithoutCleanup(effectEventId)
+      return cleanup
+    }
+    return function (this: unknown, ...cleanupArgs: unknown[]): unknown {
+      return runObservedEffectCleanup(effectEventId, () => cleanup.apply(this, cleanupArgs))
+    }
+  }
+  Object.defineProperty(wrapped, ORIGINAL_EFFECT_CREATE, { value: original })
+  try {
+    mutable.create = wrapped
+    if (mutable.create !== wrapped) markEffectInstrumentationUnavailable(effectEventId)
+  } catch {
+    markEffectInstrumentationUnavailable(effectEventId)
   }
 }
 
@@ -291,6 +346,13 @@ export interface EffectProvenance {
   hookSource: ResolvedSource | null
   packageName: string | null
   hookAncestry: EffectHookAncestryFrame[]
+  definitionSource: null
+  allocationCallsite: null
+  hookDefinitionOwner: ResolvedSource | null
+  hookCallsite: ResolvedSource | null
+  package: string | null
+  sourceMapConfidence: 'mapped' | 'served' | 'unknown'
+  failureReason: 'hook-provenance-unavailable' | null
 }
 
 export interface EffectHookAncestryFrame {
@@ -390,7 +452,8 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
     list = list.filter((record) => record.name.toLowerCase().includes(needle))
   }
 
-  const appOnly = query.appOnly ?? true
+  // Public contracts pass their default explicitly; internal reads default to the complete provenance view so diagnostics never silently drop unknown rows.
+  const appOnly = query.appOnly ?? false
   const minScheduleRate = query.minScheduleRate ?? query.minFireRate ?? DEFAULT_HOT_MIN_FIRE_RATE
   const hotnessCriteria: EffectHotnessCriteria = {
     minUpdates: query.minUpdates ?? DEFAULT_HOT_MIN_UPDATES,
@@ -479,13 +542,13 @@ export async function getEffectAuditReport(query: EffectAuditQuery): Promise<{
     findings = all
       .map((record) => ({
         ...record,
-        effects: record.effects.filter((effect) => effect.provenance.ownership !== 'library'),
+        effects: record.effects.filter((effect) => effect.provenance.ownership === 'app'),
         effectsOmitted: record.effectsOmitted,
       }))
       .filter(
         (record) =>
           record.effects.length > 0 &&
-          (record.componentProvenance.ownership !== 'library' ||
+          (record.componentProvenance.ownership === 'app' ||
             record.effects.some((effect) => effect.provenance.ownership === 'app')),
       )
     libraryEffectsHidden = totalEffects(all) - totalEffects(findings)
@@ -697,6 +760,7 @@ function effectProvenance(
       hookSource: null,
       packageName: null,
       hookAncestry: [],
+      ...splitEffectProvenance(null, [], null),
     }
   }
 
@@ -713,6 +777,11 @@ function effectProvenance(
       hookSource,
       packageName: ownership === 'library' ? packageNameFromFile(hookSource.file) : null,
       hookAncestry,
+      ...splitEffectProvenance(
+        hookSource,
+        hookAncestry,
+        ownership === 'library' ? packageNameFromFile(hookSource.file) : null,
+      ),
     }
   }
 
@@ -724,6 +793,7 @@ function effectProvenance(
       hookSource: null,
       packageName: commonPackageName(sources),
       hookAncestry: [],
+      ...splitEffectProvenance(null, [], commonPackageName(sources)),
     }
   }
   return unknownProvenance('hook-count-mismatch')
@@ -740,6 +810,35 @@ function unknownProvenance(
     hookSource: null,
     packageName: null,
     hookAncestry,
+    ...splitEffectProvenance(null, hookAncestry, null),
+  }
+}
+
+function splitEffectProvenance(
+  hookCallsite: ResolvedSource | null,
+  hookAncestry: EffectHookAncestryFrame[],
+  packageName: string | null,
+): Pick<
+  EffectProvenance,
+  | 'definitionSource'
+  | 'allocationCallsite'
+  | 'hookDefinitionOwner'
+  | 'hookCallsite'
+  | 'package'
+  | 'sourceMapConfidence'
+  | 'failureReason'
+> {
+  const hookDefinitionOwner =
+    [...hookAncestry].reverse().find((frame) => frame.source)?.source ?? null
+  const strongest = hookCallsite ?? hookDefinitionOwner
+  return {
+    definitionSource: null,
+    allocationCallsite: null,
+    hookDefinitionOwner,
+    hookCallsite,
+    package: packageName,
+    sourceMapConfidence: strongest?.sourceMapConfidence ?? (strongest ? 'served' : 'unknown'),
+    failureReason: hookCallsite ? null : 'hook-provenance-unavailable',
   }
 }
 

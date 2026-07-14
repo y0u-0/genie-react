@@ -10,6 +10,7 @@ import {
   getFiberId,
   getLatestFiber,
   getNearestHostFibers,
+  hasMemoCache,
   isCompositeFiber,
   isHostFiber,
   MemoComponentTag,
@@ -19,13 +20,16 @@ import {
 } from 'bippy'
 import type { z } from 'zod'
 import { dehydrate } from '../../protocol'
+import { isDataDescriptor, safeOwnPropertyDescriptor } from '../causal/safe-object'
 import { type hookEntrySchema, type hookKindSchema, MAX_HOOKS, type NodeId } from './contracts'
 import {
   classifyFibersWithinBudget,
   type FiberClassification,
   type ResolvedSource,
+  type SourceProvenance,
   scheduleClassificationWarmup,
   sourceLabel,
+  sourceProvenanceForSource,
 } from './source'
 
 type HookEntry = z.infer<typeof hookEntrySchema>
@@ -43,6 +47,7 @@ export interface TreeNode {
   kind: 'component' | 'host'
   source?: ResolvedSource | null
   isLibrary?: boolean
+  wrapperAncestry?: WrapperFrame[]
 }
 
 export interface TreeResult {
@@ -54,6 +59,33 @@ export interface TreeResult {
   filteredNote?: string
 }
 
+export interface ProvenanceReport {
+  records: {
+    id: NodeId
+    name: string
+    wrapperAncestry: WrapperFrame[]
+    ownership: 'app' | 'library' | 'unknown'
+    source: ResolvedSource | null
+    provenance: SourceProvenance
+  }[]
+  summary: {
+    scanned: number
+    returned: number
+    resolved: number
+    unresolved: number
+    ownership: { app: number; library: number; unknown: number }
+    sourceMaps: {
+      mapped: number
+      served: number
+      unknown: number
+      status: 'healthy' | 'degraded' | 'unknown'
+    }
+  }
+  hiddenByOwnership: number
+  omittedByLimit: number
+  truncated: boolean
+}
+
 export interface InspectResult {
   id: NodeId
   name: string
@@ -61,6 +93,12 @@ export interface InspectResult {
   props: unknown
   state: unknown
   hooks: HookEntry[]
+  wrapperAncestry: WrapperFrame[]
+}
+
+export interface WrapperFrame {
+  kind: 'memo' | 'forward-ref' | 'lazy' | 'compiler-memo-cache' | 'wrapper'
+  name: string
 }
 
 // Id → fiber registry. React double-buffers fibers (current/alternate swap each commit), so the id is mirrored onto both buffers and resolved via getLatestFiber to whichever is mounted; LRU-capped (delete+set refreshes recency) so a long session can't pin unmounted fibers forever.
@@ -242,17 +280,60 @@ function unwrapped(type: unknown): unknown {
   return wrapper.type ?? wrapper.render ?? null
 }
 
-export function nameOf(fiber: Fiber): string {
-  if (isHostFiber(fiber)) return typeof fiber.type === 'string' ? fiber.type : 'host'
+function safeTypeField(type: unknown, key: PropertyKey): unknown {
+  if ((typeof type !== 'object' || type === null) && typeof type !== 'function') return undefined
+  const descriptor = safeOwnPropertyDescriptor(type, key)
+  return isDataDescriptor(descriptor) ? descriptor.value : undefined
+}
+
+function reactWrapperKind(type: unknown): WrapperFrame['kind'] | null {
+  const marker = String(safeTypeField(type, '$$typeof') ?? '')
+  if (marker.includes('react.memo')) return 'memo'
+  if (marker.includes('react.forward_ref')) return 'forward-ref'
+  if (marker.includes('react.lazy')) return 'lazy'
+  if (safeTypeField(type, 'render') !== undefined) return 'forward-ref'
+  if (safeTypeField(type, 'type') !== undefined) return 'memo'
+  return null
+}
+
+/** Recursively exposes React wrappers without invoking lazy initializers or application getters. */
+export function wrapperAncestryOf(fiber: Fiber): WrapperFrame[] {
+  const frames: WrapperFrame[] = []
+  const seen = new Set<unknown>()
+  let current: unknown = fiber.elementType
+  for (let depth = 0; current != null && depth < 8 && !seen.has(current); depth += 1) {
+    seen.add(current)
+    const kind = reactWrapperKind(current)
+    if (!kind) break
+    const next = safeTypeField(current, 'type') ?? safeTypeField(current, 'render')
+    frames.push({
+      kind,
+      name: realNameOf(current) ?? realNameOf(next) ?? realNameOf(fiber.type) ?? 'Anonymous',
+    })
+    if (kind === 'lazy' && next === undefined) break
+    current = next
+  }
+  if (hasMemoCache(fiber)) {
+    frames.push({ kind: 'compiler-memo-cache', name: nameOfWithoutCompilerFrame(fiber) })
+  }
+  return frames
+}
+
+function nameOfWithoutCompilerFrame(fiber: Fiber): string {
   return (
-    realNameOf(fiber.type) ??
     realNameOf(fiber.elementType) ??
+    realNameOf(fiber.type) ??
     realNameOf(unwrapped(fiber.elementType)) ??
     realNameOf(unwrapped(fiber.type)) ??
     getDisplayName(fiber.type) ??
     getDisplayName(fiber.elementType) ??
     'Anonymous'
   )
+}
+
+export function nameOf(fiber: Fiber): string {
+  if (isHostFiber(fiber)) return typeof fiber.type === 'string' ? fiber.type : 'host'
+  return nameOfWithoutCompilerFrame(fiber)
 }
 
 function fiberKind(fiber: Fiber): string {
@@ -309,7 +390,7 @@ export function appOnlyFilteredNote(
 ): string | undefined {
   if (hidden <= 0) return undefined
   const label = subject === 'effects' ? 'app effects' : 'components shown'
-  return `${shown} ${label} (${hidden} library ${subject} hidden — set appOnly:false to include)`
+  return `${shown} ${label} (${hidden} library/unknown ${subject} hidden — set appOnly:false to include)`
 }
 
 export async function buildTree(
@@ -372,6 +453,9 @@ export async function buildTree(
               name: nameOf(child),
               key: child.key,
               kind: composite ? 'component' : 'host',
+              ...(composite && wrapperAncestryOf(child).length > 0
+                ? { wrapperAncestry: wrapperAncestryOf(child) }
+                : {}),
             },
             fiber: child,
           })
@@ -398,6 +482,9 @@ export async function buildTree(
         name: nameOf(root),
         key: root.key,
         kind: composite ? 'component' : 'host',
+        ...(composite && wrapperAncestryOf(root).length > 0
+          ? { wrapperAncestry: wrapperAncestryOf(root) }
+          : {}),
       },
       fiber: root,
     })
@@ -436,6 +523,87 @@ export async function buildTree(
     treeCache = { generation: treeGeneration, root, key: cacheKey, result }
   }
   return result
+}
+
+const PROVENANCE_SCAN_LIMIT = 5_000
+
+export async function buildProvenanceReport(
+  root: Fiber | null,
+  options: { component?: string; limit: number; appOnly: boolean },
+): Promise<ProvenanceReport> {
+  const candidates: Fiber[] = []
+  let scanned = 0
+  let scanTruncated = false
+  const needle = options.component?.toLowerCase()
+  const stack: Fiber[] = root ? [root] : []
+  while (stack.length > 0) {
+    const fiber = stack.pop()
+    if (!fiber) continue
+    if (scanned >= PROVENANCE_SCAN_LIMIT) {
+      scanTruncated = true
+      break
+    }
+    if (fiber.sibling) stack.push(fiber.sibling)
+    if (fiber.child) stack.push(fiber.child)
+    if (!isCompositeFiber(fiber)) continue
+    const name = nameOf(fiber)
+    if (needle && !name.toLowerCase().includes(needle)) continue
+    scanned += 1
+    candidates.push(fiber)
+  }
+
+  const selected = candidates.slice(0, options.limit)
+  const { classes, partial } = await classifyFibersWithinBudget(selected, {
+    limit: options.limit,
+    budgetMs: 1_000,
+  })
+  const classified = selected.map((fiber, index) => {
+    const classification = classes[index] ?? UNCLASSIFIED_FIBER
+    const ownership = classification.source
+      ? classification.isLibrary
+        ? ('library' as const)
+        : ('app' as const)
+      : ('unknown' as const)
+    return {
+      id: registerFiber(fiber),
+      name: nameOf(fiber),
+      wrapperAncestry: wrapperAncestryOf(fiber),
+      ownership,
+      source: classification.source,
+      provenance: sourceProvenanceForSource(classification.source),
+    }
+  })
+  const records = options.appOnly
+    ? classified.filter((record) => record.ownership === 'app')
+    : classified
+  const ownership = { app: 0, library: 0, unknown: 0 }
+  const sourceMaps = { mapped: 0, served: 0, unknown: 0 }
+  for (const record of classified) {
+    ownership[record.ownership] += 1
+    sourceMaps[record.provenance.sourceMapConfidence] += 1
+  }
+  const resolved = ownership.app + ownership.library
+  const unresolved = ownership.unknown
+  const status: ProvenanceReport['summary']['sourceMaps']['status'] =
+    classified.length === 0
+      ? 'unknown'
+      : unresolved > 0 || sourceMaps.served > 0 || partial
+        ? 'degraded'
+        : 'healthy'
+  return {
+    records,
+    summary: {
+      scanned,
+      returned: records.length,
+      resolved,
+      unresolved,
+      ownership,
+      sourceMaps: { ...sourceMaps, status },
+    },
+    hiddenByOwnership: classified.length - records.length,
+    omittedByLimit: Math.max(0, candidates.length - options.limit),
+    truncated: scanTruncated || candidates.length > options.limit || partial,
+  }
 }
 
 // Classifies each node, labels anonymous nodes by source (`cmdk.js:1998`), and folds each library subtree into its top node instead of a wall of "Anonymous"; hidden counts the folded-away library nodes.
@@ -655,7 +823,15 @@ export function inspectFiber(
     })
   }
 
-  return { id: asNodeId(getFiberId(fiber)), name: nameOf(fiber), kind, props, state, hooks }
+  return {
+    id: asNodeId(getFiberId(fiber)),
+    name: nameOf(fiber),
+    kind,
+    props,
+    state,
+    hooks,
+    wrapperAncestry: wrapperAncestryOf(fiber),
+  }
 }
 
 // ── Component ↔ DOM bridge ───────────────────────────────────────────────────

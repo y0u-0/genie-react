@@ -1,9 +1,17 @@
 import { z } from 'zod'
 import { defineAgentToolContract } from '../../protocol'
-import { sourceSchema } from './contract-schemas'
-import { observationSchema, renderCoverageSchema } from './render-contract'
+import { sourceProvenanceSchema, sourceSchema, wrapperFrameSchema } from './contract-schemas'
+import {
+  observationSchema,
+  renderCoverageSchema,
+  renderObservationInputSchema,
+} from './render-contract'
 
-export { reactEffectAuditContract, reactEffectEventsContract } from './effect-contract'
+export {
+  reactEffectAuditContract,
+  reactEffectEventsContract,
+  reactEffectTimelineContract,
+} from './effect-contract'
 export {
   instanceDescriptorSchema,
   observationSchema,
@@ -29,6 +37,7 @@ const treeNodeSchema = z.object({
   kind: z.enum(['component', 'host']),
   source: sourceSchema.optional(),
   isLibrary: z.boolean().optional(),
+  wrapperAncestry: z.array(wrapperFrameSchema).max(9).optional(),
 })
 
 export const reactGetTreeContract = defineAgentToolContract({
@@ -70,6 +79,55 @@ export const reactGetTreeContract = defineAgentToolContract({
       .describe(
         'Present only when appOnly folded library subtrees away; names how many components were hidden and how to include them.',
       ),
+  }),
+  annotations: { readOnlyHint: true },
+})
+
+export const reactProvenanceContract = defineAgentToolContract({
+  name: 'react_provenance',
+  title: 'React provenance health',
+  description:
+    'Scan a bounded set of mounted components and report recursive wrapper ancestry, app/library/unknown ownership, split source roles, source-map confidence, and explicit failure reasons. This diagnostic never promotes an ambiguous fallback to a definition or allocation callsite.',
+  group: 'react.tree',
+  input: z.object({
+    component: z.string().optional(),
+    limit: z.number().int().min(1).max(500).default(200),
+    appOnly: z
+      .boolean()
+      .default(false)
+      .describe('When true, include only components with resolved app ownership.'),
+  }),
+  output: z.object({
+    records: z.array(
+      z.object({
+        id: z.number(),
+        name: z.string(),
+        wrapperAncestry: z.array(wrapperFrameSchema).max(9),
+        ownership: z.enum(['app', 'library', 'unknown']),
+        source: sourceSchema,
+        provenance: sourceProvenanceSchema,
+      }),
+    ),
+    summary: z.object({
+      scanned: z.number().int().nonnegative(),
+      returned: z.number().int().nonnegative(),
+      resolved: z.number().int().nonnegative(),
+      unresolved: z.number().int().nonnegative(),
+      ownership: z.object({
+        app: z.number().int().nonnegative(),
+        library: z.number().int().nonnegative(),
+        unknown: z.number().int().nonnegative(),
+      }),
+      sourceMaps: z.object({
+        mapped: z.number().int().nonnegative(),
+        served: z.number().int().nonnegative(),
+        unknown: z.number().int().nonnegative(),
+        status: z.enum(['healthy', 'degraded', 'unknown']),
+      }),
+    }),
+    hiddenByOwnership: z.number().int().nonnegative().default(0),
+    omittedByLimit: z.number().int().nonnegative(),
+    truncated: z.boolean(),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -160,6 +218,7 @@ export const reactInspectComponentContract = defineAgentToolContract({
     props: z.unknown(),
     state: z.unknown().optional(),
     hooks: z.array(hookEntrySchema),
+    wrapperAncestry: z.array(wrapperFrameSchema).max(9).default([]),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -551,12 +610,13 @@ export const reactProfileStartContract = defineAgentToolContract({
   description:
     'Begin (or resume) a profiling session — enables commit tracking and clears render counters. Then interact with the app and call react_profile_report, or react_profile_stop to pause. For a before/after regression verdict: react_profile_snapshot (label the "before"), make the change, then react_renders_diff — no hand-diffing two JSON dumps.',
   group: 'react.profile',
-  input: z.object({}),
+  input: renderObservationInputSchema,
   output: z.object({
     ok: z.boolean(),
     tracking: z.boolean(),
     documentCommitId: z.number().int().nonnegative(),
     observation: observationSchema,
+    observationConfig: renderCoverageSchema.shape.observationBudget.unwrap(),
   }),
   annotations: { idempotentHint: false },
 })

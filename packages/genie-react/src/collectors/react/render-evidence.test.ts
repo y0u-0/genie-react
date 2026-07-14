@@ -12,8 +12,15 @@ const source = (file: string, line: number): ResolvedSource => ({
 
 const externalCause = (externalStoreIndex: number): RenderCause => ({
   kind: 'external-store',
-  evidence: 'exact',
-  reason: 'sync-external-store-snapshot-changed',
+  evidence: 'inferred',
+  reason: 'external-store-snapshot-changed',
+  storeId: `external-store:${externalStoreIndex}`,
+  storeLabel: 'test-store',
+  selector: null,
+  equality: 'object-is',
+  fanout: null,
+  notificationId: null,
+  competingCandidates: ['external-store-snapshot-identity-changed'],
   hookIndex: externalStoreIndex,
   externalStoreIndex,
   subscriberId: `subscriber:${externalStoreIndex}`,

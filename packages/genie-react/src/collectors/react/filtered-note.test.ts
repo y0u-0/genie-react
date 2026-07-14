@@ -97,6 +97,19 @@ afterEach(() => vi.unstubAllGlobals())
 const NODE_MODULES = '/node_modules/.vite/deps/dep.js'
 
 describe('getRendersReport filteredNote count', () => {
+  it('does not attribute unresolved ownership to the app', async () => {
+    recordRender(renderFiber('UnknownOwner', null), 'mount')
+
+    const appOnly = await getRendersReport({ sort: 'renders', limit: 50, appOnly: true })
+    const unfiltered = await getRendersReport({ sort: 'renders', limit: 50, appOnly: false })
+
+    expect(appOnly.components).toEqual([])
+    expect(appOnly.libraryHidden).toBe(1)
+    expect(unfiltered.components).toMatchObject([
+      { name: 'UnknownOwner', sourceOwnership: 'unknown' },
+    ])
+  })
+
   it('counts library components hidden by appOnly, and 0 when appOnly is off', async () => {
     recordRender(renderFiber('AppThing', at('/src/App.tsx')), 'mount')
     recordRender(renderFiber('LibThing', at(NODE_MODULES)), 'mount')
@@ -211,22 +224,8 @@ describe('getRendersReport filteredNote count', () => {
     const measurement = await pending
 
     expect(measurement.attribution).toMatchObject({ status: 'stale' })
-    expect(measurement.libraryHidden).toBe(0)
-    expect(measurement.components).toMatchObject([
-      {
-        source: null,
-        sourceOwnership: 'unknown',
-        instance: { mountId: expect.stringMatching(/^mount:/) },
-        causes: [
-          {
-            hookProvenance: {
-              status: 'unavailable',
-              reason: 'report-state-advanced',
-            },
-          },
-        ],
-      },
-    ])
+    expect(measurement.libraryHidden).toBe(1)
+    expect(measurement.components).toEqual([])
   })
 
   it('marks an in-flight report stale when counters are cleared without a commit', async () => {
@@ -255,11 +254,8 @@ describe('getRendersReport filteredNote count', () => {
     expect(measurement.attribution.completedAtAnalysisGeneration).toBeGreaterThan(
       measurement.attribution.startedAtAnalysisGeneration,
     )
-    expect(measurement.components[0]).toMatchObject({
-      name: 'ClearedDuringRead',
-      source: null,
-      sourceOwnership: 'unknown',
-    })
+    expect(measurement.libraryHidden).toBe(1)
+    expect(measurement.components).toEqual([])
   })
 
   it('does not store a mixed-state verification snapshot', async () => {
@@ -324,7 +320,7 @@ describe('getRendersReport filteredNote count', () => {
     })
     recordRender(fiber, 'update')
 
-    const report = await getRenderCauseEventsReport({ limit: 2, appOnly: true })
+    const report = await getRenderCauseEventsReport({ limit: 2, appOnly: false })
     expect(report.events[0]).toMatchObject({
       instance: { key: 'after' },
       causes: [
@@ -356,13 +352,27 @@ describe('getRendersReport filteredNote count', () => {
 })
 
 describe('getEffectAuditReport filteredNote count', () => {
+  it('does not attribute unresolved effect provenance to the app', async () => {
+    recordEffect(effectFiber('UnknownEffectOwner', null, 1), 'mount')
+
+    const appOnly = await getEffectAuditReport({ limit: 50, appOnly: true })
+    const unfiltered = await getEffectAuditReport({ limit: 50, appOnly: false })
+
+    expect(appOnly.components).toEqual([])
+    expect(unfiltered.components[0]).toMatchObject({
+      name: 'UnknownEffectOwner',
+      componentProvenance: { ownership: 'unknown' },
+      effects: [{ provenance: { ownership: 'unknown' } }],
+    })
+  })
+
   it('counts library-origin effects hidden by appOnly, and 0 when off', async () => {
     recordEffect(effectFiber('AppEffects', at('/src/App.tsx'), 1), 'mount')
     recordEffect(effectFiber('LibEffects', at(NODE_MODULES), 2), 'mount')
 
     const filtered = await getEffectAuditReport({ limit: 50, appOnly: true })
-    expect(filtered.libraryEffectsHidden).toBe(2)
-    expect(filtered.components.map((c) => c.name)).toEqual(['AppEffects'])
+    expect(filtered.libraryEffectsHidden).toBe(3)
+    expect(filtered.components).toEqual([])
 
     const unfiltered = await getEffectAuditReport({ limit: 50, appOnly: false })
     expect(unfiltered.libraryEffectsHidden).toBe(0)
@@ -374,7 +384,7 @@ describe('getEffectAuditReport filteredNote count', () => {
 
     const report = await getEffectAuditReport({
       limit: 50,
-      appOnly: true,
+      appOnly: false,
       isAttributionCurrent: () => false,
     })
     expect(report.components).toMatchObject([
@@ -424,7 +434,9 @@ describe('buildTree filteredNote', () => {
       maxNodes: 400,
       appOnly: true,
     })
-    expect(result.filteredNote).toMatch(/library components hidden — set appOnly:false to include/)
+    expect(result.filteredNote).toMatch(
+      /library\/unknown components hidden — set appOnly:false to include/,
+    )
     expect(result.nodes.map((n) => n.name)).not.toContain('LibChild')
   })
 

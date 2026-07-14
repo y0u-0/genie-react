@@ -1,11 +1,16 @@
 import type { ContextDependency, Fiber, MemoizedState } from 'bippy'
 import { dehydrate, type ToolOutput } from '../../protocol'
 import {
+  externalStoreId,
   isRegisteredQueryObserver,
+  linkQueryNotificationToRender,
+  linkRouterNotificationToRender,
+  queryNotificationFor,
   queryObserverId,
   type RegisteredRouterStore,
   registeredRouterStore,
   registerQuerySubscriber,
+  routerNotificationFor,
   type SubscriberRegistration,
 } from '../causal/external-store-registry'
 import {
@@ -407,12 +412,33 @@ export function diffExternalStoreChanges(
       }
       if (query?.kind === 'single') {
         stageQuerySubscriber(query.observer, subscriber, pendingSubscribers)
+        const notification = queryNotificationFor(query.observer, current.memoizedState)
+        if (notification && causalIds) {
+          linkQueryNotificationToRender(
+            query.observer,
+            notification.notificationId,
+            causalIds.renderEventId,
+          )
+        }
         causes.push({
           kind: 'query',
-          evidence: 'exact',
-          reason: 'query-observer-result-identity',
+          evidence: notification ? 'exact' : 'inferred',
+          reason: notification ? 'query-notification-delivered' : 'query-observer-result-identity',
           ...common,
           ...query.identity,
+          notificationId: notification?.notificationId ?? null,
+          ...(notification
+            ? {
+                notification: {
+                  trackedFields: notification.trackedFields,
+                  trackedFieldsCoverage: notification.trackedFieldsCoverage,
+                  changedResultFields: notification.changedResultFields,
+                  deliveryReason: notification.deliveryReason,
+                  fanout: notification.fanout,
+                  structuralSharing: notification.structuralSharing,
+                },
+              }
+            : { competingCandidates: ['query-observer-result-identity'] }),
         })
       } else if (query?.kind === 'group') {
         for (const child of query.children) {
@@ -421,20 +447,44 @@ export function diffExternalStoreChanges(
         }
         causes.push({
           kind: 'query',
-          evidence: 'exact',
+          evidence: 'inferred',
           reason: 'queries-observer-result-identity',
           ...common,
           observerId: queryObserverId(query.observer),
           queries: query.children.map((child) => child.identity),
+          notificationId: null,
+          competingCandidates: ['queries-observer-result-identity'],
         })
       } else if (router) {
-        const exact = routerSnapshotMatches(router, current.memoizedState)
+        const identityMatches = routerSnapshotMatches(router, current.memoizedState)
+        const notification = identityMatches
+          ? routerNotificationFor(router.store, current.memoizedState)
+          : null
+        if (notification && causalIds) {
+          linkRouterNotificationToRender(
+            router.store,
+            notification.notificationId,
+            causalIds.renderEventId,
+          )
+        }
         causes.push({
           kind: 'router',
-          evidence: exact ? 'exact' : 'inferred',
-          reason: exact ? 'registered-router-store' : 'registered-router-store-nearby',
+          evidence: notification ? 'exact' : 'inferred',
+          reason: notification
+            ? 'router-notification-delivered'
+            : identityMatches
+              ? 'registered-router-store'
+              : 'registered-router-store-nearby',
           ...common,
           routerId: router.routerId,
+          notificationId: notification?.notificationId ?? null,
+          ...(!notification
+            ? {
+                competingCandidates: identityMatches
+                  ? ['registered-router-store']
+                  : ['registered-router-store-nearby', 'router-state-shape'],
+              }
+            : {}),
         })
       } else if (domain === 'query') {
         causes.push({
@@ -453,9 +503,10 @@ export function diffExternalStoreChanges(
       } else {
         causes.push({
           kind: 'external-store',
-          evidence: 'exact',
-          reason: 'sync-external-store-snapshot-changed',
+          evidence: 'inferred',
+          reason: 'external-store-snapshot-changed',
           ...common,
+          ...genericExternalStoreMetadata(current),
         })
       }
       externalStoreIndex += 1
@@ -475,6 +526,42 @@ function stageQuerySubscriber(
 ): void {
   if (pending) pending.push({ observer, subscriber })
   else registerQuerySubscriber(observer, subscriber)
+}
+
+function genericExternalStoreMetadata(hook: MemoizedState): {
+  storeId: string
+  storeLabel: string
+  selector: null
+  equality: 'object-is'
+  fanout: null
+  notificationId: null
+  competingCandidates: string[]
+} {
+  const queueDescriptor = safeOwnPropertyDescriptor(hook, 'queue')
+  const queue =
+    isDataDescriptor(queueDescriptor) && isRecord(queueDescriptor.value)
+      ? queueDescriptor.value
+      : null
+  const snapshotDescriptor = queue ? safeOwnPropertyDescriptor(queue, 'getSnapshot') : null
+  const snapshot =
+    isDataDescriptor(snapshotDescriptor) && typeof snapshotDescriptor.value === 'function'
+      ? snapshotDescriptor.value
+      : null
+  const identity = snapshot ?? queue ?? hook
+  const nameDescriptor = snapshot ? safeOwnPropertyDescriptor(snapshot, 'name') : null
+  const name =
+    isDataDescriptor(nameDescriptor) && typeof nameDescriptor.value === 'string'
+      ? nameDescriptor.value
+      : ''
+  return {
+    storeId: externalStoreId(identity),
+    storeLabel: name || 'anonymous-external-store',
+    selector: null,
+    equality: 'object-is',
+    fanout: null,
+    notificationId: null,
+    competingCandidates: ['external-store-snapshot-identity-changed'],
+  }
 }
 
 interface QueryObserverMatch {

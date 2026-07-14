@@ -31,6 +31,15 @@ describe('buildFpsReport', () => {
     expect(report.longFrames).toBe(0)
     expect(report.droppedFrames).toBe(0)
     expect(report.hidden).toBe(false)
+    expect(report.comparable).toBe(true)
+    expect(report.notComparableReasons).toEqual([])
+    expect(report.calibration).toMatchObject({
+      method: 'frame-interval-distribution',
+      confidence: 'high',
+      sampleCount: 60,
+      modesHz: [60],
+    })
+    expect(report.frameIntervalDistribution.reduce((sum, bucket) => sum + bucket.count, 0)).toBe(60)
   })
 
   it('counts long frames and dropped frames against the frame budget', () => {
@@ -47,6 +56,27 @@ describe('buildFpsReport', () => {
     const report = buildFpsReport(deltas, 1000, false)
     expect(report.refreshRate).toBe(120)
     expect(report.droppedFrames).toBe(3)
+  })
+
+  it('refuses comparison when the inferred refresh mode changes during the sample', () => {
+    const report = buildFpsReport(
+      [...Array(30).fill(1000 / 120), ...Array(30).fill(1000 / 60)],
+      750,
+      false,
+    )
+
+    expect(report.comparable).toBe(false)
+    expect(report.notComparableReasons).toContain('inferred-refresh-rate-mode-mismatch')
+    expect(report.refreshRateModes).toEqual({ firstHalfHz: 120, secondHalfHz: 60 })
+  })
+
+  it('labels hidden samples and sparse calibration as unreliable evidence', () => {
+    const report = buildFpsReport(Array(5).fill(1000 / 60), 100, true)
+
+    expect(report.comparable).toBe(false)
+    expect(report.notComparableReasons).toContain('document-hidden-during-sample')
+    expect(report.calibration.confidence).toBe('low')
+    expect(report.throttleState).toBe('visibility-throttled')
   })
 })
 

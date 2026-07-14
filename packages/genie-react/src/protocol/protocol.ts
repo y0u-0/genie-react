@@ -79,6 +79,12 @@ export const sessionSummarySchema = z.object({
   sessionName: sessionNameSchema.optional(),
   predecessorSessionId: z.string().optional(),
   successorSessionId: z.string().optional(),
+  /** True only while multiple live documents advertise the same logical browser-tab identity. */
+  logicalSessionCollision: z.boolean().default(false),
+  /** Physical session IDs competing for the same logical identity. */
+  collisionWithSessionIds: z.array(z.string()).default([]),
+  /** Original logical identity when the hub auto-forked a cloned browser state. */
+  forkedFromLogicalSessionId: z.string().optional(),
   app: appInfoSchema,
   domains: z.array(z.string()),
   toolCount: z.number(),
@@ -166,9 +172,20 @@ export const bridgePingSchema = z.object({
   id: z.string(),
 })
 
+/** Tells a cloned browser document to persist a fresh logical identity and re-announce itself. */
+export const bridgeSessionForkSchema = z.object({
+  kind: z.literal('bridge/session-fork'),
+  expectedLogicalSessionId: z.string(),
+  logicalSessionId: z.string(),
+  documentGeneration: z.number().int().positive(),
+  reason: z.literal('logical-session-collision'),
+  collisionWithSessionIds: z.array(z.string()),
+})
+
 export const appBoundMessageSchema = z.discriminatedUnion('kind', [
   bridgeRequestSchema,
   bridgePingSchema,
+  bridgeSessionForkSchema,
 ])
 export type AppBoundMessage = z.infer<typeof appBoundMessageSchema>
 
@@ -219,7 +236,16 @@ export const bridgeResultSchema = z.object({
   error: z.string().optional(),
   errorCode: agentErrorCodeSchema.optional(),
   retryInMs: z.number().optional(),
+  busyTelemetry: z
+    .object({
+      lastHeartbeatAgeMs: z.number().nonnegative(),
+      queueDepth: z.number().int().nonnegative(),
+      pendingWorkClass: z.enum(['app', 'instrumentation', 'unknown']),
+      tool: z.string(),
+    })
+    .optional(),
 })
+export type BusyTelemetry = NonNullable<z.infer<typeof bridgeResultSchema>['busyTelemetry']>
 
 export const bridgeStatusSchema = z.object({
   kind: z.literal('bridge/status'),
@@ -231,6 +257,7 @@ export const bridgeStatusSchema = z.object({
   domains: z.array(z.string()),
   tools: z.array(toolDescriptorSchema),
   sessions: z.array(sessionSummarySchema).default([]),
+  warnings: z.array(z.string()).default([]),
 })
 export type BridgeStatusMessage = z.infer<typeof bridgeStatusSchema>
 

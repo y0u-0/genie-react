@@ -17,6 +17,8 @@ export const reactSummarizers: Record<string, (result: unknown) => string | null
   react_component_cohort: summarizeComponentCohort,
   react_effect_audit: summarizeEffects,
   react_effect_events: summarizeEffectEvents,
+  react_effect_timeline: summarizeEffectEvents,
+  react_provenance: summarizeProvenance,
   react_get_tree: summarizeTree,
   react_dom_for_component: summarizeDom,
   react_component_for_dom: summarizeComponentForDom,
@@ -28,6 +30,39 @@ export const reactSummarizers: Record<string, (result: unknown) => string | null
   react_reset_overrides: summarizeResetOverrides,
   react_renders_diff: summarizeRendersDiff,
   react_profile_snapshot: summarizeProfileSnapshot,
+}
+
+export function summarizeProvenance(result: unknown): string | null {
+  if (!isRecord(result) || !isRecord(result.summary) || !Array.isArray(result.records)) {
+    return null
+  }
+  const summary = result.summary
+  const ownership = isRecord(summary.ownership) ? summary.ownership : {}
+  const sourceMaps = isRecord(summary.sourceMaps) ? summary.sourceMaps : {}
+  const parts = [
+    `${num(summary.returned)} provenance record${num(summary.returned) === 1 ? '' : 's'}`,
+    `${num(summary.resolved)} resolved`,
+    `${num(summary.unresolved)} unresolved`,
+    `owners app=${num(ownership.app)} library=${num(ownership.library)} unknown=${num(ownership.unknown)}`,
+    `source maps ${String(sourceMaps.status ?? 'unknown')} (mapped=${num(sourceMaps.mapped)}, served=${num(sourceMaps.served)}, unknown=${num(sourceMaps.unknown)})`,
+  ]
+  if (num(result.hiddenByOwnership) > 0) parts.push(`${num(result.hiddenByOwnership)} hidden`)
+  if (num(result.omittedByLimit) > 0) parts.push(`${num(result.omittedByLimit)} omitted`)
+  if (result.truncated === true) parts.push('truncated')
+  const lines = [parts.join(' · ')]
+  for (const entry of result.records.filter(isRecord)) {
+    lines.push(
+      `  ${String(entry.name)} #${num(entry.id)} · owner ${String(entry.ownership ?? 'unknown')}${sourceSuffix(
+        {
+          source: entry.source,
+          sourceProvenance: entry.provenance,
+          sourceOwnership: entry.ownership,
+          wrapperAncestry: entry.wrapperAncestry,
+        },
+      )}`,
+    )
+  }
+  return lines.join('\n')
 }
 
 export function summarizeRenders(result: unknown): string | null {
@@ -49,7 +84,7 @@ export function summarizeRenders(result: unknown): string | null {
       ? result.omittedByLimit
       : Math.max(0, num(summary.trackedComponents) - components.length)
   const lines = [
-    `${num(summary.commits)} commits · ${num(summary.trackedComponents)} components · ${num(summary.totalRenders)} renders · ${num(summary.totalUpdates)} updates${referenceOnlyPropComponents > 0 ? ` · ${referenceOnlyPropComponents} reference-only prop candidates` : ''} · ${noObservedInputChangeComponents} no observed input change${omitted > 0 ? ` · ${omitted} omitted` : ''}${attributionSuffix(result.attribution)}${coverageSuffix(result.coverage)}${trackingOff}`,
+    `${num(summary.commits)} commits · ${num(summary.trackedComponents)} components · ${semanticCount(summary.totalRenders, summary.semantics, 'renders')} · ${semanticCount(summary.totalUpdates, summary.semantics, 'updates')}${referenceOnlyPropComponents > 0 ? ` · ${referenceOnlyPropComponents} reference-only prop candidates` : ''} · ${noObservedInputChangeComponents} no observed input change${omitted > 0 ? ` · ${omitted} omitted` : ''}${comparabilitySuffix(result)}${attributionSuffix(result.attribution)}${coverageSuffix(result.coverage)}${trackingOff}`,
   ]
 
   const topReferenceOnlyProps = Array.isArray(summary.topReferenceOnlyProps)
@@ -89,6 +124,21 @@ export function summarizeRenders(result: unknown): string | null {
     lines.push(parts.join(' ') + sourceSuffix(component))
   }
   return lines.join('\n')
+}
+
+function semanticCount(value: unknown, semantics: unknown, label: string): string {
+  const count = num(value)
+  if (semantics === 'lower-bound') return `≥${count} ${label} (lower bound)`
+  if (semantics === 'unknown') return `${label} unknown (${count} observed)`
+  return `${count} ${label}`
+}
+
+function comparabilitySuffix(result: Record<string, unknown>): string {
+  if (result.comparable !== false) return ''
+  const reasons = Array.isArray(result.notComparableReasons)
+    ? result.notComparableReasons.filter((reason): reason is string => typeof reason === 'string')
+    : []
+  return ` · not comparable${reasons.length > 0 ? ` (${reasons.slice(0, 4).join(',')})` : ''}`
 }
 
 function renderCausalEvidence(causes: unknown): string | null {

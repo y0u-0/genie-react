@@ -83,6 +83,26 @@ export function runtimeSessionIdentity(): SessionIdentity {
   return runtime[RUNTIME_IDENTITY_KEY]
 }
 
+/** Applies a hub-requested collision fork to the live identity and best-effort tab storage. */
+export function forkSessionIdentity(
+  identity: SessionIdentity,
+  logicalSessionId: string,
+  documentGeneration = 1,
+  storage: SessionStorageLike | undefined = readSessionStorage(),
+): SessionIdentity {
+  identity.logicalSessionId = logicalSessionId
+  identity.documentGeneration = documentGeneration
+  if (storage) {
+    try {
+      storage.setItem(LOGICAL_SESSION_KEY, logicalSessionId)
+      storage.setItem(DOCUMENT_GENERATION_KEY, String(documentGeneration))
+    } catch {
+      // The fork still protects this live hub session when persistence is unavailable.
+    }
+  }
+  return identity
+}
+
 export function runtimeSessionName(candidate?: string): string | undefined {
   return createSessionName(candidate, readSessionStorage())
 }

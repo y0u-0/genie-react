@@ -1,4 +1,9 @@
 import type { Fiber, RenderPhase } from 'bippy'
+import {
+  type EffectConsequenceSignal,
+  runInEffectContext,
+  setEffectConsequenceListener,
+} from '../causal/effect-consequence'
 import { type CommitWorkBudget, consumeCommitWork } from './commit-budget'
 import { nameOf } from './fiber'
 import { type InstanceDescriptor, instanceForMountedFiber } from './instance-identity'
@@ -28,9 +33,68 @@ export interface EffectScheduleEvent {
   changedDependencySlots: number[]
   changedDependencySlotsOmitted: number
   dependencySlotsUnscanned: number
-  execution: { status: 'unobserved' }
-  cleanupExecution: { status: 'unobserved' }
-  consequences: { status: 'not-instrumented'; events: [] }
+  execution:
+    | {
+        status: 'observed'
+        evidence: 'exact'
+        startedAt: number
+        completedAt: number
+        durationMs: number
+        outcome: 'completed' | 'threw'
+        error?: string
+      }
+    | {
+        status: 'unobserved'
+        reason: 'not-yet-observed' | 'unsupported-effect-kind' | 'instrumentation-unavailable'
+      }
+  cleanupExecution:
+    | {
+        status: 'observed'
+        evidence: 'exact'
+        startedAt: number
+        completedAt: number
+        durationMs: number
+        outcome: 'completed' | 'threw'
+        error?: string
+      }
+    | {
+        status: 'unobserved'
+        reason: 'not-yet-observed' | 'no-cleanup-returned' | 'instrumentation-unavailable'
+      }
+  consequences: {
+    status: 'instrumented'
+    observedDomains: ['query-notification', 'router-notification', 'react-commit']
+    unobservedDomains: [
+      'state-update',
+      'external-store-write',
+      'network',
+      'event-listener',
+      'navigation',
+    ]
+    events: Array<
+      | {
+          kind: 'notification'
+          domain: 'query-notification' | 'router-notification'
+          notificationId: string
+          timestamp: number
+          evidence: 'exact'
+        }
+      | {
+          kind: 'resulting-commit'
+          documentCommitId: number
+          timestamp: number
+          evidence: 'inferred'
+          reason: 'next-commit-after-effect-execution'
+        }
+    >
+  }
+  timeline: Array<{
+    stage: 'schedule' | 'execution' | 'cleanup' | 'consequence' | 'resulting-commit'
+    timestamp: number
+    evidence: 'exact' | 'inferred'
+    referenceId?: string
+    outcome?: 'completed' | 'threw'
+  }>
 }
 
 const EFFECT_EVENT_LIMIT = 1_000
@@ -38,10 +102,12 @@ const DEPENDENCY_SCAN_LIMIT = 200
 const CHANGED_DEPENDENCY_LIMIT = 50
 const events: EffectScheduleEvent[] = []
 let droppedEvents = 0
+const pendingResultingCommit = new Set<string>()
 
 export function clearEffectEvents(): void {
   events.length = 0
   droppedEvents = 0
+  pendingResultingCommit.clear()
 }
 
 export function recordEffectSchedule(input: {
@@ -126,15 +192,206 @@ export function publishEffectSchedule(
     changedDependencySlots: prepared.dependencyChanges.slots,
     changedDependencySlotsOmitted: prepared.dependencyChanges.omitted,
     dependencySlotsUnscanned: prepared.dependencyChanges.unscanned,
-    execution: { status: 'unobserved' },
-    cleanupExecution: { status: 'unobserved' },
-    consequences: { status: 'not-instrumented', events: [] },
+    execution: {
+      status: 'unobserved',
+      reason: prepared.kind === 'effect' ? 'not-yet-observed' : 'unsupported-effect-kind',
+    },
+    cleanupExecution: { status: 'unobserved', reason: 'not-yet-observed' },
+    consequences: {
+      status: 'instrumented',
+      observedDomains: ['query-notification', 'router-notification', 'react-commit'],
+      unobservedDomains: [
+        'state-update',
+        'external-store-write',
+        'network',
+        'event-listener',
+        'navigation',
+      ],
+      events: [],
+    },
+    timeline: [
+      {
+        stage: 'schedule',
+        timestamp: Date.now(),
+        evidence: 'exact',
+        referenceId: prepared.effectEventId,
+      },
+    ],
   }
   events.push(event)
   if (events.length > EFFECT_EVENT_LIMIT) {
     events.shift()
     droppedEvents += 1
   }
+}
+
+export function runObservedEffectCreate<T>(effectEventId: string, create: () => T): T {
+  const event = eventFor(effectEventId)
+  if (!event) return create()
+  const startedAt = now()
+  const timelineEntry = beginTimelineStage(event, 'execution')
+  try {
+    const result = runInEffectContext(effectEventId, create)
+    completeExecution(event, timelineEntry, startedAt, 'completed')
+    pendingResultingCommit.add(effectEventId)
+    return result
+  } catch (error) {
+    completeExecution(event, timelineEntry, startedAt, 'threw', error)
+    pendingResultingCommit.add(effectEventId)
+    throw error
+  }
+}
+
+export function runObservedEffectCleanup<T>(effectEventId: string, cleanup: () => T): T {
+  const event = eventFor(effectEventId)
+  if (!event) return cleanup()
+  const startedAt = now()
+  const timelineEntry = beginTimelineStage(event, 'cleanup')
+  try {
+    const result = runInEffectContext(effectEventId, cleanup)
+    completeCleanup(event, timelineEntry, startedAt, 'completed')
+    pendingResultingCommit.add(effectEventId)
+    return result
+  } catch (error) {
+    completeCleanup(event, timelineEntry, startedAt, 'threw', error)
+    pendingResultingCommit.add(effectEventId)
+    throw error
+  }
+}
+
+export function markEffectWithoutCleanup(effectEventId: string): void {
+  const event = eventFor(effectEventId)
+  if (event && event.cleanupExecution.status === 'unobserved') {
+    event.cleanupExecution = {
+      status: 'unobserved',
+      reason: 'no-cleanup-returned',
+    }
+  }
+}
+
+export function markEffectInstrumentationUnavailable(effectEventId: string): void {
+  const event = eventFor(effectEventId)
+  if (!event || event.execution.status === 'observed') return
+  event.execution = {
+    status: 'unobserved',
+    reason: 'instrumentation-unavailable',
+  }
+  event.cleanupExecution = {
+    status: 'unobserved',
+    reason: 'instrumentation-unavailable',
+  }
+}
+
+export function recordResultingEffectCommit(documentCommitId: number): void {
+  if (pendingResultingCommit.size === 0) return
+  const timestamp = Date.now()
+  for (const effectEventId of pendingResultingCommit) {
+    const event = eventFor(effectEventId)
+    if (!event) continue
+    event.consequences.events.push({
+      kind: 'resulting-commit',
+      documentCommitId,
+      timestamp,
+      evidence: 'inferred',
+      reason: 'next-commit-after-effect-execution',
+    })
+    event.timeline.push({
+      stage: 'resulting-commit',
+      timestamp,
+      evidence: 'inferred',
+    })
+  }
+  pendingResultingCommit.clear()
+}
+
+function completeExecution(
+  event: EffectScheduleEvent,
+  timelineEntry: EffectScheduleEvent['timeline'][number],
+  startedAt: number,
+  outcome: 'completed' | 'threw',
+  error?: unknown,
+): void {
+  const completedAt = now()
+  event.execution = {
+    status: 'observed',
+    evidence: 'exact',
+    startedAt,
+    completedAt,
+    durationMs: round3(completedAt - startedAt),
+    outcome,
+    ...(error === undefined ? {} : { error: errorMessage(error) }),
+  }
+  timelineEntry.outcome = outcome
+}
+
+function completeCleanup(
+  event: EffectScheduleEvent,
+  timelineEntry: EffectScheduleEvent['timeline'][number],
+  startedAt: number,
+  outcome: 'completed' | 'threw',
+  error?: unknown,
+): void {
+  const completedAt = now()
+  event.cleanupExecution = {
+    status: 'observed',
+    evidence: 'exact',
+    startedAt,
+    completedAt,
+    durationMs: round3(completedAt - startedAt),
+    outcome,
+    ...(error === undefined ? {} : { error: errorMessage(error) }),
+  }
+  timelineEntry.outcome = outcome
+}
+
+function beginTimelineStage(
+  event: EffectScheduleEvent,
+  stage: 'execution' | 'cleanup',
+): EffectScheduleEvent['timeline'][number] {
+  const entry: EffectScheduleEvent['timeline'][number] = {
+    stage,
+    timestamp: Date.now(),
+    evidence: 'exact',
+  }
+  event.timeline.push(entry)
+  return entry
+}
+
+function recordConsequence(signal: EffectConsequenceSignal): void {
+  const event = eventFor(signal.effectEventId)
+  if (!event) return
+  event.consequences.events.push({
+    kind: 'notification',
+    domain: signal.domain,
+    notificationId: signal.notificationId,
+    timestamp: signal.timestamp,
+    evidence: 'exact',
+  })
+  event.timeline.push({
+    stage: 'consequence',
+    timestamp: signal.timestamp,
+    evidence: 'exact',
+    referenceId: signal.notificationId,
+  })
+}
+
+setEffectConsequenceListener(recordConsequence)
+
+function eventFor(effectEventId: string): EffectScheduleEvent | undefined {
+  return events.find((event) => event.effectEventId === effectEventId)
+}
+
+function now(): number {
+  return globalThis.performance?.now?.() ?? Date.now()
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1_000) / 1_000
+}
+
+function errorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.slice(0, 500)
 }
 
 export function getEffectScheduleEvents(query: {

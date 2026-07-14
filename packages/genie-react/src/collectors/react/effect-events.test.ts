@@ -1,10 +1,17 @@
 import type { Fiber } from 'bippy'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  recordQueryNotification,
+  resetExternalStoreRegistryForTests,
+} from '../causal/external-store-registry'
+import {
   changedDependencySlots,
   clearEffectEvents,
   getEffectScheduleEvents,
   recordEffectSchedule,
+  recordResultingEffectCommit,
+  runObservedEffectCleanup,
+  runObservedEffectCreate,
 } from './effect-events'
 import { clearInstanceIdentityForTests } from './instance-identity'
 import { beginObservation, resetObservationStateForTests } from './observation'
@@ -25,12 +32,13 @@ const fiber = (): Fiber => {
 
 beforeEach(() => {
   clearEffectEvents()
+  resetExternalStoreRegistryForTests()
   clearInstanceIdentityForTests()
   resetObservationStateForTests()
 })
 
 describe('effect schedule events', () => {
-  it('shares the observation/commit/mount identity without claiming execution or consequences', () => {
+  it('shares the observation/commit/mount identity without claiming stages before observation', () => {
     beginObservation()
     const component = fiber()
     recordEffectSchedule({
@@ -53,13 +61,84 @@ describe('effect schedule events', () => {
       changedDependencySlots: [0],
       execution: { status: 'unobserved' },
       cleanupExecution: { status: 'unobserved' },
-      consequences: { status: 'not-instrumented', events: [] },
+      consequences: { status: 'instrumented', events: [] },
     })
     expect(event?.effectId).toMatch(/^effect:mount:/)
   })
 
+  it('joins passive execution, cleanup, notifications, and the next commit by causal ID', () => {
+    const observer = {}
+    recordEffectSchedule({
+      fiber: fiber(),
+      profileCommitId: 3,
+      phase: 'update',
+      effectIndex: 0,
+      kind: 'effect',
+      dependencies: [1],
+      previousDependencies: [0],
+    })
+    const effectEventId = getEffectScheduleEvents({ limit: 10 }).events[0]?.effectEventId
+    if (!effectEventId) throw new Error('expected a retained effect event')
+
+    runObservedEffectCreate(effectEventId, () => {
+      recordQueryNotification(
+        observer,
+        { data: null },
+        { data: 'ready' },
+        {
+          trackedFields: ['data'],
+          trackedFieldsCoverage: 'exact',
+          fanout: 1,
+        },
+      )
+    })
+    runObservedEffectCleanup(effectEventId, () => undefined)
+    recordResultingEffectCommit(4)
+
+    const event = getEffectScheduleEvents({ limit: 10 }).events[0]
+    expect(event).toMatchObject({
+      execution: {
+        status: 'observed',
+        evidence: 'exact',
+        outcome: 'completed',
+      },
+      cleanupExecution: {
+        status: 'observed',
+        evidence: 'exact',
+        outcome: 'completed',
+      },
+      consequences: {
+        status: 'instrumented',
+        events: [
+          {
+            kind: 'notification',
+            domain: 'query-notification',
+            notificationId: 'query-notification:1',
+            evidence: 'exact',
+          },
+          {
+            kind: 'resulting-commit',
+            documentCommitId: 4,
+            evidence: 'inferred',
+          },
+        ],
+      },
+    })
+    expect(event?.timeline.map(({ stage }) => stage)).toEqual([
+      'schedule',
+      'execution',
+      'consequence',
+      'cleanup',
+      'resulting-commit',
+    ])
+  })
+
   it('does not invent changed slots for mount or non-list dependencies', () => {
-    expect(changedDependencySlots(null, null)).toEqual({ slots: [], omitted: 0, unscanned: 0 })
+    expect(changedDependencySlots(null, null)).toEqual({
+      slots: [],
+      omitted: 0,
+      unscanned: 0,
+    })
     expect(changedDependencySlots([1, 3], [1, 2])).toEqual({
       slots: [1],
       omitted: 0,

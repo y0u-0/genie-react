@@ -14,6 +14,7 @@ import {
 } from '../protocol'
 import type { CollectorContext, ErasedCollectorTool, GenieCollector } from './collector'
 import {
+  forkSessionIdentity,
   runtimeSessionIdentity,
   runtimeSessionName,
   type SessionIdentity,
@@ -227,6 +228,19 @@ export class GenieClient {
     }
     if (message.kind === 'bridge/request') {
       void this.handleRequest(message.id, message.tool, message.args)
+      return
+    }
+    if (
+      message.kind === 'bridge/session-fork' &&
+      message.expectedLogicalSessionId === this.sessionIdentity.logicalSessionId
+    ) {
+      forkSessionIdentity(
+        this.sessionIdentity,
+        message.logicalSessionId,
+        message.documentGeneration,
+      )
+      this.sendHello()
+      this.send({ kind: 'app/ready', sessionId: this.sessionId })
     }
   }
 

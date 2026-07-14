@@ -4,6 +4,7 @@ import {
   type AgentErrorCode,
   type AgentToolContract,
   type BridgeStatusMessage,
+  type BusyTelemetry,
   decodeAgentBoundMessage,
   encodeMessage,
   errorMessage,
@@ -31,12 +32,21 @@ export const INVOKE_GRACE_MS = 2_000
 export class BridgeCallError extends Error {
   readonly errorCode?: AgentErrorCode
   readonly retryInMs?: number
+  readonly busyTelemetry?: BusyTelemetry
 
-  constructor(message: string, options?: { errorCode?: AgentErrorCode; retryInMs?: number }) {
+  constructor(
+    message: string,
+    options?: {
+      errorCode?: AgentErrorCode
+      retryInMs?: number
+      busyTelemetry?: BusyTelemetry
+    },
+  ) {
     super(message)
     this.name = 'BridgeCallError'
     this.errorCode = options?.errorCode
     this.retryInMs = options?.retryInMs
+    this.busyTelemetry = options?.busyTelemetry
   }
 }
 
@@ -214,6 +224,7 @@ export class GenieAgentLink {
           new BridgeCallError(message.error ?? 'tool failed', {
             errorCode: message.errorCode,
             retryInMs: message.retryInMs,
+            busyTelemetry: message.busyTelemetry,
           }),
         )
     } else if (message.kind === 'bridge/status') {

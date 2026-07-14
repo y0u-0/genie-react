@@ -5,7 +5,14 @@ import { dirname, join } from 'node:path'
 import { startGenieHub } from 'genie-react/hub'
 import { GENIE_DISCOVERY_FILE } from 'genie-react/protocol'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { detectFramework, type Logger, runDoctor, runInit, runLiveDoctor } from './index'
+import {
+  detectFramework,
+  type Logger,
+  runDoctor,
+  runInit,
+  runLiveDoctor,
+  sourceMapHealthOf,
+} from './index'
 
 const VITE_CONFIG = `import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -379,6 +386,33 @@ describe('runDoctor — Next.js', () => {
 })
 
 describe('runInit — idempotency and dry-run', () => {
+  it('installs stale agent guidance from the bundled version and doctor verifies its hash', async () => {
+    const dir = await project({
+      'package.json': pkg({ '@tanstack/react-router': 'latest' }),
+      'index.html': '<div id="app"></div>',
+      'vite.config.ts': VITE_CONFIG,
+      'src/routes/__root.tsx': ROUTER_ROOT,
+    })
+    const activeSkill = join(dir, '.agents/skills/genie/SKILL.md')
+    const bundledSkill = await readFile(join(process.cwd(), 'packages/cli/skill/SKILL.md'), 'utf8')
+
+    runInit({ cwd: dir, logger: silent })
+    expect(await readFile(activeSkill, 'utf8')).toBe(bundledSkill)
+    expect(runDoctor({ cwd: dir, logger: silent })).toMatchObject({
+      versions: { bundledSkill: '0.9.0', activeSkill: '0.9.0' },
+      skill: { current: true },
+    })
+
+    await writeFile(activeSkill, '---\nmetadata:\n  version: "0.8.0"\n---\nstale\n')
+    const stale = runDoctor({ cwd: dir, logger: silent })
+    expect(stale.skill.current).toBe(false)
+    expect(stale.remediation.join('\n')).toContain('npx @genie-react/cli init')
+
+    runInit({ cwd: dir, logger: silent })
+    expect(await readFile(activeSkill, 'utf8')).toBe(bundledSkill)
+    expect(runDoctor({ cwd: dir, logger: silent }).skill.current).toBe(true)
+  })
+
   it('reports already on a second run for TanStack Router and writes nothing the second time', async () => {
     const dir = await project({
       'package.json': pkg({ '@tanstack/react-router': 'latest' }),
@@ -441,6 +475,21 @@ describe('runDoctor — package checks', () => {
     expect(result.framework).toBe('tanstack-start')
     const labels = result.checks.map((c) => c.label)
     expect(labels).toContain('genie-react resolvable in node_modules')
+  })
+})
+
+describe('source-map health', () => {
+  it('treats served-only coordinates as partial rather than mapped and healthy', () => {
+    expect(
+      sourceMapHealthOf({
+        summary: { sourceMaps: { mapped: 0, served: 12, unknown: 0 } },
+      }),
+    ).toEqual({ status: 'partial', mapped: 0, served: 12, unknown: 0 })
+    expect(
+      sourceMapHealthOf({
+        summary: { sourceMaps: { mapped: 12, served: 0, unknown: 0 } },
+      }),
+    ).toEqual({ status: 'healthy', mapped: 12, served: 0, unknown: 0 })
   })
 })
 

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { defineAgentToolContract } from '../../protocol'
-import { sourceSchema } from './contract-schemas'
+import { sourceProvenanceSchema, sourceSchema, wrapperFrameSchema } from './contract-schemas'
 
 export const observationSchema = z.object({
   id: z.string().describe('Measurement-window ID, unique within this browser document.'),
@@ -266,8 +266,15 @@ export const renderCauseSchema = z.discriminatedUnion('kind', [
   }),
   renderExternalStoreCauseBase.extend({
     kind: z.literal('external-store'),
-    evidence: z.literal('exact'),
-    reason: z.literal('sync-external-store-snapshot-changed'),
+    evidence: z.literal('inferred'),
+    reason: z.literal('external-store-snapshot-changed'),
+    storeId: z.string(),
+    storeLabel: z.string(),
+    selector: z.string().nullable(),
+    equality: z.literal('object-is'),
+    fanout: z.number().int().nonnegative().nullable(),
+    notificationId: z.null(),
+    competingCandidates: z.array(z.string()),
   }),
   renderExternalStoreCauseBase.extend({
     kind: z.literal('query'),
@@ -275,8 +282,29 @@ export const renderCauseSchema = z.discriminatedUnion('kind', [
     reason: z.enum([
       'query-observer-result-identity',
       'queries-observer-result-identity',
+      'query-notification-delivered',
       'query-result-shape',
     ]),
+    notificationId: z.string().nullable().optional(),
+    notification: z
+      .object({
+        trackedFields: z.array(z.string()),
+        trackedFieldsCoverage: z.enum(['exact', 'unavailable']),
+        changedResultFields: z.array(z.string()),
+        deliveryReason: z
+          .string()
+          .describe(
+            'observer-notified or tracked-field-changed:<field> for an exact tracked field.',
+          ),
+        fanout: z.number().int().nonnegative(),
+        structuralSharing: z.object({
+          reusedFields: z.array(z.string()),
+          changedFields: z.array(z.string()),
+          truncated: z.boolean(),
+        }),
+      })
+      .optional(),
+    competingCandidates: z.array(z.string()).optional(),
     observerId: z.string().optional(),
     queryHash: z.string().optional(),
     queryKey: z.unknown().optional(),
@@ -290,10 +318,13 @@ export const renderCauseSchema = z.discriminatedUnion('kind', [
     evidence: z.enum(['exact', 'inferred']),
     reason: z.enum([
       'registered-router-store',
+      'router-notification-delivered',
       'registered-router-store-nearby',
       'router-state-shape',
     ]),
     routerId: z.string().optional(),
+    notificationId: z.string().nullable().optional(),
+    competingCandidates: z.array(z.string()).optional(),
   }),
   z.object({
     kind: z.literal('parent'),
@@ -371,11 +402,17 @@ const renderComponentSchema = z.object({
   inputCoverage: renderInputCoverageSchema,
   source: sourceSchema,
   sourceAttribution: sourceAttributionSchema,
+  sourceProvenance: sourceProvenanceSchema,
   sourceOwnership: z.enum(['app', 'library', 'unknown']),
   isLibrary: z.boolean(),
+  wrapperAncestry: z.array(wrapperFrameSchema).max(9).default([]),
 })
 
 const renderSummarySchema = z.object({
+  semantics: z
+    .enum(['exact', 'lower-bound', 'unknown'])
+    .describe('Whether aggregate counts are complete, a lower bound, or unusable as a zero.'),
+  coverageDomain: z.literal('render-measurement'),
   commits: z.number(),
   trackedComponents: z.number(),
   totalRenders: z.number(),
@@ -403,6 +440,8 @@ export const renderCoverageSchema = z.object({
   inputAttributionComplete: z
     .boolean()
     .describe('Whether causal input attribution is complete for every captured render.'),
+  semantics: z.enum(['exact', 'lower-bound']),
+  coverageDomain: z.enum(['render-measurement', 'render-causality']),
   skippedCommitFibers: z.number().int().nonnegative(),
   droppedUnmountFibers: z.number().int().nonnegative(),
   analysisFailedFibers: z.number().int().nonnegative(),
@@ -418,6 +457,68 @@ export const renderCoverageSchema = z.object({
   budgetExhaustedSubsystems: z.array(
     z.object({ subsystem: z.string(), commits: z.number().int().positive() }),
   ),
+  targeted: z
+    .object({
+      components: z.array(z.string()),
+      roots: z.array(z.number().int()),
+      processedFibers: z.number().int().nonnegative(),
+      skippedFibers: z.number().int().nonnegative(),
+      complete: z.boolean(),
+    })
+    .optional(),
+  observationBudget: z
+    .object({
+      adaptive: z.boolean(),
+      adaptiveScale: z.number().int().positive(),
+      fiberLimit: z.number().int().positive(),
+      operationLimit: z.number().int().positive(),
+      timeLimitMs: z.number().positive(),
+      targetOperationReserve: z.number().int().positive(),
+      targetTimeReserveMs: z.number().positive(),
+      lifecycleBufferLimit: z.number().int().positive(),
+      lifecycleTargetReserve: z.number().int().nonnegative(),
+    })
+    .optional(),
+})
+
+export const renderObservationInputSchema = z.object({
+  components: z
+    .array(z.string().trim().min(1).max(160))
+    .max(50)
+    .default([])
+    .describe('Reserve analysis work for component display names containing any value.'),
+  roots: z
+    .array(z.number().int())
+    .max(20)
+    .default([])
+    .describe('Reserve analysis work for these component node IDs and their descendants.'),
+  budget: z
+    .object({
+      fiberLimit: z.number().int().min(50).max(5_000).default(250),
+      operationLimit: z.number().int().min(1_000).max(200_000).default(20_000),
+      timeLimitMs: z.number().min(1).max(50).default(8),
+      targetOperationReserve: z.number().int().min(100).max(50_000).default(4_000),
+      targetTimeReserveMs: z.number().min(0.5).max(25).default(4),
+      adaptive: z.boolean().default(true),
+    })
+    .default({
+      fiberLimit: 250,
+      operationLimit: 20_000,
+      timeLimitMs: 8,
+      targetOperationReserve: 4_000,
+      targetTimeReserveMs: 4,
+      adaptive: true,
+    }),
+  lifecycle: z
+    .object({
+      bufferLimit: z.number().int().min(100).max(20_000).default(1_000),
+      targetReserve: z.number().int().min(0).max(5_000).default(100),
+    })
+    .default({ bufferLimit: 1_000, targetReserve: 100 })
+    .refine((value) => value.targetReserve <= value.bufferLimit, {
+      message: 'targetReserve cannot exceed bufferLimit',
+      path: ['targetReserve'],
+    }),
 })
 
 export const reactGetRendersContract = defineAgentToolContract({
@@ -436,7 +537,7 @@ export const reactGetRendersContract = defineAgentToolContract({
       .boolean()
       .default(true)
       .describe(
-        'Hide records with only library source evidence. An exact app hook callsite keeps a framework-wrapped record visible.',
+        'Show only records with app source evidence. Unknown ownership is excluded instead of being attributed to the app; an exact app hook callsite keeps a framework-wrapped record visible.',
       ),
   }),
   output: z.object({
@@ -448,6 +549,8 @@ export const reactGetRendersContract = defineAgentToolContract({
     summary: renderSummarySchema,
     components: z.array(renderComponentSchema),
     omittedByLimit: z.number().int().nonnegative(),
+    comparable: z.boolean(),
+    notComparableReasons: z.array(z.string()),
     coverage: renderCoverageSchema,
     filteredNote: z.string().optional(),
   }),
@@ -588,12 +691,13 @@ export const reactClearRendersContract = defineAgentToolContract({
   description:
     'Clear profile aggregates and start a new observation window. The returned observation ID joins later render and effect evidence; it does not imply that a browser interaction happened.',
   group: 'react.render',
-  input: z.object({}),
+  input: renderObservationInputSchema,
   output: z.object({
     ok: z.boolean(),
     tracking: z.boolean(),
     documentCommitId: z.number().int().nonnegative(),
     observation: observationSchema,
+    observationConfig: renderCoverageSchema.shape.observationBudget.unwrap(),
   }),
   annotations: { idempotentHint: false },
 })

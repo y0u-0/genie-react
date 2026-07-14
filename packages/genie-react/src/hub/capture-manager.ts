@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   type AgentErrorCode,
   type AppInfo,
@@ -8,6 +9,7 @@ import {
   devtoolsCaptureCompareContract,
   devtoolsCaptureCreateContract,
   devtoolsCaptureListContract,
+  devtoolsCapturePinContract,
   devtoolsCaptureReadContract,
   formatToolValidationError,
   newId,
@@ -62,14 +64,14 @@ interface CaptureManagerOptions<TSession extends CaptureSession> {
 
 const REACT_COMMIT_PROBE: CaptureRecipeTool = {
   name: 'react_get_renders',
-  args: { sort: 'renders', limit: 200, appOnly: true },
+  args: { sort: 'renders', limit: 50, appOnly: true },
 }
 
 const CAPTURE_RECIPES: Record<CaptureDomain, CaptureRecipeTool[]> = {
   react: [
     REACT_COMMIT_PROBE,
-    { name: 'react_render_causes', args: { limit: 200, appOnly: true } },
-    { name: 'react_profile_report', args: { limit: 100 } },
+    { name: 'react_render_causes', args: { limit: 50, appOnly: true } },
+    { name: 'react_profile_report', args: { limit: 50 } },
   ],
   effects: [
     {
@@ -79,12 +81,12 @@ const CAPTURE_RECIPES: Record<CaptureDomain, CaptureRecipeTool[]> = {
         appOnly: true,
         minUpdates: 3,
         minFireRate: 1,
-        limit: 200,
+        limit: 50,
       },
     },
   ],
   query: [
-    { name: 'query_list', args: { staleOnly: false, limit: 500 } },
+    { name: 'query_list', args: { staleOnly: false, limit: 100 } },
     { name: 'query_is_fetching', args: {} },
   ],
   router: [
@@ -99,6 +101,7 @@ const CAPTURE_TOOL_NAMES = new Set([
   devtoolsCaptureCreateContract.name,
   devtoolsCaptureListContract.name,
   devtoolsCaptureReadContract.name,
+  devtoolsCapturePinContract.name,
   devtoolsCaptureCompareContract.name,
 ])
 
@@ -125,7 +128,14 @@ export class CaptureManager<TSession extends CaptureSession> {
         .map(captureSummary)
       return {
         ok: true,
-        result: { captures, total: captures.length, maxRetained: MAX_RETAINED_CAPTURES },
+        result: {
+          captures,
+          total: captures.length,
+          maxRetained: MAX_RETAINED_CAPTURES,
+          pinned: captures.filter((capture) => capture.pinned === true).length,
+          remainingSlots: Math.max(0, MAX_RETAINED_CAPTURES - captures.length),
+          retentionWarnings: retentionWarnings(captures),
+        },
       }
     }
 
@@ -134,12 +144,34 @@ export class CaptureManager<TSession extends CaptureSession> {
       if (!parsed.success) return invalidArguments(tool, parsed.error)
       const capture = this.captures.get(parsed.data.captureId)
       return capture
-        ? { ok: true, result: structuredClone(capture) }
+        ? {
+            ok: true,
+            result:
+              parsed.data.view === 'summary'
+                ? captureReadSummary(capture)
+                : selectedCapture(capture, parsed.data.sections),
+          }
         : {
             ok: false,
             error: `No retained capture ${JSON.stringify(parsed.data.captureId)}. Run devtools_capture_list to inspect retained IDs.`,
             errorCode: 'invalid-args',
           }
+    }
+
+    if (tool === devtoolsCapturePinContract.name) {
+      const parsed = devtoolsCapturePinContract.input.safeParse(args ?? {})
+      if (!parsed.success) return invalidArguments(tool, parsed.error)
+      const capture = this.captures.get(parsed.data.captureId)
+      if (!capture) {
+        return {
+          ok: false,
+          error: `No retained capture ${JSON.stringify(parsed.data.captureId)}. Run devtools_capture_list to inspect retained IDs.`,
+          errorCode: 'invalid-args',
+        }
+      }
+      capture.pinned = parsed.data.pinned
+      capture.sizeBytes = captureSizeBytes(capture)
+      return { ok: true, result: captureSummary(capture) }
     }
 
     if (tool === devtoolsCaptureCompareContract.name) {
@@ -199,7 +231,7 @@ export class CaptureManager<TSession extends CaptureSession> {
     let finalSections: CaptureArtifact['sections'] = {}
     let finalCommit: number | null = null
     let consistencyKind: CaptureArtifact['consistency']['kind'] = 'best-effort'
-    let consistencyReason = 'React commit probes were unavailable.'
+    let consistencyReason = 'React document commit probes were unavailable.'
     let attempts = 0
 
     for (let attempt = 1; attempt <= input.maxAttempts; attempt += 1) {
@@ -236,7 +268,7 @@ export class CaptureManager<TSession extends CaptureSession> {
       if (stable) {
         consistencyKind = 'react-commit-stable'
         consistencyReason =
-          'React commit counters matched before, during, and after all captured sections.'
+          'React document commit markers matched before, during, and after all captured sections.'
         break
       }
       if (hasBothProbes) {
@@ -278,6 +310,19 @@ export class CaptureManager<TSession extends CaptureSession> {
         consistencyKind === 'react-commit-stable',
       warnings,
       sizeBytes: 0,
+      pinned: false,
+      summary: captureContentSummary(finalSections, warnings.length),
+      integrity: {
+        algorithm: 'sha256',
+        scope: 'capture-content-v1',
+        digest: '0'.repeat(64),
+      },
+    }
+    if (this.captures.size >= MAX_RETAINED_CAPTURES - 2) {
+      capture.warnings.push(
+        `Retention is ${this.captures.size + 1}/${MAX_RETAINED_CAPTURES}; pin or export important captures before the oldest unpinned artifact is evicted.`,
+      )
+      capture.summary = captureContentSummary(finalSections, capture.warnings.length)
     }
     capture.sizeBytes = captureSizeBytes(capture)
     if (capture.sizeBytes > MAX_CAPTURE_BYTES) {
@@ -285,6 +330,7 @@ export class CaptureManager<TSession extends CaptureSession> {
         `Capture is ${capture.sizeBytes} bytes; the retained-artifact limit is ${MAX_CAPTURE_BYTES} bytes. Capture fewer domains.`,
       )
     }
+    if (capture.integrity) capture.integrity.digest = captureIntegrityDigest(capture)
     this.retain(capture)
     return structuredClone(capture)
   }
@@ -320,6 +366,7 @@ export class CaptureManager<TSession extends CaptureSession> {
         capturedAt: new Date().toISOString(),
         durationMs: 0,
         error: `Tool ${JSON.stringify(recipe.name)} is not advertised by this app.`,
+        args: structuredClone(recipe.args),
       }
     }
     const response = await this.options.request(session, recipe.name, recipe.args)
@@ -337,12 +384,22 @@ export class CaptureManager<TSession extends CaptureSession> {
             maxEntries: 1_000,
             maxStringLength: 10_000,
           }),
+          args: dehydrate(recipe.args, {
+            depth: 8,
+            maxEntries: 200,
+            maxStringLength: 2_000,
+          }),
         }
       : {
           status: 'error',
           capturedAt: new Date().toISOString(),
           durationMs,
           error: response.error ?? `Tool ${JSON.stringify(recipe.name)} failed.`,
+          args: dehydrate(recipe.args, {
+            depth: 8,
+            maxEntries: 200,
+            maxStringLength: 2_000,
+          }),
         }
   }
 
@@ -353,9 +410,19 @@ export class CaptureManager<TSession extends CaptureSession> {
   }
 
   private retain(capture: CaptureArtifact): void {
+    if (
+      this.captures.size >= MAX_RETAINED_CAPTURES &&
+      [...this.captures.values()].every((retained) => retained.pinned === true)
+    ) {
+      throw new Error(
+        `All ${MAX_RETAINED_CAPTURES} retained captures are pinned. Export and unpin one before creating another capture.`,
+      )
+    }
     this.captures.set(capture.captureId, structuredClone(capture))
     while (this.captures.size > MAX_RETAINED_CAPTURES) {
-      const oldest = this.captures.keys().next().value
+      const oldest = [...this.captures.values()].find(
+        (retained) => retained.pinned !== true,
+      )?.captureId
       if (oldest === undefined) break
       this.captures.delete(oldest)
     }
@@ -377,10 +444,11 @@ function commitCountOf(result: CaptureToolResult): number | null {
   if (result.status !== 'ok' || typeof result.result !== 'object' || result.result === null) {
     return null
   }
-  const commits = Reflect.get(result.result, 'commits')
-  return typeof commits === 'number' && Number.isSafeInteger(commits) && commits >= 0
-    ? commits
-    : null
+  for (const field of ['documentCommitId', 'commits'] as const) {
+    const value = Reflect.get(result.result, field)
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  }
+  return null
 }
 
 function captureWarnings(sections: CaptureArtifact['sections']): string[] {
@@ -399,6 +467,124 @@ function captureWarnings(sections: CaptureArtifact['sections']): string[] {
 function captureSummary(capture: CaptureArtifact): Omit<CaptureArtifact, 'sections' | 'warnings'> {
   const { sections: _sections, warnings: _warnings, ...summary } = capture
   return summary
+}
+
+function captureReadSummary(capture: CaptureArtifact): ReturnType<typeof captureSummary> & {
+  warnings: string[]
+  availableSections: CaptureDomain[]
+} {
+  return {
+    ...captureSummary(capture),
+    warnings: [...capture.warnings],
+    availableSections: Object.keys(capture.sections) as CaptureDomain[],
+  }
+}
+
+function selectedCapture(
+  capture: CaptureArtifact,
+  sections: CaptureDomain[] | undefined,
+): CaptureArtifact {
+  if (!sections) return structuredClone(capture)
+  const selected = structuredClone(capture)
+  const wanted = new Set(sections)
+  selected.sections = Object.fromEntries(
+    Object.entries(selected.sections).filter(([domain]) => wanted.has(domain as CaptureDomain)),
+  )
+  selected.include = selected.include.filter((domain) => wanted.has(domain))
+  selected.summary = captureContentSummary(selected.sections, selected.warnings.length)
+  selected.sizeBytes = captureSizeBytes(selected)
+  if (selected.integrity) selected.integrity.digest = captureIntegrityDigest(selected)
+  return selected
+}
+
+function captureContentSummary(
+  sections: CaptureArtifact['sections'],
+  warningCount: number,
+): NonNullable<CaptureArtifact['summary']> {
+  const sectionStatus: NonNullable<CaptureArtifact['summary']>['sectionStatus'] = {}
+  for (const [domain, section] of Object.entries(sections)) {
+    if (section) sectionStatus[domain as CaptureDomain] = section.status
+  }
+  return {
+    sectionStatus,
+    metrics: {
+      'react.commits': captureNumber(sections, 'react', 'react_get_renders', ['commits']),
+      'react.renders': captureNumber(sections, 'react', 'react_get_renders', [
+        'summary',
+        'totalRenders',
+      ]),
+      'query.pending': captureQueryPending(sections),
+      'memory.usedHeapBytes': captureNumber(sections, 'memory', 'browser_get_memory', [
+        'usedJSHeapSize',
+      ]),
+      'performance.avgFps': captureNumber(sections, 'performance', 'browser_fps', ['avgFps']),
+    },
+    warningCount,
+  }
+}
+
+function captureQueryPending(sections: CaptureArtifact['sections']): number | null {
+  const fetching = captureNumber(sections, 'query', 'query_is_fetching', ['fetching'])
+  const mutating = captureNumber(sections, 'query', 'query_is_fetching', ['mutating'])
+  return fetching === null || mutating === null ? null : fetching + mutating
+}
+
+function captureNumber(
+  sections: CaptureArtifact['sections'],
+  domain: CaptureDomain,
+  tool: string,
+  path: string[],
+): number | null {
+  let current: unknown = sections[domain]?.tools[tool]?.result
+  for (const key of path) {
+    if (typeof current !== 'object' || current === null) return null
+    current = Reflect.get(current, key)
+  }
+  return typeof current === 'number' && Number.isFinite(current) ? current : null
+}
+
+function retentionWarnings(captures: Array<ReturnType<typeof captureSummary>>): string[] {
+  if (captures.length < MAX_RETAINED_CAPTURES - 2) return []
+  if (captures.every((capture) => capture.pinned === true)) {
+    return [`All ${MAX_RETAINED_CAPTURES} retention slots are pinned; new captures are refused.`]
+  }
+  return [
+    `Retention is ${captures.length}/${MAX_RETAINED_CAPTURES}; the next captures evict the oldest unpinned artifacts.`,
+  ]
+}
+
+export function captureIntegrityDigest(capture: CaptureArtifact): string {
+  const canonical = structuredClone(capture)
+  canonical.pinned = false
+  canonical.sizeBytes = 0
+  if (canonical.integrity) canonical.integrity.digest = '0'.repeat(64)
+  return createHash('sha256').update(stableJsonStringify(canonical)).digest('hex')
+}
+
+function stableJsonStringify(value: unknown): string {
+  const serialized = JSON.stringify(sortJsonObjectKeys(value))
+  if (serialized === undefined) throw new TypeError('Capture content is not JSON-serializable.')
+  return serialized
+}
+
+function sortJsonObjectKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonObjectKeys)
+  if (value === null || typeof value !== 'object') return value
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => [key, sortJsonObjectKeys(entry)]),
+  )
+}
+
+export function verifyCaptureIntegrity(capture: CaptureArtifact): boolean {
+  return (
+    capture.integrity?.algorithm === 'sha256' &&
+    capture.integrity.scope === 'capture-content-v1' &&
+    capture.integrity.digest === captureIntegrityDigest(capture)
+  )
 }
 
 function errorMessage(error: unknown): string {

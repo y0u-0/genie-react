@@ -9,6 +9,7 @@ import {
   type AppMessage,
   agentMessageSchema,
   appMessageSchema,
+  type BusyTelemetry,
   type ConnectionRole,
   DEFAULT_REQUEST_TIMEOUT_MS,
   decodeFrame,
@@ -22,9 +23,16 @@ import {
   ROLE_QUERY_PARAM,
   type SessionSummary,
   type ToolDescriptor,
+  WAIT_CONDITIONS,
   type WaitCondition,
+  type WaitDomain,
 } from '../protocol'
 import { CaptureManager, isCaptureTool } from './capture-manager'
+import {
+  InteractionManager,
+  type InteractionSettleResult,
+  isInteractionTool,
+} from './interaction-manager'
 import { frameKind, matchesOf, parseQueryList, queryStateOf, routerStateOf } from './wire-guards'
 
 type BridgeLogLevel = 'info' | 'warn' | 'error'
@@ -40,6 +48,8 @@ export interface GenieBridgeOptions {
   busyHeartbeatGapMs?: number
   /** Silence after which a heartbeat-capable session reads as a dead tab context and loses default routing; production default 15000ms. */
   sessionStaleMs?: number
+  /** Grace for ordinary reload overlap before a concurrent logical identity is auto-forked. */
+  logicalCollisionGraceMs?: number
   logger?: BridgeLogger
 }
 
@@ -51,6 +61,7 @@ interface BridgeStatus {
   domains: string[]
   tools: ToolDescriptor[]
   sessions: SessionSummary[]
+  warnings: string[]
 }
 
 interface AppSession {
@@ -61,6 +72,7 @@ interface AppSession {
   sessionName?: string
   predecessorSessionId?: string
   successorSessionId?: string
+  forkedFromLogicalSessionId?: string
   app: AppInfo
   capabilities: string[]
   tools: ToolDescriptor[]
@@ -87,6 +99,7 @@ interface AppResponse {
   error?: string
   errorCode?: AgentErrorCode
   retryInMs?: number
+  busyTelemetry?: BusyTelemetry
 }
 
 interface PendingRequest {
@@ -109,18 +122,35 @@ const SESSION_STALE_MS = 15_000
 const MIN_REQUEST_TIMEOUT_MS = 1_000
 const MAX_REQUEST_TIMEOUT_MS = 120_000
 const MAX_SESSION_SUCCESSORS = 256
+const LOGICAL_COLLISION_GRACE_MS = 750
 
 interface WaitInput {
   condition: WaitCondition
   name?: string
   queryHash?: string
   queryKey?: unknown[]
+  domains: WaitDomain[]
+  quietMs: number
+}
+
+interface WaitDomainCheck {
+  status: 'met' | 'pending' | 'failed' | 'unsupported'
+  reason?: string
+  lastObserved?: unknown
 }
 
 interface WaitCheck {
   state: 'met' | 'pending' | 'failed'
   reason?: string
   query?: { queryHash: string; queryKey: unknown }
+  lastObserved?: Record<string, unknown>
+  domains?: Partial<Record<WaitDomain, WaitDomainCheck>>
+}
+
+interface WaitPollState {
+  reactCommit: number | null
+  reactChangedAt: number
+  frameCheck: WaitDomainCheck | null
 }
 
 function queryIdentity(
@@ -175,13 +205,16 @@ export class GenieBridge {
   private readonly busyProbeMs: number
   private readonly busyHeartbeatGapMs: number
   private readonly sessionStaleMs: number
+  private readonly logicalCollisionGraceMs: number
   private readonly log: BridgeLogger
   private readonly apps = new Map<string, AppSession>()
   /** Physical document id → its replacement; bounded so stale shell pins can survive ordinary reloads. */
   private readonly sessionSuccessors = new Map<string, string>()
   /** Logical tab id → latest document, retained after socket close so close-before-hello reloads keep lineage. */
   private readonly latestDocuments = new Map<string, LatestDocument>()
+  private readonly logicalCollisionTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly captures: CaptureManager<AppSession>
+  private readonly interactions: InteractionManager<AppSession>
   private readonly connections = new Set<WebSocket>()
   private readonly responsiveSockets = new WeakSet<WebSocket>()
   private readonly heartbeat: ReturnType<typeof setInterval>
@@ -192,12 +225,24 @@ export class GenieBridge {
     this.busyProbeMs = options.busyProbeMs ?? BUSY_PROBE_MS
     this.busyHeartbeatGapMs = options.busyHeartbeatGapMs ?? BUSY_HEARTBEAT_GAP_MS
     this.sessionStaleMs = options.sessionStaleMs ?? SESSION_STALE_MS
+    this.logicalCollisionGraceMs = Math.max(
+      0,
+      options.logicalCollisionGraceMs ?? LOGICAL_COLLISION_GRACE_MS,
+    )
     this.log = options.logger ?? (() => {})
     this.captures = new CaptureManager({
       resolveSession: (target) => (target ? this.resolveSession(target) : this.currentSession()),
       unknownSessionError: (target) => this.unknownSessionError(target),
       isCurrentSession: (session) => this.apps.get(session.sessionId)?.socket === session.socket,
       request: (session, tool, args) => this.appRequestForSession(tool, args, session),
+    })
+    this.interactions = new InteractionManager({
+      resolveSession: (target) => (target ? this.resolveSession(target) : this.currentSession()),
+      unknownSessionError: (target) => this.unknownSessionError(target),
+      isCurrentSession: (session) => this.apps.get(session.sessionId)?.socket === session.socket,
+      request: (session, tool, args) => this.appRequestForSession(tool, args, session),
+      settle: (session, domains, quietMs, timeoutMs) =>
+        this.settleInteraction(session, domains, quietMs, timeoutMs),
     })
     const interval = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS
     this.heartbeat = setInterval(() => this.sweepDeadConnections(), interval)
@@ -222,6 +267,7 @@ export class GenieBridge {
       domains: current?.capabilities ?? [],
       tools: catalogOf(current),
       sessions: this.sessionSummaries(),
+      warnings: this.statusWarnings(),
     }
   }
 
@@ -231,7 +277,10 @@ export class GenieBridge {
     this.pending.clear()
     this.sessionSuccessors.clear()
     this.latestDocuments.clear()
+    for (const timer of this.logicalCollisionTimers.values()) clearTimeout(timer)
+    this.logicalCollisionTimers.clear()
     this.captures.clear()
+    this.interactions.clear()
     // terminate(), not close(): a graceful close handshake with a half-open peer blocks shutdown on ws's 30s timeout.
     for (const socket of this.agents) socket.terminate()
     for (const session of this.apps.values()) session.socket.terminate()
@@ -247,6 +296,7 @@ export class GenieBridge {
 
   private currentSession(): AppSession | null {
     const pinned = this.currentSessionId ? (this.apps.get(this.currentSessionId) ?? null) : null
+    if (pinned && this.logicalPeers(pinned).length > 0) return null
     if (!pinned || this.staleMsOf(pinned) === null) return pinned
     const fresh = [...this.apps.values()]
       .filter((session) => this.staleMsOf(session) === null)
@@ -258,6 +308,7 @@ export class GenieBridge {
     const current = this.currentSession()
     return [...this.apps.values()].sort(compareSessionRecency).map((session) => {
       const staleMs = this.staleMsOf(session)
+      const collisionWithSessionIds = this.logicalPeers(session).map((peer) => peer.sessionId)
       return {
         sessionId: session.sessionId,
         ...(session.logicalSessionId === undefined
@@ -273,6 +324,11 @@ export class GenieBridge {
         ...(session.successorSessionId === undefined
           ? {}
           : { successorSessionId: session.successorSessionId }),
+        logicalSessionCollision: collisionWithSessionIds.length > 0,
+        collisionWithSessionIds,
+        ...(session.forkedFromLogicalSessionId === undefined
+          ? {}
+          : { forkedFromLogicalSessionId: session.forkedFromLogicalSessionId }),
         app: session.app,
         domains: session.capabilities,
         toolCount: catalogOf(session).length,
@@ -305,13 +361,36 @@ export class GenieBridge {
     const physical = this.apps.get(physicalId)
     if (physical) return physical
 
-    const logical = [...this.apps.values()]
-      .filter((session) => session.logicalSessionId === target)
-      .sort(compareSessionRecency)[0]
-    if (logical) return logical
+    const logical = [...this.apps.values()].filter((session) => session.logicalSessionId === target)
+    if (logical.length === 1) return logical[0] ?? null
 
     const named = [...this.apps.values()].filter((session) => session.sessionName === target)
     return named.length === 1 ? (named[0] ?? null) : null
+  }
+
+  private logicalPeers(session: AppSession): AppSession[] {
+    if (!session.logicalSessionId) return []
+    return [...this.apps.values()].filter(
+      (candidate) =>
+        candidate.sessionId !== session.sessionId &&
+        candidate.logicalSessionId === session.logicalSessionId,
+    )
+  }
+
+  private statusWarnings(): string[] {
+    const collisions = new Map<string, string[]>()
+    for (const session of this.apps.values()) {
+      if (!session.logicalSessionId) continue
+      const sessions = collisions.get(session.logicalSessionId) ?? []
+      sessions.push(session.sessionId)
+      collisions.set(session.logicalSessionId, sessions)
+    }
+    return [...collisions]
+      .filter(([, sessions]) => sessions.length > 1)
+      .map(
+        ([logicalSessionId, sessions]) =>
+          `Logical session collision ${JSON.stringify(logicalSessionId)} across ${sessions.join(', ')}; implicit and logical-id routing is paused until the cloned document is auto-forked.`,
+      )
   }
 
   private onConnection(socket: WebSocket, role: ConnectionRole | null): void {
@@ -372,6 +451,7 @@ export class GenieBridge {
     switch (message.kind) {
       case 'app/hello': {
         const existing = this.apps.get(message.sessionId)
+        const previousLogicalSessionId = existing?.logicalSessionId
         const now = Date.now()
         if (existing && existing.socket !== socket) {
           // Requests in flight on the replaced socket will never get a response.
@@ -384,10 +464,18 @@ export class GenieBridge {
         const latest = message.logicalSessionId
           ? this.latestDocuments.get(message.logicalSessionId)
           : undefined
+        const concurrentLogicalDocument = message.logicalSessionId
+          ? [...this.apps.values()].some(
+              (session) =>
+                session.sessionId !== message.sessionId &&
+                session.logicalSessionId === message.logicalSessionId,
+            )
+          : false
         const replacesLatest =
-          latest === undefined ||
-          latest.sessionId === message.sessionId ||
-          (message.documentGeneration ?? 0) >= (latest.documentGeneration ?? 0)
+          !concurrentLogicalDocument &&
+          (latest === undefined ||
+            latest.sessionId === message.sessionId ||
+            (message.documentGeneration ?? 0) >= (latest.documentGeneration ?? 0))
         const predecessorSessionId =
           replacesLatest && latest?.sessionId !== message.sessionId ? latest?.sessionId : undefined
         if (predecessorSessionId) {
@@ -410,6 +498,7 @@ export class GenieBridge {
           sessionName: message.sessionName,
           predecessorSessionId: existing?.predecessorSessionId ?? predecessorSessionId,
           successorSessionId: existing?.successorSessionId,
+          forkedFromLogicalSessionId: existing?.forkedFromLogicalSessionId,
           app: message.app,
           capabilities: message.capabilities,
           tools: message.tools,
@@ -419,6 +508,9 @@ export class GenieBridge {
           // A re-hello from a once-heartbeating session is a live JS turn (reload, reconnect, or tool refresh), so clear stale/busy state immediately.
           lastHeartbeatAt: existing?.lastHeartbeatAt === undefined ? undefined : now,
         })
+        if (previousLogicalSessionId && previousLogicalSessionId !== message.logicalSessionId) {
+          this.refreshLatestDocument(previousLogicalSessionId)
+        }
         if (!existing && replacesLatest) {
           this.currentSessionId = message.sessionId
           this.log(
@@ -426,6 +518,8 @@ export class GenieBridge {
             `app connected: ${message.app.name ?? message.sessionId} (${this.apps.size} session${this.apps.size === 1 ? '' : 's'})`,
           )
         }
+        const registered = this.apps.get(message.sessionId)
+        if (registered) this.scheduleLogicalCollision(registered)
         for (const notify of [...this.connectionWaiters]) notify()
         this.broadcastStatus()
         return
@@ -499,6 +593,91 @@ export class GenieBridge {
     }
   }
 
+  private refreshLatestDocument(logicalSessionId: string): void {
+    const latest = [...this.apps.values()]
+      .filter((session) => session.logicalSessionId === logicalSessionId)
+      .sort(compareSessionRecency)[0]
+    if (!latest) {
+      this.latestDocuments.delete(logicalSessionId)
+      return
+    }
+    this.recordLatestDocument(logicalSessionId, {
+      sessionId: latest.sessionId,
+      documentGeneration: latest.documentGeneration,
+      connectedAt: latest.connectedAt,
+    })
+  }
+
+  private scheduleLogicalCollision(session: AppSession): void {
+    const previousTimer = this.logicalCollisionTimers.get(session.sessionId)
+    if (previousTimer) clearTimeout(previousTimer)
+    this.logicalCollisionTimers.delete(session.sessionId)
+    if (!session.logicalSessionId || this.logicalPeers(session).length === 0) return
+
+    const expectedLogicalSessionId = session.logicalSessionId
+    const timer = setTimeout(
+      () => this.autoForkLogicalCollision(session.sessionId, expectedLogicalSessionId),
+      this.logicalCollisionGraceMs,
+    )
+    unrefTimer(timer)
+    this.logicalCollisionTimers.set(session.sessionId, timer)
+    this.log('warn', 'logical session collision detected', {
+      logicalSessionId: expectedLogicalSessionId,
+      sessionId: session.sessionId,
+      collisionWithSessionIds: this.logicalPeers(session).map((peer) => peer.sessionId),
+    })
+  }
+
+  private autoForkLogicalCollision(sessionId: string, expectedLogicalSessionId: string): void {
+    this.logicalCollisionTimers.delete(sessionId)
+    const session = this.apps.get(sessionId)
+    if (!session || session.logicalSessionId !== expectedLogicalSessionId) return
+    const collisionWithSessionIds = this.logicalPeers(session).map((peer) => peer.sessionId)
+    if (collisionWithSessionIds.length === 0) return
+
+    const logicalSessionId = newId()
+    session.logicalSessionId = logicalSessionId
+    session.documentGeneration = 1
+    session.forkedFromLogicalSessionId = expectedLogicalSessionId
+    this.refreshLatestDocument(expectedLogicalSessionId)
+    this.recordLatestDocument(logicalSessionId, {
+      sessionId,
+      documentGeneration: 1,
+      connectedAt: session.connectedAt,
+    })
+    this.send(session.socket, {
+      kind: 'bridge/session-fork',
+      expectedLogicalSessionId,
+      logicalSessionId,
+      documentGeneration: 1,
+      reason: 'logical-session-collision',
+      collisionWithSessionIds,
+    })
+    this.log('warn', 'auto-forked cloned logical session', {
+      sessionId,
+      expectedLogicalSessionId,
+      logicalSessionId,
+    })
+    this.broadcastStatus()
+  }
+
+  private promoteLogicalSuccessor(closed: AppSession): void {
+    if (!closed.logicalSessionId) return
+    const remaining = [...this.apps.values()]
+      .filter((session) => session.logicalSessionId === closed.logicalSessionId)
+      .sort(compareSessionRecency)
+    if (remaining.length !== 1) return
+    const successor = remaining[0]
+    if (!successor) return
+    successor.predecessorSessionId ??= closed.sessionId
+    this.recordSessionSuccessor(closed.sessionId, successor.sessionId)
+    this.recordLatestDocument(closed.logicalSessionId, {
+      sessionId: successor.sessionId,
+      documentGeneration: successor.documentGeneration,
+      connectedAt: successor.connectedAt,
+    })
+  }
+
   private clearPendingTimers(pending: PendingRequest): void {
     clearTimeout(pending.timer)
     if (pending.busyTimer) clearTimeout(pending.busyTimer)
@@ -559,12 +738,26 @@ export class GenieBridge {
         toolCount: catalogOf(target).length,
         ...(parsed.data.includeTools ? { tools: catalogOf(target) } : {}),
         sessions: this.sessionSummaries(),
+        warnings: this.statusWarnings(),
       })
       return
     }
 
     if (isCaptureTool(tool)) {
       const response = await this.captures.invoke(tool, args, sessionId)
+      this.result(
+        agent,
+        id,
+        response.ok,
+        response.ok ? response.result : undefined,
+        response.ok ? undefined : response.error,
+        response.ok ? undefined : { errorCode: response.errorCode },
+      )
+      return
+    }
+
+    if (isInteractionTool(tool)) {
+      const response = await this.interactions.invoke(tool, args, sessionId)
       this.result(
         agent,
         id,
@@ -607,11 +800,15 @@ export class GenieBridge {
     const finish = (check: WaitCheck, timeoutReason = 'timeout') =>
       this.result(agent, id, true, {
         ok: check.state === 'met',
+        condition: input.condition,
         waitedMs: Date.now() - started,
         ...(check.state === 'met'
           ? {}
           : { reason: check.state === 'failed' ? check.reason : timeoutReason }),
         ...(check.query === undefined ? {} : { query: check.query }),
+        validConditions: [...WAIT_CONDITIONS],
+        ...(check.lastObserved === undefined ? {} : { lastObserved: check.lastObserved }),
+        ...(check.domains === undefined ? {} : { domains: check.domains }),
       })
 
     if (input.condition === 'connected' || input.condition === 'ready') {
@@ -620,7 +817,13 @@ export class GenieBridge {
           ? this.waitForReady.bind(this)
           : this.waitForConnection.bind(this)
       const connected = await waitFor(input.timeoutMs, sessionId)
-      finish({ state: connected ? 'met' : 'pending' })
+      finish({
+        state: connected ? 'met' : 'pending',
+        lastObserved: {
+          connected: this.hasSession(sessionId),
+          ready: this.hasReadySession(sessionId),
+        },
+      })
       return
     }
 
@@ -646,15 +849,51 @@ export class GenieBridge {
     sessionId?: string,
   ): Promise<WaitCheck> {
     const deadline = Date.now() + Math.max(0, remainingMs)
+    const pollState: WaitPollState = {
+      reactCommit: null,
+      reactChangedAt: Date.now(),
+      frameCheck: null,
+    }
+    let lastCheck: WaitCheck = { state: 'pending' }
     while (Date.now() < deadline) {
-      const check = await this.checkCondition(input, sessionId)
+      const check = await this.checkCondition(input, sessionId, pollState)
+      lastCheck = check
       if (check.state !== 'pending') return check
       await delay(POLL_INTERVAL_MS)
     }
-    return { state: 'pending' }
+    return lastCheck
   }
 
-  private async checkCondition(input: WaitInput, sessionId?: string): Promise<WaitCheck> {
+  private async settleInteraction(
+    session: AppSession,
+    domains: WaitDomain[],
+    quietMs: number,
+    timeoutMs: number,
+  ): Promise<InteractionSettleResult> {
+    const started = Date.now()
+    const check = await this.pollCondition(
+      { condition: 'settled', domains, quietMs },
+      timeoutMs,
+      session.sessionId,
+    )
+    return {
+      ok: check.state === 'met',
+      waitedMs: Date.now() - started,
+      ...(check.state === 'met'
+        ? {}
+        : { reason: check.state === 'failed' ? check.reason : 'timeout' }),
+      domains: check.domains ?? {},
+    }
+  }
+
+  private async checkCondition(
+    input: WaitInput,
+    sessionId: string | undefined,
+    pollState: WaitPollState,
+  ): Promise<WaitCheck> {
+    if (input.condition === 'react-quiet' || input.condition === 'settled') {
+      return this.checkSettle(input, sessionId, pollState)
+    }
     if (input.condition === 'component') {
       const res = await this.appRequest(
         'react_find_components',
@@ -662,7 +901,10 @@ export class GenieBridge {
         sessionId,
       )
       const matches = matchesOf(res.result)
-      return { state: res.ok && matches !== undefined && matches.length > 0 ? 'met' : 'pending' }
+      return {
+        state: res.ok && matches !== undefined && matches.length > 0 ? 'met' : 'pending',
+        lastObserved: { matches: matches?.length ?? null },
+      }
     }
     if (input.condition === 'query-settled') {
       if (input.queryHash !== undefined || input.queryKey !== undefined) {
@@ -677,13 +919,14 @@ export class GenieBridge {
         return {
           state: query.fetchStatus === 'idle' ? 'met' : 'pending',
           ...(match === undefined ? {} : { query: match }),
+          lastObserved: { fetchStatus: query.fetchStatus ?? null },
         }
       }
 
-      const res = await this.appRequest('query_list', { limit: input.name ? 500 : 1 }, sessionId)
-      const queries = parseQueryList(res.result)
-      if (!res.ok || !queries || queries.length === 0) return { state: 'pending' }
       if (input.name) {
+        const res = await this.appRequest('query_list', { limit: 500 }, sessionId)
+        const queries = parseQueryList(res.result)
+        if (!res.ok || !queries || queries.length === 0) return { state: 'pending' }
         const relevant = queries.filter((query) => legacyQueryMatches(query, input.name ?? ''))
         if (relevant.length > 1) {
           return {
@@ -697,12 +940,17 @@ export class GenieBridge {
         return {
           state: query.fetchStatus === 'idle' ? 'met' : 'pending',
           ...(match === undefined ? {} : { query: match }),
+          lastObserved: { fetchStatus: query.fetchStatus ?? null },
         }
       }
       const fetching = await this.appRequest('query_is_fetching', {}, sessionId)
       const state = queryStateOf(fetching.result)
       return {
-        state: fetching.ok && state?.fetching === 0 ? 'met' : 'pending',
+        state: fetching.ok && state?.fetching === 0 && state.mutating === 0 ? 'met' : 'pending',
+        lastObserved: {
+          fetching: state?.fetching ?? null,
+          mutating: state?.mutating ?? null,
+        },
       }
     }
     if (input.condition === 'navigation') {
@@ -714,9 +962,132 @@ export class GenieBridge {
           (input.name ? state.pathname === input.name : true) && !state.isLoading
             ? 'met'
             : 'pending',
+        lastObserved: {
+          pathname: state.pathname ?? null,
+          isLoading: state.isLoading ?? null,
+        },
       }
     }
     return { state: 'pending' }
+  }
+
+  private async checkSettle(
+    input: WaitInput,
+    sessionId: string | undefined,
+    pollState: WaitPollState,
+  ): Promise<WaitCheck> {
+    const requested: WaitDomain[] = input.condition === 'react-quiet' ? ['react'] : input.domains
+    const domains: Partial<Record<WaitDomain, WaitDomainCheck>> = {}
+    for (const domain of requested) {
+      domains[domain] = await this.checkSettleDomain(domain, input, sessionId, pollState)
+    }
+    const checks = Object.values(domains)
+    const unsupported = checks.find(
+      (check) => check?.status === 'unsupported' || check?.status === 'failed',
+    )
+    const state = unsupported
+      ? 'failed'
+      : checks.every((check) => check?.status === 'met')
+        ? 'met'
+        : 'pending'
+    return {
+      state,
+      ...(unsupported?.reason === undefined ? {} : { reason: unsupported.reason }),
+      domains,
+      lastObserved: Object.fromEntries(
+        Object.entries(domains).map(([domain, check]) => [domain, check?.lastObserved ?? null]),
+      ),
+    }
+  }
+
+  private async checkSettleDomain(
+    domain: WaitDomain,
+    input: WaitInput,
+    sessionId: string | undefined,
+    pollState: WaitPollState,
+  ): Promise<WaitDomainCheck> {
+    const session = sessionId ? this.resolveSession(sessionId) : this.currentSession()
+    const unsupported = (tool: string): WaitDomainCheck => ({
+      status: 'unsupported',
+      reason: `Domain ${domain} requires unavailable tool ${tool}.`,
+    })
+    if (domain === 'network') {
+      return {
+        status: 'unsupported',
+        reason: 'Generic network quiet is not instrumented by this app.',
+      }
+    }
+    if (domain === 'react') {
+      if (!session || !toolDescriptor(session, 'react_get_renders')) {
+        return unsupported('react_get_renders')
+      }
+      const response = await this.appRequest(
+        'react_get_renders',
+        { sort: 'renders', limit: 1, appOnly: false },
+        sessionId,
+      )
+      const result = recordOf(response.result)
+      const commit = result && numberField(result, 'documentCommitId')
+      if (!response.ok || commit === null) {
+        return { status: 'pending', reason: response.error, lastObserved: null }
+      }
+      const now = Date.now()
+      if (pollState.reactCommit !== commit) {
+        pollState.reactCommit = commit
+        pollState.reactChangedAt = now
+      }
+      const quietForMs = now - pollState.reactChangedAt
+      return {
+        status: quietForMs >= input.quietMs ? 'met' : 'pending',
+        lastObserved: { documentCommitId: commit, quietForMs, requiredQuietMs: input.quietMs },
+      }
+    }
+    if (domain === 'query') {
+      if (!session || !toolDescriptor(session, 'query_is_fetching')) {
+        return unsupported('query_is_fetching')
+      }
+      const response = await this.appRequest('query_is_fetching', {}, sessionId)
+      const result = recordOf(response.result)
+      const fetching = result ? numberField(result, 'fetching') : null
+      const mutating = result ? (numberField(result, 'mutating') ?? 0) : null
+      return {
+        status: response.ok && fetching === 0 && mutating === 0 ? 'met' : 'pending',
+        lastObserved: { fetching, mutating },
+      }
+    }
+    if (domain === 'router') {
+      if (!session || !toolDescriptor(session, 'router_get_state')) {
+        return unsupported('router_get_state')
+      }
+      const response = await this.appRequest('router_get_state', {}, sessionId)
+      const result = routerStateOf(response.result)
+      return {
+        status: response.ok && result?.isLoading === false ? 'met' : 'pending',
+        lastObserved: {
+          isLoading: result?.isLoading ?? null,
+          pathname: result?.pathname ?? null,
+        },
+      }
+    }
+    if (!session || !toolDescriptor(session, 'browser_fps')) return unsupported('browser_fps')
+    if (pollState.frameCheck?.status === 'met') return pollState.frameCheck
+    const response = await this.appRequest('browser_fps', { durationMs: 250 }, sessionId)
+    const result = recordOf(response.result)
+    const comparable = result?.comparable === true
+    pollState.frameCheck = {
+      status: response.ok && comparable ? 'met' : 'pending',
+      reason: comparable
+        ? undefined
+        : 'Frame sample is hidden, throttled, sparse, or mode-shifted.',
+      lastObserved: {
+        comparable,
+        avgFps: result ? numberField(result, 'avgFps') : null,
+        notComparableReasons: Array.isArray(result?.notComparableReasons)
+          ? result.notComparableReasons
+          : [],
+      },
+    }
+    return pollState.frameCheck
   }
 
   private forwardToApp(
@@ -735,6 +1106,7 @@ export class GenieBridge {
         this.result(agent, id, response.ok, response.result, response.error, {
           errorCode: response.errorCode,
           retryInMs: response.retryInMs,
+          busyTelemetry: response.busyTelemetry,
         }),
       sessionId,
       timeoutMs,
@@ -845,6 +1217,7 @@ export class GenieBridge {
           ok: false,
           errorCode: 'busy',
           error: `App unresponsive (no heartbeat for ${gap}ms) — likely reloading, frozen, or its JS thread is stuck; retrying won't help. Reload the app, or pass a larger timeoutMs to wait it out.`,
+          busyTelemetry: this.busyTelemetry(sessionId, tool, gap),
         })
         return
       }
@@ -853,9 +1226,29 @@ export class GenieBridge {
         errorCode: 'busy',
         retryInMs: BUSY_RETRY_MS,
         error: `App main thread busy (no heartbeat for ${gap}ms) — not a crash; retry shortly or reduce concurrent profilers. Tool "${tool}" was still pending; if this tool itself blocks the thread this long, pass a larger timeoutMs and retry.`,
+        busyTelemetry: this.busyTelemetry(sessionId, tool, gap),
       })
     }
     return setTimeout(probe, this.busyProbeMs)
+  }
+
+  private busyTelemetry(sessionId: string, tool: string, gap: number): BusyTelemetry {
+    const session = this.apps.get(sessionId)
+    const descriptor = session ? toolDescriptor(session, tool) : undefined
+    return {
+      lastHeartbeatAgeMs: gap,
+      queueDepth: Math.max(
+        1,
+        [...this.pending.values()].filter((pending) => pending.sessionId === sessionId).length,
+      ),
+      pendingWorkClass:
+        descriptor?.annotations?.readOnlyHint === true
+          ? 'instrumentation'
+          : descriptor
+            ? 'app'
+            : 'unknown',
+      tool,
+    }
   }
 
   private waitForConnection(timeoutMs: number, sessionId?: string): Promise<boolean> {
@@ -897,6 +1290,12 @@ export class GenieBridge {
   }
 
   private unknownSessionError(sessionId: string): string {
+    const logical = [...this.apps.values()].filter(
+      (session) => session.logicalSessionId === sessionId,
+    )
+    if (logical.length > 1) {
+      return `Logical session ${JSON.stringify(sessionId)} has a live identity collision (${logical.map((session) => session.sessionId).join(', ')}). Wait for auto-fork, then choose a distinct logical or physical id from devtools_status.`
+    }
     const named = [...this.apps.values()].filter((session) => session.sessionName === sessionId)
     if (named.length > 1) {
       return `Session name "${sessionId}" is ambiguous (${named.length} tabs). Use a physical or logical id from devtools_status.`
@@ -921,6 +1320,10 @@ export class GenieBridge {
     const session = [...this.apps.values()].find((s) => s.socket === connection.socket)
     if (session) {
       this.apps.delete(session.sessionId)
+      const collisionTimer = this.logicalCollisionTimers.get(session.sessionId)
+      if (collisionTimer) clearTimeout(collisionTimer)
+      this.logicalCollisionTimers.delete(session.sessionId)
+      this.promoteLogicalSuccessor(session)
       this.log('info', `app disconnected: ${session.app.name ?? session.sessionId}`)
       this.failPendingForSession(session.sessionId, 'app disconnected')
       if (this.currentSessionId === session.sessionId) {
@@ -945,7 +1348,7 @@ export class GenieBridge {
     ok: boolean,
     result?: unknown,
     error?: string,
-    extra?: { errorCode?: AgentErrorCode; retryInMs?: number },
+    extra?: { errorCode?: AgentErrorCode; retryInMs?: number; busyTelemetry?: BusyTelemetry },
   ): void {
     this.send(agent, {
       kind: 'bridge/result',
@@ -955,6 +1358,7 @@ export class GenieBridge {
       error,
       errorCode: extra?.errorCode,
       retryInMs: extra?.retryInMs,
+      busyTelemetry: extra?.busyTelemetry,
     })
   }
 
@@ -971,4 +1375,15 @@ function parseUpgradeUrl(url: string | undefined): {
   const roleParam = parsed.searchParams.get(ROLE_QUERY_PARAM)
   const role = roleParam === 'app' || roleParam === 'agent' ? roleParam : null
   return { pathname: parsed.pathname, role }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }

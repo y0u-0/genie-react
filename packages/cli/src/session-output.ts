@@ -18,7 +18,10 @@ export function summarizeStatus(
     .filter(Boolean)
     .join(' · ')
   const sessions = Array.isArray(result.sessions) ? result.sessions.filter(isRecord) : []
-  if (sessions.length <= 1) return head
+  const warnings = Array.isArray(result.warnings)
+    ? result.warnings.filter((warning): warning is string => typeof warning === 'string')
+    : []
+  if (sessions.length <= 1 && warnings.length === 0) return head
   const lines = [`${head} · ${sessions.length} sessions`]
   for (const session of sessions) {
     const sessionApp = isRecord(session.app) ? session.app : {}
@@ -31,6 +34,9 @@ export function summarizeStatus(
     if (typeof session.sessionName === 'string') parts.push(`name=${session.sessionName}`)
     if (typeof session.documentGeneration === 'number')
       parts.push(`generation=${session.documentGeneration}`)
+    if (session.logicalSessionCollision === true) parts.push('(logical identity collision)')
+    if (typeof session.forkedFromLogicalSessionId === 'string')
+      parts.push(`forked-from=${session.forkedFromLogicalSessionId}`)
     if (typeof session.staleMs === 'number')
       parts.push(
         `(stale — no heartbeat for ${Math.round(session.staleMs / 1000)}s, likely a dead tab)`,
@@ -39,6 +45,7 @@ export function summarizeStatus(
   }
   if (options.targetSessionId === undefined)
     lines.push('target one: --session <target> (or set GENIE_SESSION once per shell)')
+  for (const warning of warnings) lines.push(`! ${warning}`)
   return lines.join('\n')
 }
 
@@ -48,6 +55,7 @@ export function summarizeSessionsOnly(
     ready: boolean
     sessionId: string | null
     sessions: unknown[]
+    warnings?: unknown[]
   },
   options: { targetSessionId?: string } = {},
 ): string {
@@ -61,12 +69,18 @@ export function summarizeSessionsOnly(
       parts.push(`logical=${session.logicalSessionId}`)
     if (typeof session.documentGeneration === 'number')
       parts.push(`generation=${session.documentGeneration}`)
+    if (session.logicalSessionCollision === true) parts.push('logical identity collision')
+    if (typeof session.forkedFromLogicalSessionId === 'string')
+      parts.push(`forked-from=${session.forkedFromLogicalSessionId}`)
     parts.push(session.ready === false ? 'initializing' : 'ready')
     if (session.sessionId === options.targetSessionId) parts.push('target')
     else if (session.current === true) parts.push('current')
     if (typeof session.staleMs === 'number')
       parts.push(`stale (no heartbeat for ${Math.round(session.staleMs / 1000)}s)`)
     lines.push(`  ${parts.join(' · ')}`)
+  }
+  for (const warning of result.warnings ?? []) {
+    if (typeof warning === 'string') lines.push(`! ${warning}`)
   }
   return lines.join('\n')
 }

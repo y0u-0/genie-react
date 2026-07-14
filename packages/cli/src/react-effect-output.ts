@@ -58,8 +58,8 @@ export function summarizeEffects(result: unknown): string | null {
       const evidence = provenanceEvidence(provenance)
       if (provenance?.ownership === 'library')
         parts.push(
-          typeof provenance.packageName === 'string'
-            ? `· lib:${provenance.packageName}/${evidence}`
+          typeof provenance.packageName === 'string' || typeof provenance.package === 'string'
+            ? `· lib:${String(provenance.packageName ?? provenance.package)}/${evidence}`
             : `· library/${evidence}`,
         )
       else if (provenance?.ownership === 'app') parts.push(`· app/${evidence}`)
@@ -119,11 +119,11 @@ export function summarizeEffectEvents(result: unknown): string | null {
     if (omittedSlots > 0) line.push(`${dependencySlotCount(omittedSlots)} with changes omitted`)
     const unscannedSlots = num(event.dependencySlotsUnscanned)
     if (unscannedSlots > 0) line.push(`${dependencySlotCount(unscannedSlots)} unscanned`)
-    if (isRecord(event.execution)) line.push(`execution ${humanStatus(event.execution.status)}`)
+    if (isRecord(event.execution)) line.push(`execution ${effectRunLabel(event.execution)}`)
     if (isRecord(event.cleanupExecution))
-      line.push(`cleanup ${humanStatus(event.cleanupExecution.status)}`)
+      line.push(`cleanup ${effectRunLabel(event.cleanupExecution)}`)
     if (isRecord(event.consequences))
-      line.push(`consequences ${humanStatus(event.consequences.status)}`)
+      line.push(`consequences ${consequenceLabel(event.consequences)}`)
     lines.push(line.join(' · '))
   }
   return lines.join('\n')
@@ -151,6 +151,44 @@ function dependencySlotCount(count: number): string {
 
 function humanStatus(value: unknown): string {
   return typeof value === 'string' ? value.replaceAll('-', ' ') : 'unknown'
+}
+
+function effectRunLabel(run: Record<string, unknown>): string {
+  const parts = [humanStatus(run.status)]
+  if (typeof run.outcome === 'string') parts.push(humanStatus(run.outcome))
+  if (typeof run.durationMs === 'number') parts.push(`${Math.round(run.durationMs * 10) / 10}ms`)
+  if (typeof run.reason === 'string') parts.push(`(${humanStatus(run.reason)})`)
+  if (typeof run.error === 'string') parts.push(`error=${boundedError(run.error)}`)
+  return parts.join(' ')
+}
+
+function consequenceLabel(consequences: Record<string, unknown>): string {
+  const parts = [humanStatus(consequences.status)]
+  if (Array.isArray(consequences.events)) {
+    const events = consequences.events.filter(isRecord)
+    const labels = events.slice(0, 4).map((event) => {
+      if (event.kind === 'notification') {
+        return `${humanStatus(event.domain)} ${String(event.notificationId)} (${humanStatus(event.evidence)})`
+      }
+      if (event.kind === 'resulting-commit') {
+        return `commit ${num(event.documentCommitId)} (${humanStatus(event.evidence)})`
+      }
+      return humanStatus(event.kind)
+    })
+    if (events.length > labels.length) labels.push(`+${events.length - labels.length} more`)
+    if (labels.length > 0) parts.push(`[${labels.join('; ')}]`)
+  }
+  if (Array.isArray(consequences.unobservedDomains)) {
+    const domains = consequences.unobservedDomains.filter(
+      (domain): domain is string => typeof domain === 'string',
+    )
+    if (domains.length > 0) parts.push(`unobserved ${domains.join(',')}`)
+  }
+  return parts.join(' ')
+}
+
+function boundedError(value: string): string {
+  return value.length > 80 ? `${value.slice(0, 80)}…` : value
 }
 
 function provenanceEvidence(provenance: Record<string, unknown> | null): string {

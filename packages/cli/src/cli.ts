@@ -1,12 +1,24 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
-import { errorMessage } from 'genie-react/protocol'
-import { formatAgentFailure, runBatch, runCall, runStatus, runTools } from './agent'
+import { CAPTURE_DOMAINS, type CaptureDomain, errorMessage } from 'genie-react/protocol'
+import {
+  formatAgentFailure,
+  renderResult,
+  runBatch,
+  runCall,
+  runCaptureExport,
+  runStatus,
+  runTools,
+} from './agent'
 import { isRecord } from './guards'
 import { runHub } from './hub-command'
 import { runDoctor, runInit, runLiveDoctor } from './index'
 import { runLink } from './link'
+import { installOutputFailureHandler, setOutputContext } from './output-safety'
+
+installOutputFailureHandler()
+setOutputContext({ operation: process.argv.slice(2, 4).join(' ') || 'help' })
 
 const HELP = `genie-react — give an AI agent live DevTools on your running React + TanStack app
 
@@ -15,7 +27,7 @@ Usage: npx @genie-react/cli <command> [options]
 Setup commands:
   link [<path>]          Symlink Genie packages from a local checkout without publishing
   init [--dry-run]       Wire Genie into a Vite or Next.js app
-  doctor [--live]        Check setup; --live also probes the hub, client, and session
+  doctor [--live]        Check setup; --json emits machine-readable health and remediation
   hub [--port <n>]       Run the standalone hub (default 4390; explicit ports are strict)
 
 Tool commands (dev server must be running with the genie() plugin or hub):
@@ -23,6 +35,7 @@ Tool commands (dev server must be running with the genie() plugin or hub):
   status                 Show compact bridge, app, and session readiness
   call <tool> '<json>'   Invoke one live tool
   batch [<json-array>]   Run sequential calls; JSONL by default, one array with --json
+  capture export <id>    Export a retained, checksummed capture to a local file
 
 Run any command with --help for details and an example.
 
@@ -33,6 +46,8 @@ Options:
   --wait <ms>      Call/tools/batch: wait up to 1–120000ms for an app (default 15000)
   --timeout <ms>   Bound each call; the bridge clamps to 1000–120000ms
   --fields <keys>  Project result records to validated comma-separated keys as JSONL
+  --select <path>  Select nested output with JSON Pointer or dotted wildcards
+  --max-bytes <n>  Hard output ceiling (512–50000000 bytes); reports omitted paths
   --session <target> Target a physical id, logical id, or unique session name
   --json           Print compact JSON and structured failures
   --ndjson         Batch: explicitly print one JSON object per result line
@@ -61,7 +76,7 @@ Example:
   genie-react tools react.render && genie-react tools react_get_renders`,
   call: `genie-react call — invoke a tool on the live app
 
-Usage: genie-react call <tool> '<json-args>' [--session <id>] [--json] [--timeout <ms>] [--connect-timeout <ms>] [--fields <keys>]
+Usage: genie-react call <tool> '<json-args>' [--session <id>] [--json] [--timeout <ms>] [--connect-timeout <ms>] [--fields <keys>|--select <path>] [--max-bytes <n>] [--fail-on-result-error]
 
 Args are one JSON string; discover names and params with genie-react tools.
 Output is a compact summary; --json prints the raw result.
@@ -72,15 +87,17 @@ app the failure is tagged [busy] with a retry hint instead of stalling.
 
 Example:
   genie-react call react_get_renders '{"sort":"selfTime"}'
-  genie-react call react_find_components '{"query":"Button"}' --fields id,name,path`,
+  genie-react call react_find_components '{"query":"Button"}' --fields id,name,path
+  genie-react call devtools_capture_read '{"captureId":"cap_…","view":"full"}' --select sections.react --max-bytes 20000`,
   batch: `genie-react batch — run many tool calls over one connection
 
-Usage: genie-react batch '<json-array>' [--session <target>] [--timeout <ms>] [--connect-timeout <ms>] [--json|--ndjson]
+Usage: genie-react batch '<json-array>' [--session <target>] [--timeout <ms>] [--connect-timeout <ms>] [--json|--ndjson] [--select <path>] [--max-bytes <n>]
 
 The array items are {tool, args?} objects; calls run sequentially and continue on
 error. The default and --ndjson print one object per line for compatibility; --json
 prints one valid JSON array. Exits 0 only if every call succeeded. Omit the argument
 to read the JSON array from stdin. Unknown item keys are rejected (use "args", not "input").
+--max-bytes applies to the whole command, including every JSONL result.
 
 Example:
   genie-react batch '[{"tool":"react_find_components","args":{"query":"Btn"}},{"tool":"react_get_renders","args":{"sort":"selfTime"}}]'`,
@@ -89,17 +106,30 @@ Example:
 Shows connection/readiness state, app name, React version, tool count, and every
 connected session. Target one by physical id, logical id, or unique name with
 --session <target> / GENIE_SESSION. Use --sessions-only for the smallest response.
+Use --marker <text> to correlate machine output and --select/--max-bytes to bound it.
 
 Example:
   genie-react status --json
   genie-react status --verbose`,
+  capture: `genie-react capture export — write a retained capture with verified SHA-256 integrity
+
+Usage: genie-react capture export <capture-id> --output <path> [--section <domains>] [--force] [--json] [--select <path>] [--max-bytes <n>]
+
+The export performs a full bridge read, verifies the capture's embedded checksum,
+and writes through a temporary file. Existing files are refused unless --force.
+--section accepts comma-separated domains such as react,effects.
+
+Example:
+  genie-react capture export cap_123 --output .context/captures/before.json --section react,effects`,
   doctor: `genie-react doctor — check that Genie is wired correctly
 
-Usage: genie-react doctor [--live]
+Usage: genie-react doctor [--live] [--json]
 
 Static checks always run (config, packages, discovery file).
 --live also probes the running stack: hub HTTP + identity, served client
-bundle, and a session round-trip over the bridge.
+bundle, a session round-trip, and React source-map health. --json includes
+checks, CLI/runtime/skill versions and hashes, bridge candidates, session
+health, and remediation without human text on stdout.
 
 Example:
   genie-react doctor --live`,
@@ -131,11 +161,31 @@ type ParsedValues = Record<string, boolean | string | undefined>
 
 const COMMAND_OPTIONS: Record<string, ReadonlySet<string>> = {
   init: new Set(['dry-run', 'yes']),
-  doctor: new Set(['live']),
+  doctor: new Set(['live', 'json', 'select', 'max-bytes']),
   hub: new Set(['port']),
   link: new Set(),
-  tools: new Set(['url', 'connect-timeout', 'wait', 'session', 'json', 'all', 'verbose']),
-  status: new Set(['url', 'connect-timeout', 'session', 'json', 'sessions-only', 'verbose']),
+  tools: new Set([
+    'url',
+    'connect-timeout',
+    'wait',
+    'session',
+    'json',
+    'all',
+    'select',
+    'max-bytes',
+    'verbose',
+  ]),
+  status: new Set([
+    'url',
+    'connect-timeout',
+    'session',
+    'json',
+    'sessions-only',
+    'select',
+    'max-bytes',
+    'marker',
+    'verbose',
+  ]),
   call: new Set([
     'url',
     'connect-timeout',
@@ -144,6 +194,9 @@ const COMMAND_OPTIONS: Record<string, ReadonlySet<string>> = {
     'json',
     'timeout',
     'fields',
+    'select',
+    'max-bytes',
+    'fail-on-result-error',
     'verbose',
   ]),
   batch: new Set([
@@ -154,6 +207,20 @@ const COMMAND_OPTIONS: Record<string, ReadonlySet<string>> = {
     'json',
     'ndjson',
     'timeout',
+    'select',
+    'max-bytes',
+    'verbose',
+  ]),
+  capture: new Set([
+    'url',
+    'connect-timeout',
+    'session',
+    'json',
+    'select',
+    'max-bytes',
+    'output',
+    'section',
+    'force',
     'verbose',
   ]),
 }
@@ -167,6 +234,7 @@ const POSITIONAL_LIMITS: Record<string, number> = {
   status: 1,
   call: 3,
   batch: 2,
+  capture: 3,
 }
 
 function unsupportedOption(command: string, values: ParsedValues): string | null {
@@ -196,6 +264,19 @@ function parseFields(raw: string | undefined): string[] | undefined {
     .map((field) => field.trim())
     .filter(Boolean)
   return fields.length > 0 ? fields : undefined
+}
+
+function parseCaptureSections(raw: string | undefined): CaptureDomain[] | undefined {
+  const sections = parseFields(raw)
+  if (!sections) return undefined
+  const allowed = new Set<string>(CAPTURE_DOMAINS)
+  const invalid = sections.filter((section) => !allowed.has(section))
+  if (invalid.length > 0) {
+    throw new Error(
+      `Unknown capture section ${JSON.stringify(invalid[0])}. Valid sections: ${CAPTURE_DOMAINS.join(', ')}.`,
+    )
+  }
+  return sections as CaptureDomain[]
 }
 
 function readVersion(): string {
@@ -230,6 +311,13 @@ async function main(): Promise<number> {
       port: { type: 'string' },
       timeout: { type: 'string' },
       fields: { type: 'string' },
+      select: { type: 'string' },
+      'max-bytes': { type: 'string' },
+      'fail-on-result-error': { type: 'boolean' },
+      marker: { type: 'string' },
+      output: { type: 'string' },
+      section: { type: 'string' },
+      force: { type: 'boolean' },
       verbose: { type: 'boolean' },
     },
   })
@@ -240,7 +328,12 @@ async function main(): Promise<number> {
   }
 
   const command = positionals[0]
-  const machine = values.json === true || values.ndjson === true || values.fields !== undefined
+  const machine =
+    values.json === true ||
+    values.ndjson === true ||
+    values.fields !== undefined ||
+    values.select !== undefined ||
+    values['max-bytes'] !== undefined
   if (values.help && command && command in COMMAND_HELP) {
     process.stdout.write(`${COMMAND_HELP[command]}\n`)
     return 0
@@ -301,6 +394,32 @@ async function main(): Promise<number> {
     writeCliFailure(machine, '--fields requires at least one comma-separated field name.')
     return 1
   }
+  if (values.select !== undefined && values.select.trim() === '') {
+    writeCliFailure(machine, '--select requires a non-empty JSON Pointer or dotted path.')
+    return 1
+  }
+  if (values.fields !== undefined && values.select !== undefined) {
+    writeCliFailure(machine, 'Choose either --fields or --select, not both.')
+    return 1
+  }
+  if (
+    values['max-bytes'] !== undefined &&
+    (!Number.isInteger(Number(values['max-bytes'])) ||
+      Number(values['max-bytes']) < 512 ||
+      Number(values['max-bytes']) > 50_000_000)
+  ) {
+    writeCliFailure(machine, '--max-bytes must be an integer from 512 to 50000000.')
+    return 1
+  }
+  if (
+    values.marker !== undefined &&
+    (values.marker.length === 0 ||
+      values.marker.length > 80 ||
+      [...values.marker].some((character) => (character.codePointAt(0) ?? 0) <= 31))
+  ) {
+    writeCliFailure(machine, '--marker must be 1–80 characters without control characters.')
+    return 1
+  }
   if (command === 'batch' && values.json === true && values.ndjson === true) {
     writeCliFailure(true, 'Choose either --json or --ndjson, not both.')
     return 1
@@ -315,6 +434,10 @@ async function main(): Promise<number> {
     all: values.all,
     timeoutMs: values.timeout ? Number(values.timeout) : undefined,
     fields: parseFields(values.fields),
+    select: values.select,
+    maxBytes: values['max-bytes'] ? Number(values['max-bytes']) : undefined,
+    failOnResultError: values['fail-on-result-error'],
+    marker: values.marker,
     sessionsOnly: values['sessions-only'],
     verbose: values.verbose,
     cliVersion: readVersion(),
@@ -335,7 +458,20 @@ async function main(): Promise<number> {
       return result.ok ? 0 : 1
     }
     case 'doctor': {
-      const result = values.live ? await runLiveDoctor() : runDoctor()
+      const logger = machine ? { info: () => undefined, error: () => undefined } : undefined
+      const result = values.live ? await runLiveDoctor({ logger }) : runDoctor({ logger })
+      if (machine) {
+        process.stdout.write(
+          `${renderResult(
+            'doctor',
+            result,
+            true,
+            undefined,
+            values.select,
+            values['max-bytes'] ? Number(values['max-bytes']) : undefined,
+          )}\n`,
+        )
+      }
       return result.ok ? 0 : 1
     }
     case 'hub': {
@@ -356,6 +492,25 @@ async function main(): Promise<number> {
       return runCall(positionals[1], positionals[2], agentOptions)
     case 'batch':
       return runBatch(positionals[1], agentOptions)
+    case 'capture': {
+      if (positionals[1] !== 'export') {
+        writeCliFailure(machine, 'Capture currently requires the `export` subcommand.')
+        return 1
+      }
+      let sections: CaptureDomain[] | undefined
+      try {
+        sections = parseCaptureSections(values.section)
+      } catch (error) {
+        writeCliFailure(machine, errorMessage(error))
+        return 1
+      }
+      return runCaptureExport(positionals[2], {
+        ...agentOptions,
+        output: values.output,
+        sections,
+        force: values.force,
+      })
+    }
     default:
       return 1
   }
@@ -369,7 +524,14 @@ main()
   .catch((error) => {
     const machine = process.argv.some(
       (arg) =>
-        arg === '--json' || arg === '--ndjson' || arg === '--fields' || arg.startsWith('--fields='),
+        arg === '--json' ||
+        arg === '--ndjson' ||
+        arg === '--fields' ||
+        arg.startsWith('--fields=') ||
+        arg === '--select' ||
+        arg.startsWith('--select=') ||
+        arg === '--max-bytes' ||
+        arg.startsWith('--max-bytes='),
     )
     const message = errorMessage(error)
     if (machine) {

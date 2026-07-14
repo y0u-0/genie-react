@@ -150,6 +150,68 @@ describe('queryCollector', () => {
     unsubscribe()
   })
 
+  it('query_notifications records exact tracked-field delivery and structural sharing', async () => {
+    const client = new QueryClient()
+    const sharedItems = [{ id: 1 }]
+    client.setQueryData(['tracked'], { items: sharedItems, label: 'before' })
+    const observer = new QueryObserver(client, {
+      queryKey: ['tracked'],
+      queryFn: async () => ({ items: sharedItems, label: 'before' }),
+    })
+    const unsubscribe = observer.subscribe(() => {})
+    const collector = queryCollector(client)
+    const stop = collector.start?.(ctx)
+    setExternalStoreObservation({ id: 'observation:notification' })
+
+    observer.trackProp('data')
+    client.setQueryData(['tracked'], { items: sharedItems, label: 'after' })
+    await Promise.resolve()
+
+    const result = (await call(collector, 'query_notifications', { limit: 10 })) as {
+      events: Array<{
+        notificationId: string
+        observationId: string | null
+        trackedFields: string[]
+        trackedFieldsCoverage: string
+        changedResultFields: string[]
+        deliveryReason: string
+        fanout: number
+        structuralSharing: { reusedFields: string[]; changedFields: string[] }
+        renderEventIds: string[]
+      }>
+      omittedByLimit: number
+    }
+    expect(result.omittedByLimit).toBe(0)
+    expect(result.events[0]).toMatchObject({
+      notificationId: expect.stringMatching(/^query-notification:/),
+      observationId: 'observation:notification',
+      trackedFields: ['data'],
+      trackedFieldsCoverage: 'exact',
+      deliveryReason: 'tracked-field-changed:data',
+      fanout: 1,
+      renderEventIds: [],
+    })
+    expect(result.events[0]?.changedResultFields).toContain('data')
+    expect(result.events[0]?.structuralSharing.changedFields).toContain('data')
+    expect(result.events[0]?.structuralSharing.reusedFields).toContain('status')
+
+    const queryHash = client.getQueryCache().getAll()[0]?.queryHash as string
+    const detail = (await call(collector, 'query_get', { queryHash, depth: 2 })) as {
+      observers: Array<Record<string, unknown>>
+    }
+    expect(detail.observers[0]).toMatchObject({
+      notificationPolicy: {
+        mode: 'auto-tracked',
+        fields: ['data'],
+        trackedFieldsAvailable: true,
+      },
+      deliveryEvidence: 'public-track-prop-observed',
+    })
+
+    stop?.()
+    unsubscribe()
+  })
+
   it('query_get bounds observer detail and reports omissions', async () => {
     const client = new QueryClient()
     client.setQueryData(['shared'], 'ready')

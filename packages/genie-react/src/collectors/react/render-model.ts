@@ -1,4 +1,5 @@
 import type { Fiber } from 'bippy'
+import type { WrapperFrame } from './fiber'
 import type { InstanceDescriptor } from './instance-identity'
 import type { RenderInputCoverage } from './render-budget'
 import {
@@ -9,7 +10,7 @@ import {
 } from './render-causes'
 import type { RenderChange } from './render-inputs'
 import { pendingRenderAssessment, type RenderAssessment } from './render-outcomes'
-import type { ResolvedSource, sourceAttributionForSource } from './source'
+import type { ResolvedSource, SourceProvenance, sourceAttributionForSource } from './source'
 
 export interface RenderRecord {
   id: number
@@ -51,8 +52,10 @@ export interface RenderReport extends Omit<RenderRecord, 'fiber' | 'latestRender
   }
   source: ResolvedSource | null
   sourceAttribution: ReturnType<typeof sourceAttributionForSource>
+  sourceProvenance: SourceProvenance
   sourceOwnership: 'app' | 'library' | 'unknown'
   isLibrary: boolean
+  wrapperAncestry: WrapperFrame[]
 }
 
 export interface RenderSummary {

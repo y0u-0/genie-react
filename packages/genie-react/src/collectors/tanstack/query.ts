@@ -2,7 +2,11 @@ import type { QueryClient, QueryFunction } from '@tanstack/react-query'
 import { z } from 'zod'
 import { defineCollector, defineCollectorTool, type GenieCollector } from '../../client'
 import { defineAgentToolContract, dehydrate } from '../../protocol'
-import { registerQueryObserver } from '../causal/external-store-registry'
+import {
+  instrumentQueryObserver,
+  listQueryNotifications,
+  registerQueryObserver,
+} from '../causal/external-store-registry'
 import {
   QUERY_OBSERVER_LIMIT,
   queryObserverSummarySchema,
@@ -99,6 +103,45 @@ const queryListContract = defineAgentToolContract({
     queries: z.array(querySummarySchema),
     total: z.number(),
     churn: churnSchema,
+  }),
+  annotations: { readOnlyHint: true },
+})
+
+const queryNotificationsContract = defineAgentToolContract({
+  name: 'query_notifications',
+  title: 'Query observer notifications',
+  description:
+    'List bounded QueryObserver delivery events with tracked fields, changed result fields, structural-sharing evidence, fanout, and exact notification/render IDs. A render cause is exact only when it joins one of these notification IDs.',
+  group: 'query',
+  input: z.object({
+    observerId: z.string().optional(),
+    limit: z.number().int().min(1).max(500).default(100),
+  }),
+  output: z.object({
+    events: z.array(
+      z.object({
+        notificationId: z.string(),
+        observerId: z.string(),
+        observationId: z.string().nullable(),
+        timestamp: z.number(),
+        trackedFields: z.array(z.string()),
+        trackedFieldsCoverage: z.enum(['exact', 'unavailable']),
+        changedResultFields: z.array(z.string()),
+        deliveryReason: z
+          .string()
+          .describe(
+            'observer-notified or tracked-field-changed:<field> for an exact tracked field.',
+          ),
+        fanout: z.number().int().nonnegative(),
+        structuralSharing: z.object({
+          reusedFields: z.array(z.string()),
+          changedFields: z.array(z.string()),
+          truncated: z.boolean(),
+        }),
+        renderEventIds: z.array(z.string()),
+      }),
+    ),
+    omittedByLimit: z.number().int().nonnegative(),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -599,8 +642,15 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
     meta: { id: 'query', title: 'TanStack Query', description: 'Query + mutation cache' },
     capabilities: ['query'],
     start: (ctx) => {
+      const observerCleanups = new Map<object, () => void>()
+      const observe = (observer: object): void => {
+        registerQueryObserver(observer)
+        if (!observerCleanups.has(observer)) {
+          observerCleanups.set(observer, instrumentQueryObserver(observer))
+        }
+      }
       for (const query of queryCache().getAll()) {
-        for (const observer of query.observers) registerQueryObserver(observer)
+        for (const observer of query.observers) observe(observer)
       }
       let scheduled = false
       const push = () => {
@@ -613,7 +663,11 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
       }
       const offQuery = queryCache().subscribe((event) => {
         if (event.type === 'observerAdded' || event.type === 'observerOptionsUpdated') {
-          registerQueryObserver(event.observer)
+          observe(event.observer)
+        }
+        if (event.type === 'observerRemoved') {
+          observerCleanups.get(event.observer)?.()
+          observerCleanups.delete(event.observer)
         }
         if (event.type === 'removed') {
           fetchActivity.delete(event.query.queryHash)
@@ -628,10 +682,16 @@ export function queryCollector(queryClient: QueryClient): GenieCollector {
       return () => {
         offQuery()
         offMutation()
+        for (const cleanup of observerCleanups.values()) cleanup()
+        observerCleanups.clear()
         restoreAllSimulations()
       }
     },
     tools: [
+      defineCollectorTool({
+        contract: queryNotificationsContract,
+        handler: ({ observerId, limit }) => listQueryNotifications({ observerId, limit }),
+      }),
       defineCollectorTool({
         contract: queryListContract,
         handler: ({ staleOnly, limit }) => {

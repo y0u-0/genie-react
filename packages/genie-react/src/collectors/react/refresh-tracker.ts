@@ -81,6 +81,35 @@ let instrumentation: Unsubscribe | null = null
 let refreshTrackingActive = false
 let latestRefreshEvent: StoredRefreshEvent | null = null
 
+function shouldBlockFalseViteProbe(): boolean {
+  if (typeof window === 'undefined') return false
+  return (
+    typeof document === 'undefined' ||
+    document.querySelector('script[src*="/@vite/client"]') === null
+  )
+}
+
+/** Suppress bippy's `/@vite/client` probe in non-Vite documents without disabling its bundler-independent refresh instrumentation. */
+function instrumentRefresh(): Unsubscribe {
+  const originalFetch = globalThis.fetch
+  if (!shouldBlockFalseViteProbe() || typeof originalFetch !== 'function') {
+    return instrumentReactRefresh({ onRefresh: safelyRecordRefresh })
+  }
+
+  const guardedFetch: typeof fetch = (input, init) => {
+    if (input === '/@vite/client') {
+      return Promise.resolve({ ok: false } as Response)
+    }
+    return originalFetch(input, init)
+  }
+  globalThis.fetch = guardedFetch
+  try {
+    return instrumentReactRefresh({ onRefresh: safelyRecordRefresh })
+  } finally {
+    if (globalThis.fetch === guardedFetch) globalThis.fetch = originalFetch
+  }
+}
+
 /** Close after a bounded quiet window: route frameworks can finish cold SSR/module invalidation hundreds of milliseconds after Vite applies client modules. */
 function scheduleRefreshTailEnd(): void {
   const generation = ++refreshTailGeneration
@@ -165,7 +194,7 @@ export function startRefreshTracking(): boolean {
   if (instrumentation) return true
   try {
     refreshTrackingActive = true
-    const refresh = instrumentReactRefresh({ onRefresh: safelyRecordRefresh })
+    const refresh = instrumentRefresh()
     for (const renderer of getRDTHook().renderers.values()) wrapRenderer(renderer)
     const rendererInject = onRendererInject(wrapRenderer)
     instrumentation = toUnsubscribe(() => {

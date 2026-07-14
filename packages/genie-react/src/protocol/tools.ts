@@ -26,6 +26,7 @@ const captureToolResultSchema = z.object({
   durationMs: z.number().nonnegative(),
   result: z.unknown().optional(),
   error: z.string().optional(),
+  args: z.unknown().optional().describe('Exact bounded arguments used to invoke this tool.'),
 })
 
 const captureSectionSchema = z.object({
@@ -56,6 +57,24 @@ export const captureArtifactSchema = z.object({
   complete: z.boolean(),
   warnings: z.array(z.string()),
   sizeBytes: z.number().int().nonnegative(),
+  pinned: z.boolean().optional(),
+  integrity: z
+    .object({
+      algorithm: z.literal('sha256'),
+      scope: z.literal('capture-content-v1'),
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .optional(),
+  summary: z
+    .object({
+      sectionStatus: z.partialRecord(
+        captureDomainSchema,
+        z.enum(['ok', 'partial', 'unavailable', 'error']),
+      ),
+      metrics: z.record(z.string(), z.number().nullable()),
+      warningCount: z.number().int().nonnegative(),
+    })
+    .optional(),
 })
 export type CaptureArtifact = z.infer<typeof captureArtifactSchema>
 
@@ -113,12 +132,32 @@ const captureComparisonMetricSchema = z.object({
   candidate: captureMetricStatsSchema,
   missingBaselineCaptureIds: z.array(z.string()),
   missingCandidateCaptureIds: z.array(z.string()),
+  outlierBaselineCaptureIds: z.array(z.string()),
+  outlierCandidateCaptureIds: z.array(z.string()),
+  comparable: z.boolean(),
+  notComparableReasons: z.array(z.string()),
   delta: z.object({
     median: z.number().nullable(),
     regressionPct: z.number().nullable(),
   }),
   budget: captureMetricBudgetSchema.optional(),
-  verdict: z.enum(['pass', 'fail', 'insufficient-data', 'informational']),
+  confidence: z.object({
+    level: z.number().min(0.5).max(0.999),
+    pValue: z.number().min(0).max(1).nullable(),
+    achieved: z.number().min(0).max(1).nullable(),
+    significant: z.boolean(),
+    minimumEffectPct: z.number().nonnegative(),
+    observedEffectPct: z.number().nullable(),
+    noiseFloorPct: z.number().nonnegative().nullable(),
+  }),
+  verdict: z.enum([
+    'pass',
+    'fail',
+    'inconclusive',
+    'not-comparable',
+    'insufficient-data',
+    'informational',
+  ]),
   reasons: z.array(z.string()),
 })
 
@@ -128,9 +167,26 @@ export const captureComparisonSchema = z.object({
   comparisonId: z.string(),
   createdAt: z.string().datetime(),
   minimumRuns: z.number().int().positive(),
+  policy: z.object({
+    warmupRuns: z.number().int().nonnegative(),
+    outlierThreshold: z.number().positive(),
+    confidenceLevel: z.number().min(0.5).max(0.999),
+    minimumEffectPct: z.number().nonnegative(),
+  }),
+  excluded: z.object({
+    warmupBaselineCaptureIds: z.array(z.string()),
+    warmupCandidateCaptureIds: z.array(z.string()),
+  }),
   baselineCaptureIds: z.array(z.string()),
   candidateCaptureIds: z.array(z.string()),
-  overall: z.enum(['pass', 'fail', 'insufficient-data', 'informational']),
+  overall: z.enum([
+    'pass',
+    'fail',
+    'inconclusive',
+    'not-comparable',
+    'insufficient-data',
+    'informational',
+  ]),
   metrics: z.array(captureComparisonMetricSchema),
   violations: z.array(z.object({ metric: captureMetricSchema, reasons: z.array(z.string()) })),
   warnings: z.array(z.string()),
@@ -161,6 +217,14 @@ const captureSummarySchema = captureArtifactSchema.pick({
   consistency: true,
   complete: true,
   sizeBytes: true,
+  pinned: true,
+  integrity: true,
+  summary: true,
+})
+
+const captureReadSummarySchema = captureSummarySchema.extend({
+  warnings: z.array(z.string()),
+  availableSections: z.array(captureDomainSchema),
 })
 
 export const devtoolsCaptureCreateContract = defineAgentToolContract({
@@ -199,6 +263,9 @@ export const devtoolsCaptureListContract = defineAgentToolContract({
     captures: z.array(captureSummarySchema),
     total: z.number().int().nonnegative(),
     maxRetained: z.number().int().positive(),
+    pinned: z.number().int().nonnegative(),
+    remainingSlots: z.number().int().nonnegative(),
+    retentionWarnings: z.array(z.string()),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -206,11 +273,50 @@ export const devtoolsCaptureListContract = defineAgentToolContract({
 export const devtoolsCaptureReadContract = defineAgentToolContract({
   name: 'devtools_capture_read',
   title: 'Read an immutable runtime capture',
-  description: 'Read one retained schema-versioned artifact by its exact captureId.',
+  description:
+    'Read one retained capture by exact ID. The default summary view is bounded; request full or selected sections only when needed.',
   group: 'meta',
-  input: z.object({ captureId: z.string().min(1, 'captureId is required') }).strict(),
-  output: captureArtifactSchema,
+  input: z
+    .object({
+      captureId: z.string().min(1, 'captureId is required'),
+      view: z.enum(['summary', 'full']).default('summary'),
+      sections: z
+        .array(captureDomainSchema)
+        .max(CAPTURE_DOMAINS.length)
+        .optional()
+        .describe('For view="full", include only these sections.'),
+    })
+    .strict()
+    .superRefine((input, context) => {
+      if (input.sections !== undefined && input.view !== 'full') {
+        context.addIssue({
+          code: 'custom',
+          path: ['sections'],
+          message: 'sections requires view="full"',
+        })
+      }
+      if (input.sections && new Set(input.sections).size !== input.sections.length) {
+        context.addIssue({ code: 'custom', path: ['sections'], message: 'sections must be unique' })
+      }
+    }),
+  output: z.union([captureArtifactSchema, captureReadSummarySchema]),
   annotations: { readOnlyHint: true },
+})
+
+export const devtoolsCapturePinContract = defineAgentToolContract({
+  name: 'devtools_capture_pin',
+  title: 'Pin or unpin a retained capture',
+  description:
+    'Protect a capture from retention eviction, or unpin it. When all retained slots are pinned, creating another capture is refused instead of deleting evidence.',
+  group: 'meta',
+  input: z
+    .object({
+      captureId: z.string().min(1, 'captureId is required'),
+      pinned: z.boolean().default(true),
+    })
+    .strict(),
+  output: captureSummarySchema,
+  annotations: { idempotentHint: true },
 })
 
 export const devtoolsCaptureCompareContract = defineAgentToolContract({
@@ -228,7 +334,11 @@ export const devtoolsCaptureCompareContract = defineAgentToolContract({
         .min(1)
         .max(CAPTURE_METRICS.length)
         .default([...CAPTURE_METRICS]),
-      minimumRuns: z.number().int().min(1).max(10).default(3),
+      minimumRuns: z.number().int().min(1).max(10).default(5),
+      warmupRuns: z.number().int().min(0).max(3).default(1),
+      outlierThreshold: z.number().min(2).max(10).default(3.5),
+      confidenceLevel: z.number().min(0.5).max(0.999).default(0.95),
+      minimumEffectPct: z.number().min(0).max(100).default(5),
       budgets: z.array(captureMetricBudgetSchema).max(CAPTURE_METRICS.length).default([]),
     })
     .strict()
@@ -302,6 +412,7 @@ export const devtoolsStatusContract = defineAgentToolContract({
     toolCount: z.number(),
     tools: z.array(toolDescriptorSchema).optional(),
     sessions: z.array(sessionSummarySchema),
+    warnings: z.array(z.string()),
   }),
   annotations: { readOnlyHint: true },
 })
@@ -312,14 +423,25 @@ export const WAIT_CONDITIONS = [
   'component',
   'query-settled',
   'navigation',
+  'react-quiet',
+  'settled',
 ] as const
 export type WaitCondition = (typeof WAIT_CONDITIONS)[number]
+
+export const WAIT_DOMAINS = ['react', 'query', 'router', 'frames', 'network'] as const
+export type WaitDomain = (typeof WAIT_DOMAINS)[number]
+
+const waitDomainResultSchema = z.object({
+  status: z.enum(['met', 'pending', 'failed', 'unsupported']),
+  reason: z.string().optional(),
+  lastObserved: z.unknown().optional(),
+})
 
 export const devtoolsWaitContract = defineAgentToolContract({
   name: 'devtools_wait',
   title: 'Wait for a condition',
   description:
-    'Block until a runtime condition holds so the agent can synchronize instead of polling: the app connecting, collector startup completing, a component mounting, one exact query settling, or a navigation completing. For queries, prefer queryHash or queryKey from query_list; legacy name matching is exact, never substring-based.',
+    'Block until a runtime condition holds so the agent can synchronize instead of polling. `settled` reports each requested React, Query, Router, frame, or optional network domain independently; partial quiet never collapses into idle. For queries, prefer queryHash or queryKey from query_list; legacy matching is exact.',
   group: 'meta',
   input: z
     .object({
@@ -340,6 +462,19 @@ export const devtoolsWaitContract = defineAgentToolContract({
         .optional()
         .describe('Exact structured query key; only for condition="query-settled".'),
       timeoutMs: z.number().int().positive().max(60_000).default(10_000),
+      domains: z
+        .array(z.enum(WAIT_DOMAINS))
+        .min(1)
+        .max(WAIT_DOMAINS.length)
+        .default(['react'])
+        .describe('Domains required for condition="settled"; react-quiet always checks React.'),
+      quietMs: z
+        .number()
+        .int()
+        .min(100)
+        .max(5_000)
+        .default(500)
+        .describe('How long the React document commit ID must stay unchanged.'),
     })
     .strict()
     .superRefine((input, context) => {
@@ -365,11 +500,27 @@ export const devtoolsWaitContract = defineAgentToolContract({
           message: 'choose name or queryHash/queryKey, not both',
         })
       }
+      if (input.condition !== 'settled' && input.condition !== 'react-quiet') {
+        if (input.domains.length !== 1 || input.domains[0] !== 'react') {
+          context.addIssue({
+            code: 'custom',
+            path: ['domains'],
+            message: 'domains is only configurable for condition="settled"',
+          })
+        }
+      }
+      if (new Set(input.domains).size !== input.domains.length) {
+        context.addIssue({ code: 'custom', path: ['domains'], message: 'domains must be unique' })
+      }
     }),
   output: z.object({
     ok: z.boolean(),
+    condition: z.enum(WAIT_CONDITIONS),
     waitedMs: z.number(),
     reason: z.string().optional(),
+    validConditions: z.array(z.enum(WAIT_CONDITIONS)),
+    lastObserved: z.record(z.string(), z.unknown()).optional(),
+    domains: z.partialRecord(z.enum(WAIT_DOMAINS), waitDomainResultSchema).optional(),
     query: z
       .object({ queryHash: z.string(), queryKey: z.unknown() })
       .optional()
@@ -378,13 +529,163 @@ export const devtoolsWaitContract = defineAgentToolContract({
   annotations: { readOnlyHint: true },
 })
 
+export const INTERACTION_SCHEMA_VERSION = '1.0' as const
+
+const interactionObservationInputSchema = z.object({
+  components: z.array(z.string().trim().min(1).max(160)).max(20).default([]),
+  roots: z.array(z.number().int()).max(20).default([]),
+  budget: z
+    .object({
+      fiberLimit: z.number().int().min(50).max(5_000).default(250),
+      operationLimit: z.number().int().min(1_000).max(200_000).default(20_000),
+      timeLimitMs: z.number().min(1).max(50).default(8),
+      targetOperationReserve: z.number().int().min(100).max(50_000).default(4_000),
+      targetTimeReserveMs: z.number().min(0.5).max(25).default(4),
+      adaptive: z.boolean().default(true),
+    })
+    .default({
+      fiberLimit: 250,
+      operationLimit: 20_000,
+      timeLimitMs: 8,
+      targetOperationReserve: 4_000,
+      targetTimeReserveMs: 4,
+      adaptive: true,
+    }),
+  lifecycle: z
+    .object({
+      bufferLimit: z.number().int().min(100).max(20_000).default(1_000),
+      targetReserve: z.number().int().min(0).max(5_000).default(100),
+    })
+    .default({ bufferLimit: 1_000, targetReserve: 100 })
+    .refine((value) => value.targetReserve <= value.bufferLimit, {
+      message: 'targetReserve cannot exceed bufferLimit',
+      path: ['targetReserve'],
+    }),
+})
+
+const interactionSessionSchema = z.object({
+  sessionId: z.string(),
+  logicalSessionId: z.string().optional(),
+  documentGeneration: z.number().int().positive().optional(),
+  sessionName: z.string().optional(),
+  app: appInfoSchema,
+})
+
+const interactionToolResultSchema = z.object({
+  status: z.enum(['ok', 'unavailable', 'error']),
+  tool: z.string(),
+  args: z.unknown(),
+  capturedAt: z.string().datetime(),
+  durationMs: z.number().nonnegative(),
+  result: z.unknown().optional(),
+  error: z.string().optional(),
+})
+
+export const devtoolsInteractionBeginContract = defineAgentToolContract({
+  name: 'devtools_interaction_begin',
+  title: 'Begin an atomic interaction observation',
+  description:
+    'Clear and start one targeted React observation under a bridge-owned interaction ID. Only one interaction may record per physical app document; drive the UI, then call devtools_interaction_stop to freeze and read one bounded bundle.',
+  group: 'meta',
+  input: interactionObservationInputSchema
+    .extend({
+      name: captureNameSchema,
+    })
+    .strict(),
+  output: z.object({
+    schemaVersion: z.literal(INTERACTION_SCHEMA_VERSION),
+    kind: z.literal('interaction-observation'),
+    interactionId: z.string(),
+    name: z.string(),
+    state: z.literal('recording'),
+    startedAt: z.string().datetime(),
+    session: interactionSessionSchema,
+    observationId: z.string().nullable(),
+    startDocumentCommitId: z.number().int().nonnegative().nullable(),
+    observationConfig: z.unknown().optional(),
+    warnings: z.array(z.string()),
+  }),
+  annotations: { idempotentHint: false },
+})
+
+export const devtoolsInteractionStopContract = defineAgentToolContract({
+  name: 'devtools_interaction_stop',
+  title: 'Stop and read an atomic interaction observation',
+  description:
+    'Freeze React profiling before waiting, then return bounded renders, causes, targeted cohorts, and effect timeline evidence from that interaction ID. Commits occurring during settle are excluded by the profile freeze and counted explicitly.',
+  group: 'meta',
+  input: z
+    .object({
+      interactionId: z.string().min(1),
+      domains: z.array(z.enum(WAIT_DOMAINS)).min(1).max(WAIT_DOMAINS.length).default(['react']),
+      quietMs: z.number().int().min(100).max(5_000).default(500),
+      timeoutMs: z.number().int().positive().max(60_000).default(10_000),
+    })
+    .strict()
+    .refine((input) => new Set(input.domains).size === input.domains.length, {
+      message: 'domains must be unique',
+      path: ['domains'],
+    }),
+  output: z.object({
+    schemaVersion: z.literal(INTERACTION_SCHEMA_VERSION),
+    kind: z.literal('interaction-capture'),
+    interactionId: z.string(),
+    name: z.string(),
+    state: z.literal('completed'),
+    startedAt: z.string().datetime(),
+    stoppedAt: z.string().datetime(),
+    session: interactionSessionSchema,
+    boundary: z.object({
+      observationId: z.string().nullable(),
+      startDocumentCommitId: z.number().int().nonnegative().nullable(),
+      stopDocumentCommitId: z.number().int().nonnegative().nullable(),
+      finalDocumentCommitId: z.number().int().nonnegative().nullable(),
+      recordedCommits: z.number().int().nonnegative().nullable(),
+      postInteractionCommits: z.number().int().nonnegative().nullable(),
+      trackingFrozen: z.boolean(),
+      postInteractionPolicy: z.enum([
+        'excluded-by-profile-freeze',
+        'not-excluded-profile-freeze-failed',
+      ]),
+    }),
+    settle: z.object({
+      ok: z.boolean(),
+      waitedMs: z.number().int().nonnegative(),
+      reason: z.string().optional(),
+      domains: z.partialRecord(z.enum(WAIT_DOMAINS), waitDomainResultSchema),
+    }),
+    sections: z.object({
+      renders: interactionToolResultSchema,
+      causes: interactionToolResultSchema,
+      effects: interactionToolResultSchema,
+      cohorts: z.array(
+        z.object({
+          component: z.string(),
+          evidence: interactionToolResultSchema,
+        }),
+      ),
+    }),
+    coverage: z.object({
+      complete: z.boolean(),
+      comparable: z.boolean(),
+      notComparableReasons: z.array(z.string()),
+      boundary: z.literal('profile-frozen-before-settle'),
+    }),
+    warnings: z.array(z.string()),
+  }),
+  annotations: { idempotentHint: true },
+})
+
 export const metaTools = [
   devtoolsStatusContract,
   devtoolsWaitContract,
   devtoolsCaptureCreateContract,
   devtoolsCaptureListContract,
   devtoolsCaptureReadContract,
+  devtoolsCapturePinContract,
   devtoolsCaptureCompareContract,
+  devtoolsInteractionBeginContract,
+  devtoolsInteractionStopContract,
 ]
 
 /** Catalog entries for the meta tools, so `tools` listings and toolCount agree on the same set. */

@@ -14,12 +14,16 @@ export interface CommitAnalysisBudget {
   failed: number
   limit: number
   work: CommitWorkBudget
+  targetProcessed: number
+  targetSkipped: number
+  targetWork: CommitWorkBudget
   currentCommitEvidence: CurrentCommitEvidence
 }
 
 export function createCommitAnalysisBudget(
   limit = DEFAULT_COMMIT_FIBER_ANALYSIS_LIMIT,
   workOptions?: CommitWorkBudgetOptions,
+  targetWorkOptions?: CommitWorkBudgetOptions,
 ): CommitAnalysisBudget {
   return {
     processed: 0,
@@ -27,6 +31,13 @@ export function createCommitAnalysisBudget(
     failed: 0,
     limit,
     work: createCommitWorkBudget(workOptions),
+    targetProcessed: 0,
+    targetSkipped: 0,
+    targetWork: createCommitWorkBudget({
+      operationLimit: targetWorkOptions?.operationLimit ?? 4_000,
+      timeLimitMs: targetWorkOptions?.timeLimitMs ?? 4,
+      now: targetWorkOptions?.now ?? workOptions?.now,
+    }),
     currentCommitEvidence: {
       renderedFibers: new Set<Fiber>(),
       hostMutationFibers: new Set<Fiber>(),

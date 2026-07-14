@@ -3,6 +3,7 @@ import {
   reactComponentCohortContract,
   reactEffectAuditContract,
   reactGetRendersContract,
+  reactProvenanceContract,
   reactRenderCausesContract,
 } from './contracts'
 
@@ -25,6 +26,8 @@ describe('react_get_renders output contract', () => {
         completedAtAnalysisGeneration: 9,
       },
       summary: {
+        semantics: 'exact',
+        coverageDomain: 'render-measurement',
         commits: 1,
         trackedComponents: 1,
         totalRenders: 1,
@@ -147,14 +150,28 @@ describe('react_get_renders output contract', () => {
           },
           source: null,
           sourceAttribution: { role: 'unavailable', evidence: 'unknown' },
+          sourceProvenance: {
+            definitionSource: null,
+            allocationCallsite: null,
+            hookDefinitionOwner: null,
+            hookCallsite: null,
+            package: null,
+            sourceMapConfidence: 'unknown',
+            failureReason: 'source-unresolved',
+            usageOrDefinitionFallback: null,
+          },
           sourceOwnership: 'unknown',
           isLibrary: false,
         },
       ],
       omittedByLimit: 0,
+      comparable: true,
+      notComparableReasons: [],
       coverage: {
         complete: true,
         inputAttributionComplete: true,
+        semantics: 'exact',
+        coverageDomain: 'render-causality',
         skippedCommitFibers: 0,
         droppedUnmountFibers: 0,
         analysisFailedFibers: 0,
@@ -178,6 +195,27 @@ describe('react_get_renders output contract', () => {
         truncated: false,
       },
     })
+  })
+})
+
+describe('react_provenance contract', () => {
+  it('requires bounded, explicitly unresolved provenance accounting', () => {
+    const result = reactProvenanceContract.output.parse({
+      records: [],
+      summary: {
+        scanned: 0,
+        returned: 0,
+        resolved: 0,
+        unresolved: 0,
+        ownership: { app: 0, library: 0, unknown: 0 },
+        sourceMaps: { mapped: 0, served: 0, unknown: 0, status: 'unknown' },
+      },
+      omittedByLimit: 0,
+      truncated: false,
+    })
+
+    expect(result.summary.sourceMaps.status).toBe('unknown')
+    expect(reactProvenanceContract.input.parse({})).toEqual({ limit: 200, appOnly: false })
   })
 })
 
@@ -231,6 +269,8 @@ describe('react_render_causes contract', () => {
       coverage: {
         complete: true,
         inputAttributionComplete: true,
+        semantics: 'exact',
+        coverageDomain: 'render-causality',
         skippedCommitFibers: 0,
         droppedUnmountFibers: 0,
         analysisFailedFibers: 0,

@@ -111,6 +111,47 @@ describe('GenieClient', () => {
     client.stop()
   })
 
+  it('accepts a collision fork only for its current identity and re-announces readiness', () => {
+    const socket = new FakeSocket()
+    const identity = { logicalSessionId: 'cloned-logical', documentGeneration: 4 }
+    const client = createGenieClient({
+      appName: 'cloned app',
+      sessionIdentity: identity,
+      collectors: [],
+      socketFactory: () => socket,
+    })
+    client.start()
+    socket.open()
+
+    socket.receive({
+      kind: 'bridge/session-fork',
+      expectedLogicalSessionId: 'stale-logical',
+      logicalSessionId: 'ignored-logical',
+      documentGeneration: 1,
+      reason: 'logical-session-collision',
+      collisionWithSessionIds: ['other'],
+    })
+    socket.receive({
+      kind: 'bridge/session-fork',
+      expectedLogicalSessionId: 'cloned-logical',
+      logicalSessionId: 'forked-logical',
+      documentGeneration: 1,
+      reason: 'logical-session-collision',
+      collisionWithSessionIds: ['other'],
+    })
+
+    const frames = socket.decoded()
+    const hellos = frames.filter((frame) => frame.kind === 'app/hello')
+    expect(hellos).toHaveLength(2)
+    expect(hellos[1]).toMatchObject({
+      logicalSessionId: 'forked-logical',
+      documentGeneration: 1,
+    })
+    expect(frames.filter((frame) => frame.kind === 'app/ready')).toHaveLength(2)
+    expect(identity).toEqual({ logicalSessionId: 'forked-logical', documentGeneration: 1 })
+    client.stop()
+  })
+
   it('announces app info and tool descriptors on connect', () => {
     const { socket, client } = setup()
     client.start()

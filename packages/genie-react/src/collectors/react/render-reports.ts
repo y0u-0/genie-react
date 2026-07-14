@@ -1,3 +1,4 @@
+import { wrapperAncestryOf } from './fiber'
 import { countExternalStoreHooks, type RenderCauseEvent } from './render-causes'
 import {
   hasExactAppExternalStoreCallsite,
@@ -17,6 +18,7 @@ import {
   type FiberClassification,
   sourceAttributionForSource,
   sourceLabel,
+  sourceProvenanceForSource,
 } from './source'
 
 const SOURCE_CLASSIFY_LIMIT = 120
@@ -42,12 +44,18 @@ export interface ReportAttributionGuard {
   isCurrent: () => boolean
 }
 
-type ClassifiedRecord = { record: RenderRecord; report: RenderReport; libraryOnly: boolean }
+type ClassifiedRecord = {
+  record: RenderRecord
+  report: RenderReport
+  libraryOnly: boolean
+  appOwned: boolean
+}
 
 interface RecordSourceEvidence extends FiberClassification {
   hookSources: ExternalStoreSourceResolution
   externalStoreCount: number
   libraryOnly: boolean
+  appOwned: boolean
 }
 
 async function selectRecords(
@@ -67,8 +75,8 @@ function selectClassifiedRecords(
     const needle = query.component.toLowerCase()
     list = list.filter((entry) => entry.record.name.toLowerCase().includes(needle))
   }
-  if (query.appOnly === false) return { kept: list, libraryHidden: 0 }
-  const kept = list.filter((entry) => !entry.libraryOnly)
+  if (query.appOnly !== true) return { kept: list, libraryHidden: 0 }
+  const kept = list.filter((entry) => entry.appOwned)
   return { kept, libraryHidden: list.length - kept.length }
 }
 
@@ -81,11 +89,12 @@ async function classifyRecordReports(
     guard?.isCurrent() === false ? list.map(() => staleRecordSourceEvidence()) : resolvedEvidence
   return list.map((record, index): ClassifiedRecord => {
     const entry = evidence[index] ?? unknownRecordSourceEvidence()
-    const { source, isLibrary, hookSources, externalStoreCount, libraryOnly } = entry
+    const { source, isLibrary, hookSources, externalStoreCount, libraryOnly, appOwned } = entry
     const { fiber: _fiber, latestRenderEventId: _latestRenderEventId, ...rest } = record
     return {
       record,
       libraryOnly,
+      appOwned,
       report: {
         ...rest,
         causes: withReportEvidence(rest.causes, source, hookSources, externalStoreCount),
@@ -100,8 +109,10 @@ async function classifyRecordReports(
         name: rest.name === 'Anonymous' ? (sourceLabel(source) ?? rest.name) : rest.name,
         source,
         sourceAttribution: sourceAttributionForSource(source),
+        sourceProvenance: sourceProvenanceForSource(source),
         sourceOwnership: source ? (isLibrary ? 'library' : 'app') : 'unknown',
         isLibrary,
+        wrapperAncestry: wrapperAncestryOf(record.fiber),
       },
     }
   })
@@ -116,12 +127,14 @@ async function recordSourceEvidence(records: RenderRecord[]): Promise<RecordSour
     const classification = classes[index] ?? UNCLASSIFIED_FIBER
     const hooks = hookSources[index] ?? { status: 'deadline-exceeded', hooks: null }
     const externalStoreCount = countExternalStoreHooks(record.fiber)
+    const exactAppHook = hasExactAppExternalStoreCallsite(hooks, externalStoreCount)
+    const appOwned = (classification.source !== null && !classification.isLibrary) || exactAppHook
     return {
       ...classification,
       hookSources: hooks,
       externalStoreCount,
-      libraryOnly:
-        classification.isLibrary && !hasExactAppExternalStoreCallsite(hooks, externalStoreCount),
+      libraryOnly: classification.isLibrary && !exactAppHook,
+      appOwned,
     }
   })
 }
@@ -132,6 +145,7 @@ function unknownRecordSourceEvidence(): RecordSourceEvidence {
     hookSources: { status: 'deadline-exceeded', hooks: null },
     externalStoreCount: 0,
     libraryOnly: false,
+    appOwned: false,
   }
 }
 
@@ -141,6 +155,7 @@ function staleRecordSourceEvidence(): RecordSourceEvidence {
     hookSources: { status: 'report-state-advanced', hooks: null },
     externalStoreCount: 0,
     libraryOnly: false,
+    appOwned: false,
   }
 }
 
@@ -276,12 +291,16 @@ export async function buildRenderCauseEventsReport(
       sourceOwnership: eventSource ? (classification.isLibrary ? 'library' : 'app') : 'unknown',
       isLibrary: eventSource ? classification.isLibrary : false,
     }
-    return { event: reported, libraryOnly: isLatestEvent ? classification.libraryOnly : false }
+    return {
+      event: reported,
+      libraryOnly: isLatestEvent ? classification.libraryOnly : false,
+      appOwned: isLatestEvent ? classification.appOwned : false,
+    }
   })
   const visible =
-    query.appOnly === false ? classified : classified.filter(({ libraryOnly }) => !libraryOnly)
+    query.appOnly !== true ? classified : classified.filter(({ appOwned }) => appOwned)
   const libraryHidden =
-    query.appOnly === false ? 0 : classified.filter(({ libraryOnly }) => libraryOnly).length
+    query.appOnly !== true ? 0 : classified.filter(({ appOwned }) => !appOwned).length
   return {
     events: visible.slice(0, query.limit).map(({ event }) => event),
     libraryHidden,
@@ -315,12 +334,12 @@ export async function buildRendersLeaderboards(
 export async function buildRenderSummary(
   records: Map<number, RenderRecord>,
   commits: number,
-  appOnly = true,
+  appOnly = false,
 ): Promise<RenderSummary> {
   let list = [...records.values()]
   if (appOnly) {
     const evidence = await recordSourceEvidence(list)
-    list = list.filter((_, index) => !evidence[index]?.libraryOnly)
+    list = list.filter((_, index) => evidence[index]?.appOwned === true)
   }
   return summarizeRecords(list, commits)
 }
@@ -375,7 +394,7 @@ function summarizeRecords(list: RenderRecord[], commits: number): RenderSummary 
 
 export async function buildCurrentAggregates(
   records: Map<number, RenderRecord>,
-  appOnly = true,
+  appOnly = false,
   guard?: ReportAttributionGuard,
 ): Promise<ComponentAggregate[]> {
   const list = [...records.values()]
@@ -384,8 +403,8 @@ export async function buildCurrentAggregates(
     guard?.isCurrent() === false ? list.map(() => staleRecordSourceEvidence()) : resolvedEvidence
   const aggregates = new Map<string, ComponentAggregate>()
   list.forEach((record, index) => {
-    const { source, libraryOnly } = evidence[index] ?? unknownRecordSourceEvidence()
-    if (appOnly && libraryOnly) return
+    const { source, appOwned } = evidence[index] ?? unknownRecordSourceEvidence()
+    if (appOnly && !appOwned) return
     const displayLabel = sourceLabel(source)
     const canonicalSource = source
       ? `${source.file}:${source.line ?? '?'}:${source.column ?? '?'}`

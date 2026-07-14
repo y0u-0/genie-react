@@ -1,7 +1,13 @@
+import { access, link as linkFile, rename, rm, writeFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { verifyCaptureIntegrity } from 'genie-react/hub'
 import {
   type BridgeStatusMessage,
+  type CaptureDomain,
+  captureArtifactSchema,
   devtoolsCaptureCompareContract,
   devtoolsCaptureListContract,
+  devtoolsCapturePinContract,
   devtoolsCaptureReadContract,
   devtoolsStatusContract,
   devtoolsWaitContract,
@@ -15,7 +21,14 @@ import {
 } from './capture-output'
 import { normalizeBridgeUrl, resolveBridge } from './discovery'
 import { isRecord, isRecordArray } from './guards'
+import { setOutputContext } from './output-safety'
 import { reactSummarizers } from './react-output'
+import {
+  ResultSelectionError,
+  renderBoundedJson,
+  renderBoundedText,
+  selectResult,
+} from './result-selection'
 import { summarizeSessionsOnly, summarizeStatus } from './session-output'
 import {
   formatGroupIndex,
@@ -64,6 +77,14 @@ export interface AgentOptions {
   timeoutMs?: number
   /** `--fields id,name,…`: project the first array-of-records to these keys as JSONL (implies machine output). */
   fields?: string[]
+  /** Select nested output with JSON Pointer or a dotted wildcard path. */
+  select?: string
+  /** Hard byte ceiling for emitted command output, including the trailing newline. */
+  maxBytes?: number
+  /** Make a devtools_wait result with ok:false set a failing process status. */
+  failOnResultError?: boolean
+  /** Optional caller marker echoed by status machine output. */
+  marker?: string
   /** Status-only projection that omits app/domain/tool metadata. */
   sessionsOnly?: boolean
   /** Print startup and connection diagnostics to stderr. */
@@ -89,6 +110,8 @@ interface AgentFailureOptions {
   userActionRequired?: boolean
   retryInMs?: number
   next?: { command: string; argv: string[] }
+  correctedExample?: { tool: string; args: Record<string, unknown> }
+  busyTelemetry?: BridgeCallError['busyTelemetry']
 }
 
 /** Stable, stdout-clean failure payload for --json/--fields and inherently machine-readable commands. */
@@ -105,6 +128,10 @@ export function formatAgentFailure(
     userActionRequired: options.userActionRequired ?? false,
     ...(options.retryInMs === undefined ? {} : { retryInMs: options.retryInMs }),
     ...(options.next === undefined ? {} : { next: options.next }),
+    ...(options.correctedExample === undefined
+      ? {}
+      : { correctedExample: options.correctedExample }),
+    ...(options.busyTelemetry === undefined ? {} : { busyTelemetry: options.busyTelemetry }),
   })
 }
 
@@ -119,7 +146,9 @@ const err = (message: string): void => void process.stderr.write(`${message}\n`)
 const isMachineMode = (opts: AgentOptions): boolean =>
   opts.json === true ||
   opts.ndjson === true ||
-  (opts.fields !== undefined && opts.fields.length > 0)
+  (opts.fields !== undefined && opts.fields.length > 0) ||
+  opts.select !== undefined ||
+  opts.maxBytes !== undefined
 
 const BRIDGE_LOCAL_TOOLS = new Set([
   devtoolsStatusContract.name,
@@ -127,6 +156,7 @@ const BRIDGE_LOCAL_TOOLS = new Set([
   devtoolsCaptureListContract.name,
   devtoolsCaptureReadContract.name,
   devtoolsCaptureCompareContract.name,
+  devtoolsCapturePinContract.name,
 ])
 
 /** Bridge-local reads do not need a ready browser session. */
@@ -140,8 +170,9 @@ function emitFailure(
   message: string,
   options?: AgentFailureOptions,
 ): void {
-  if (isMachineMode(opts)) out(formatAgentFailure(reason, message, options))
-  else err(message)
+  if (isMachineMode(opts)) {
+    out(renderBoundedText(formatAgentFailure(reason, message, options), opts.maxBytes))
+  } else err(message)
 }
 
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_.-]{0,127}$/
@@ -209,9 +240,14 @@ export function renderResult(
   result: unknown,
   json?: boolean,
   fields?: string[],
+  select?: string,
+  maxBytes?: number,
 ): string {
-  if (fields && fields.length > 0) return projectFields(result, fields)
-  if (json) return JSON.stringify(result)
+  if (fields && fields.length > 0) return renderBoundedText(projectFields(result, fields), maxBytes)
+  const projected = select === undefined ? result : selectResult(result, select)
+  if (json || select !== undefined || maxBytes !== undefined) {
+    return renderBoundedJson(projected, maxBytes)
+  }
   const summarize = summarizers[tool]
   const text = summarize?.(result) ?? smallResultLine(result) ?? prettyJson(result)
   return withFilteredNote(text, result)
@@ -366,6 +402,8 @@ function summarizeQueryObserver(observer: Record<string, unknown>): string {
   if (observer.deliveryEvidence === 'unavailable-private-tracking')
     parts.push('delivery unavailable (private tracking)')
   else if (observer.deliveryEvidence === 'policy-explicit') parts.push('delivery policy explicit')
+  else if (observer.deliveryEvidence === 'public-track-prop-observed')
+    parts.push('public tracked fields observed')
   const subscriberStatus = subscriberObservationLabel(observer.subscriberObservationStatus)
   if (subscriberStatus) parts.push(subscriberStatus)
   else if (isRecord(observer.subscriber)) parts.push('subscriber freshness unknown')
@@ -487,6 +525,7 @@ export async function runCall(
   argsJson: string | undefined,
   opts: AgentOptions = {},
 ): Promise<number> {
+  setOutputContext({ operation: `call ${tool ?? '(missing tool)'}` })
   if (!tool) {
     emitFailure(
       opts,
@@ -538,22 +577,39 @@ export async function runCall(
       }
     }
     const result = await link.invoke(tool, args, undefined, { timeoutMs: opts.timeoutMs })
-    const rendered = renderResult(tool, result, opts.json, opts.fields)
+    const operationId = operationIdOf(result)
+    if (operationId) setOutputContext({ operation: `call ${tool}`, operationId })
+    const rendered = renderResult(tool, result, opts.json, opts.fields, opts.select, opts.maxBytes)
     if (rendered !== '') out(rendered)
-    return 0
+    return opts.failOnResultError && tool === devtoolsWaitContract.name && waitResultFailed(result)
+      ? 1
+      : 0
   } catch (error) {
     const code = error instanceof BridgeCallError ? error.errorCode : undefined
     const reason: AgentFailureReason =
-      error instanceof FieldSelectionError ? 'invalid_input' : (code ?? 'operational_failure')
+      error instanceof FieldSelectionError || error instanceof ResultSelectionError
+        ? 'invalid_input'
+        : (code ?? 'operational_failure')
     emitFailure(opts, reason, `Call to ${tool} failed${callErrorSuffix(error)}`, {
       retryInMs: error instanceof BridgeCallError ? error.retryInMs : undefined,
+      busyTelemetry: error instanceof BridgeCallError ? error.busyTelemetry : undefined,
       userActionRequired:
         reason === 'invalid_input' ||
         reason === 'invalid-args' ||
         reason === 'unknown-session' ||
         reason === 'operational_failure',
       ...(reason === 'invalid-args'
-        ? { next: toolHelpNext(tool) }
+        ? {
+            next: toolHelpNext(tool),
+            ...(tool === devtoolsWaitContract.name
+              ? {
+                  correctedExample: {
+                    tool: devtoolsWaitContract.name,
+                    args: { condition: 'ready', timeoutMs: 10_000 },
+                  },
+                }
+              : {}),
+          }
         : reason === 'unknown-session' || reason === 'operational_failure'
           ? { next: { command: 'genie-react status', argv: ['genie-react', 'status'] } }
           : {}),
@@ -561,6 +617,130 @@ export async function runCall(
     return 1
   } finally {
     link.close()
+  }
+}
+
+function waitResultFailed(result: unknown): boolean {
+  return isRecord(result) && result.ok === false
+}
+
+export function operationIdOf(result: unknown): string | undefined {
+  if (!isRecord(result)) return undefined
+  for (const field of [
+    'captureId',
+    'comparisonId',
+    'interactionId',
+    'notificationId',
+    'observationId',
+    'renderEventId',
+    'effectEventId',
+    'sessionId',
+  ] as const) {
+    const value = result[field]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
+export interface CaptureExportOptions extends AgentOptions {
+  output?: string
+  sections?: CaptureDomain[]
+  force?: boolean
+}
+
+/** Export one retained capture through a verified full read and an atomic local-file replacement. */
+export async function runCaptureExport(
+  captureId: string | undefined,
+  opts: CaptureExportOptions = {},
+): Promise<number> {
+  setOutputContext({
+    operation: 'capture export',
+    ...(captureId ? { operationId: captureId } : {}),
+  })
+  if (!captureId || !opts.output) {
+    emitFailure(
+      opts,
+      'invalid_input',
+      'Provide a capture ID and --output <path>. Run `genie-react capture export --help` for an example.',
+      { userActionRequired: true },
+    )
+    return 1
+  }
+  const outputPath = resolve(opts.cwd ?? process.cwd(), opts.output)
+  if (!opts.force && (await pathExists(outputPath))) {
+    emitFailure(
+      opts,
+      'invalid_input',
+      `Output already exists at ${JSON.stringify(outputPath)}. Choose another path or pass --force.`,
+      { userActionRequired: true },
+    )
+    return 1
+  }
+
+  const { link } = await connect(opts)
+  const temporaryPath = `${outputPath}.tmp-${process.pid}-${Date.now()}`
+  try {
+    const result = await link.invoke(devtoolsCaptureReadContract, {
+      captureId,
+      view: 'full',
+      ...(opts.sections === undefined ? {} : { sections: opts.sections }),
+    })
+    const capture = captureArtifactSchema.parse(result)
+    if (!verifyCaptureIntegrity(capture)) {
+      throw new Error(
+        `Capture ${JSON.stringify(captureId)} failed its SHA-256 integrity check; it was not written.`,
+      )
+    }
+    const contents = `${JSON.stringify(capture, null, 2)}\n`
+    await writeFile(temporaryPath, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    if (opts.force) await rename(temporaryPath, outputPath)
+    else {
+      await linkFile(temporaryPath, outputPath)
+      await rm(temporaryPath)
+    }
+    const exported = {
+      captureId,
+      outputPath,
+      bytesWritten: Buffer.byteLength(contents, 'utf8'),
+      checksum: capture.integrity?.digest ?? null,
+      sections: capture.include,
+    }
+    out(
+      renderResult('capture_export', exported, opts.json, opts.fields, opts.select, opts.maxBytes),
+    )
+    return 0
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => undefined)
+    const code = error instanceof BridgeCallError ? error.errorCode : undefined
+    emitFailure(
+      opts,
+      code ?? 'operational_failure',
+      `Capture export failed: ${errorMessage(error)}`,
+      {
+        retryInMs: error instanceof BridgeCallError ? error.retryInMs : undefined,
+        busyTelemetry: error instanceof BridgeCallError ? error.busyTelemetry : undefined,
+        userActionRequired: code !== 'busy' && code !== 'timeout',
+        next:
+          code === 'invalid-args'
+            ? {
+                command: 'genie-react call devtools_capture_list {}',
+                argv: ['genie-react', 'call', 'devtools_capture_list', '{}'],
+              }
+            : undefined,
+      },
+    )
+    return 1
+  } finally {
+    link.close()
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -625,6 +805,7 @@ interface BatchResult {
   errorCode?: string
   userActionRequired?: boolean
   retryInMs?: number
+  busyTelemetry?: BridgeCallError['busyTelemetry']
   next?: AgentFailureOptions['next']
 }
 
@@ -635,18 +816,27 @@ export async function runBatch(
   batchJson: string | undefined,
   opts: AgentOptions = {},
 ): Promise<number> {
+  setOutputContext({ operation: 'batch' })
   const raw = batchJson ?? (await readStdin())
   if (!raw.trim()) {
     out(
-      formatAgentFailure('invalid_input', 'Provide a JSON array argument or pipe one on stdin.', {
-        userActionRequired: true,
-      }),
+      renderBoundedText(
+        formatAgentFailure('invalid_input', 'Provide a JSON array argument or pipe one on stdin.', {
+          userActionRequired: true,
+        }),
+        opts.maxBytes,
+      ),
     )
     return 1
   }
   const parsed = parseBatchItems(raw)
   if ('error' in parsed) {
-    out(formatAgentFailure('invalid_input', parsed.error, { userActionRequired: true }))
+    out(
+      renderBoundedText(
+        formatAgentFailure('invalid_input', parsed.error, { userActionRequired: true }),
+        opts.maxBytes,
+      ),
+    )
     return 1
   }
 
@@ -658,8 +848,8 @@ export async function runBatch(
       schemaVersion: CLI_OUTPUT_SCHEMA_VERSION,
       ...result,
     }
-    if (opts.json) results.push(versioned)
-    else out(JSON.stringify(versioned))
+    if (opts.json || opts.maxBytes !== undefined) results.push(versioned)
+    else out(renderBoundedJson(versioned, opts.maxBytes))
   }
   try {
     const waitMs = opts.waitMs ?? 15_000
@@ -670,27 +860,38 @@ export async function runBatch(
       .catch(() => null)
     if (!ready?.ok) {
       out(
-        formatAgentFailure(
-          'not_connected',
-          'No app is connected. Start the dev server and open the app in a browser.',
-          {
-            userActionRequired: true,
-            next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
-          },
+        renderBoundedText(
+          formatAgentFailure(
+            'not_connected',
+            'No app is connected. Start the dev server and open the app in a browser.',
+            {
+              userActionRequired: true,
+              next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+            },
+          ),
+          opts.maxBytes,
         ),
       )
       return 1
     }
     for (const item of parsed.items) {
+      setOutputContext({ operation: `batch ${item.tool}` })
       try {
         const result = await link.invoke(item.tool, item.args, undefined, {
           timeoutMs: opts.timeoutMs,
         })
-        emitBatchResult({ tool: item.tool, ok: true, status: 'ok', result })
+        const operationId = operationIdOf(result)
+        setOutputContext({
+          operation: `batch ${item.tool}`,
+          ...(operationId ? { operationId } : {}),
+        })
+        const projected = opts.select === undefined ? result : selectResult(result, opts.select)
+        emitBatchResult({ tool: item.tool, ok: true, status: 'ok', result: projected })
       } catch (error) {
         anyFailed = true
         const errorCode = error instanceof BridgeCallError ? error.errorCode : undefined
         const userActionRequired =
+          error instanceof ResultSelectionError ||
           errorCode === 'invalid-args' ||
           errorCode === 'unknown-session' ||
           errorCode === 'not-connected'
@@ -698,13 +899,19 @@ export async function runBatch(
           tool: item.tool,
           ok: false,
           status: 'error',
-          reason: errorCode ?? 'operational_failure',
+          reason:
+            error instanceof ResultSelectionError
+              ? 'invalid_input'
+              : (errorCode ?? 'operational_failure'),
           message: errorMessage(error),
           error: errorMessage(error),
           ...(errorCode ? { errorCode } : {}),
           userActionRequired,
           ...(error instanceof BridgeCallError && error.retryInMs !== undefined
             ? { retryInMs: error.retryInMs }
+            : {}),
+          ...(error instanceof BridgeCallError && error.busyTelemetry !== undefined
+            ? { busyTelemetry: error.busyTelemetry }
             : {}),
           ...(errorCode === 'invalid-args'
             ? { next: toolHelpNext(item.tool) }
@@ -714,7 +921,15 @@ export async function runBatch(
         })
       }
     }
-    if (opts.json) out(JSON.stringify(results))
+    if (opts.json) out(renderBoundedJson(results, opts.maxBytes))
+    else if (opts.maxBytes !== undefined) {
+      out(
+        renderBoundedText(
+          results.map((result) => JSON.stringify(result)).join('\n'),
+          opts.maxBytes,
+        ),
+      )
+    }
     return anyFailed ? 1 : 0
   } finally {
     link.close()
@@ -738,13 +953,14 @@ function readStdin(): Promise<string> {
 }
 
 export async function runStatus(opts: AgentOptions = {}): Promise<number> {
+  setOutputContext({ operation: 'status' })
   const { link, url } = await connect(opts)
   try {
     const status = await link.invoke(devtoolsStatusContract, { includeTools: false })
     // A 0.1.0 bridge predates the `sessions` field; the typed contract can't see that skew.
     const sessions = Array.isArray(status.sessions) ? status.sessions : []
     // Preamble on stderr so stdout stays pure (parseable) — important for `--json` and piping.
-    if (!opts.json) {
+    if (!isMachineMode(opts)) {
       err(`bridge: ${url}`)
       err(
         `run from any dir: genie-react --url ${shellQuote(url)} call react_get_renders '{"sort":"selfTime"}'`,
@@ -755,9 +971,25 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
         )
       err('')
     }
+    const selectorSource = opts.session
+      ? 'flag'
+      : process.env.GENIE_SESSION
+        ? 'environment'
+        : 'implicit-current'
+    const statusMetadata = {
+      selectedBridgeUrl: url,
+      sessionSelector: {
+        requested: resolveSession(opts.session) ?? null,
+        source: selectorSource,
+        resolvedSessionId: status.sessionId,
+        implicit: resolveSession(opts.session) === undefined,
+      },
+      ...(opts.marker === undefined ? {} : { marker: opts.marker }),
+    }
     const result = opts.sessionsOnly
       ? {
           schemaVersion: CLI_OUTPUT_SCHEMA_VERSION,
+          ...statusMetadata,
           connected: status.connected,
           ready: status.ready,
           sessionId: status.sessionId,
@@ -776,22 +1008,35 @@ export async function runStatus(opts: AgentOptions = {}): Promise<number> {
             ...(session.successorSessionId === undefined
               ? {}
               : { successorSessionId: session.successorSessionId }),
+            logicalSessionCollision: session.logicalSessionCollision,
+            collisionWithSessionIds: session.collisionWithSessionIds,
+            ...(session.forkedFromLogicalSessionId === undefined
+              ? {}
+              : { forkedFromLogicalSessionId: session.forkedFromLogicalSessionId }),
             connectedAt: session.connectedAt,
             ready: session.ready,
             ...(session.readyAt === undefined ? {} : { readyAt: session.readyAt }),
             current: session.current,
             ...(session.staleMs === undefined ? {} : { staleMs: session.staleMs }),
           })),
+          warnings: status.warnings,
         }
-      : { schemaVersion: CLI_OUTPUT_SCHEMA_VERSION, ...status }
+      : { schemaVersion: CLI_OUTPUT_SCHEMA_VERSION, ...statusMetadata, ...status }
     const targetSessionId =
       resolveSession(opts.session) === undefined ? undefined : (status.sessionId ?? undefined)
     out(
-      opts.sessionsOnly && !opts.json
+      opts.sessionsOnly && !isMachineMode(opts)
         ? summarizeSessionsOnly(result, { targetSessionId })
-        : !opts.json && targetSessionId
+        : !isMachineMode(opts) && targetSessionId
           ? (summarizeStatus(result, { targetSessionId }) ?? prettyJson(result))
-          : renderResult('devtools_status', result, opts.json),
+          : renderResult(
+              'devtools_status',
+              result,
+              opts.json,
+              opts.fields,
+              opts.select,
+              opts.maxBytes,
+            ),
     )
     return 0
   } catch (error) {
@@ -812,6 +1057,7 @@ export async function runTools(
   selector: string | undefined,
   opts: AgentOptions = {},
 ): Promise<number> {
+  setOutputContext({ operation: 'tools' })
   const { link } = await connect(opts)
   try {
     const pinned = resolveSession(opts.session)
@@ -837,20 +1083,17 @@ export async function runTools(
       const selection = resolveToolsSelector(tools, selector)
       switch (selection.kind) {
         case 'tool':
-          out(opts.json ? JSON.stringify(selection.tool) : formatToolDetail(selection.tool))
+          emitToolsResult(opts, selection.tool, formatToolDetail(selection.tool))
           return 0
         case 'group': {
-          if (opts.json) {
-            out(JSON.stringify(selection.tools.map(slimDescriptor)))
-            return 0
-          }
+          const value = selection.tools.map(slimDescriptor)
           const listing = formatToolsListing({ app: status.app, tools: selection.tools })
           const actions = relatedActions(tools, selector)
-          out(
+          const human =
             actions.length > 0
               ? `${listing}\n\nmutations for this domain live in "action": ${actions.join(', ')} — details: genie-react tools <tool>`
-              : listing,
-          )
+              : listing
+          emitToolsResult(opts, value, human)
           return 0
         }
         case 'unknown':
@@ -863,28 +1106,39 @@ export async function runTools(
     }
 
     if (opts.all) {
-      out(
-        opts.json
-          ? JSON.stringify({ app: status.app, tools })
-          : formatToolsListing({ app: status.app, tools }),
+      emitToolsResult(
+        opts,
+        { app: status.app, tools },
+        formatToolsListing({ app: status.app, tools }),
       )
       return 0
     }
-    out(
-      opts.json
-        ? JSON.stringify(groupIndex(status.app?.name, tools))
-        : formatGroupIndex(status.app?.name, tools),
-    )
+    const index = groupIndex(status.app?.name, tools)
+    emitToolsResult(opts, index, formatGroupIndex(status.app?.name, tools))
     return 0
   } catch (error) {
-    emitFailure(opts, 'operational_failure', `Tool discovery failed: ${errorMessage(error)}`, {
-      userActionRequired: true,
-      next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
-    })
+    emitFailure(
+      opts,
+      error instanceof ResultSelectionError ? 'invalid_input' : 'operational_failure',
+      `Tool discovery failed: ${errorMessage(error)}`,
+      {
+        userActionRequired: true,
+        next: { command: 'genie-react status', argv: ['genie-react', 'status'] },
+      },
+    )
     return 1
   } finally {
     link.close()
   }
+}
+
+function emitToolsResult(opts: AgentOptions, value: unknown, human: string): void {
+  if (opts.select !== undefined || opts.maxBytes !== undefined) {
+    const selected = opts.select === undefined ? value : selectResult(value, opts.select)
+    out(renderBoundedJson(selected, opts.maxBytes))
+    return
+  }
+  out(opts.json ? JSON.stringify(value) : human)
 }
 
 function waitForTools(

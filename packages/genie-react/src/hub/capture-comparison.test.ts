@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { CaptureArtifact, CaptureMetric } from '../protocol'
+import {
+  type CaptureArtifact,
+  type CaptureMetric,
+  devtoolsCaptureCompareContract,
+} from '../protocol'
 import { compareCaptureCohorts, summarizeSamples } from './capture-comparison'
 
 interface FixtureMetrics {
@@ -46,7 +50,10 @@ function capture(id: string, metrics: FixtureMetrics, reactVersion = '19.2.7'): 
               summary: {
                 totalRenders: metrics.renders,
                 totalUpdates: metrics.updates,
+                semantics: 'exact',
               },
+              comparable: true,
+              notComparableReasons: [],
               components:
                 metrics.unnecessary === undefined || metrics.selfTimeMs === undefined
                   ? []
@@ -102,6 +109,9 @@ function capture(id: string, metrics: FixtureMetrics, reactVersion = '19.2.7'): 
               avgFps: metrics.avgFps,
               droppedFrames: metrics.droppedFrames,
               hidden: metrics.hidden ?? false,
+              comparable: !(metrics.hidden ?? false),
+              notComparableReasons: metrics.hidden ? ['document-hidden-during-sample'] : [],
+              refreshRate: 60,
             },
           },
         },
@@ -133,6 +143,10 @@ function compare(
       candidateCaptureIds: candidate.map((item) => item.captureId),
       metrics,
       minimumRuns,
+      warmupRuns: 0,
+      outlierThreshold: 3.5,
+      confidenceLevel: 0.95,
+      minimumEffectPct: 0,
       budgets,
     },
     { comparisonId: 'cmp_test', createdAt: '2026-07-13T09:00:00.000Z' },
@@ -161,16 +175,47 @@ describe('summarizeSamples', () => {
 })
 
 describe('compareCaptureCohorts', () => {
+  it('rejects the minority value in a three-run zero-MAD cohort', () => {
+    const baseline = [30, 30, 30].map((renders, index) => capture(`b-mad-${index}`, { renders }))
+    const candidate = [2, 30, 30].map((renders, index) => capture(`c-mad-${index}`, { renders }))
+
+    const result = compare(baseline, candidate, ['react.renders'], [], 2)
+
+    expect(result.metrics[0]).toMatchObject({
+      candidate: { samples: 2, median: 30 },
+      outlierCandidateCaptureIds: ['c-mad-0'],
+    })
+  })
+
+  it('defaults to five usable runs after one warm-up capture', () => {
+    const parsed = devtoolsCaptureCompareContract.input.parse({
+      baselineCaptureIds: ['b1'],
+      candidateCaptureIds: ['c1'],
+    })
+
+    expect(parsed).toMatchObject({
+      minimumRuns: 5,
+      warmupRuns: 1,
+      outlierThreshold: 3.5,
+      confidenceLevel: 0.95,
+      minimumEffectPct: 5,
+    })
+  })
+
   it('fails lower- and higher-is-better percentage budgets from cohort medians', () => {
     const baseline = [
-      capture('b1', { renders: 9, avgFps: 61 }),
+      capture('b1', { renders: 10, avgFps: 60 }),
       capture('b2', { renders: 10, avgFps: 60 }),
-      capture('b3', { renders: 11, avgFps: 59 }),
+      capture('b3', { renders: 10, avgFps: 60 }),
+      capture('b4', { renders: 10, avgFps: 60 }),
+      capture('b5', { renders: 10, avgFps: 60 }),
     ]
     const candidate = [
-      capture('c1', { renders: 11, avgFps: 56 }),
+      capture('c1', { renders: 12, avgFps: 55 }),
       capture('c2', { renders: 12, avgFps: 55 }),
-      capture('c3', { renders: 13, avgFps: 54 }),
+      capture('c3', { renders: 12, avgFps: 55 }),
+      capture('c4', { renders: 12, avgFps: 55 }),
+      capture('c5', { renders: 12, avgFps: 55 }),
     ]
     const result = compare(
       baseline,
@@ -180,16 +225,17 @@ describe('compareCaptureCohorts', () => {
         { metric: 'react.renders', maxRegressionPct: 10 },
         { metric: 'performance.avgFps', maxRegressionPct: 5 },
       ],
+      5,
     )
 
-    expect(result.overall).toBe('fail')
+    expect(result.overall, JSON.stringify(result.metrics)).toBe('fail')
     expect(result.violations.map((violation) => violation.metric)).toEqual([
       'react.renders',
       'performance.avgFps',
     ])
     expect(result.metrics[0]).toMatchObject({
-      baseline: { samples: 3, median: 10 },
-      candidate: { samples: 3, median: 12 },
+      baseline: { samples: 5, median: 10 },
+      candidate: { samples: 5, median: 12 },
       delta: { median: 2, regressionPct: 20 },
       verdict: 'fail',
     })
@@ -249,11 +295,219 @@ describe('compareCaptureCohorts', () => {
       [{ metric: 'performance.avgFps', minValue: 50 }],
       1,
     )
-    expect(result.overall).toBe('insufficient-data')
+    expect(result.overall).toBe('not-comparable')
     expect(result.metrics[0]).toMatchObject({
       candidate: { samples: 0, median: null },
       missingCandidateCaptureIds: ['c1'],
     })
     expect(result.warnings[0]).toContain('2 runtime fingerprints')
+  })
+
+  it('excludes warm-up runs and robust zero-MAD outliers before summarizing', () => {
+    const baseline = [100, 10, 10, 10, 10, 10].map((renders, index) =>
+      capture(`b${index}`, { renders }),
+    )
+    const candidate = [200, 10, 10, 10, 10, 1000].map((renders, index) =>
+      capture(`c${index}`, { renders }),
+    )
+    const result = compareCaptureCohorts(
+      baseline,
+      candidate,
+      {
+        baselineCaptureIds: baseline.map((item) => item.captureId),
+        candidateCaptureIds: candidate.map((item) => item.captureId),
+        metrics: ['react.renders'],
+        minimumRuns: 4,
+        warmupRuns: 1,
+        outlierThreshold: 3.5,
+        confidenceLevel: 0.95,
+        minimumEffectPct: 5,
+        budgets: [{ metric: 'react.renders', maxRegressionPct: 0 }],
+      },
+      { comparisonId: 'cmp_warmup', createdAt: '2026-07-13T09:00:00.000Z' },
+    )
+
+    expect(result.excluded).toMatchObject({
+      warmupBaselineCaptureIds: ['b0'],
+      warmupCandidateCaptureIds: ['c0'],
+    })
+    expect(result.metrics[0]).toMatchObject({
+      baseline: { samples: 5, median: 10 },
+      candidate: { samples: 4, median: 10 },
+      outlierCandidateCaptureIds: ['c5'],
+      verdict: 'pass',
+    })
+  })
+
+  it('returns inconclusive for an A/A-sized regression inside the measured noise floor', () => {
+    const baseline = [9, 11, 9, 11, 10].map((renders, index) => capture(`b${index}`, { renders }))
+    const candidate = [10, 12, 10, 12, 11].map((renders, index) =>
+      capture(`c${index}`, { renders }),
+    )
+    const result = compareCaptureCohorts(
+      baseline,
+      candidate,
+      {
+        baselineCaptureIds: baseline.map((item) => item.captureId),
+        candidateCaptureIds: candidate.map((item) => item.captureId),
+        metrics: ['react.renders'],
+        minimumRuns: 5,
+        warmupRuns: 0,
+        outlierThreshold: 3.5,
+        confidenceLevel: 0.95,
+        minimumEffectPct: 5,
+        budgets: [{ metric: 'react.renders', maxRegressionPct: 0 }],
+      },
+      { comparisonId: 'cmp_noise', createdAt: '2026-07-13T09:00:00.000Z' },
+    )
+
+    expect(result.overall).toBe('inconclusive')
+    expect(result.metrics[0]).toMatchObject({ verdict: 'inconclusive' })
+    expect(result.metrics[0]?.confidence.significant).toBe(false)
+  })
+
+  it('refuses incomplete React evidence and refresh-mode-mismatched FPS evidence', () => {
+    const incomplete = capture('c-incomplete', { renders: 12 })
+    const renderResult = incomplete.sections.react?.tools.react_get_renders?.result as Record<
+      string,
+      unknown
+    >
+    renderResult.comparable = false
+    renderResult.notComparableReasons = ['render-input-attribution-incomplete']
+
+    const changedMode = capture('c-mode', { avgFps: 55 })
+    const fpsResult = changedMode.sections.performance?.tools.browser_fps?.result as Record<
+      string,
+      unknown
+    >
+    fpsResult.comparable = false
+    fpsResult.notComparableReasons = ['inferred-refresh-rate-mode-mismatch']
+
+    const renderComparison = compare(
+      [capture('b-render', { renders: 10 })],
+      [incomplete],
+      ['react.renders'],
+      [{ metric: 'react.renders', maxRegressionPct: 0 }],
+      1,
+    )
+    const fpsComparison = compare(
+      [capture('b-fps', { avgFps: 60 })],
+      [changedMode],
+      ['performance.avgFps'],
+      [{ metric: 'performance.avgFps', maxRegressionPct: 0 }],
+      1,
+    )
+
+    expect(renderComparison.overall).toBe('not-comparable')
+    expect(renderComparison.metrics[0]?.notComparableReasons).toContain(
+      'render-input-attribution-incomplete',
+    )
+    expect(fpsComparison.overall).toBe('not-comparable')
+    expect(fpsComparison.metrics[0]?.notComparableReasons).toContain(
+      'inferred-refresh-rate-mode-mismatch',
+    )
+  })
+
+  it('refuses FPS cohorts whose inferred refresh rates differ between samples', () => {
+    const baseline = capture('b-refresh', { avgFps: 60 })
+    const candidate = capture('c-refresh', { avgFps: 120 })
+    const candidateFps = candidate.sections.performance?.tools.browser_fps?.result as Record<
+      string,
+      unknown
+    >
+    candidateFps.refreshRate = 120
+
+    const result = compare(
+      [baseline],
+      [candidate],
+      ['performance.avgFps'],
+      [{ metric: 'performance.avgFps', minValue: 50 }],
+      1,
+    )
+
+    expect(result.overall).toBe('not-comparable')
+    expect(result.metrics[0]?.notComparableReasons).toContain('inferred-refresh-rate-mode-mismatch')
+  })
+
+  it('refuses React cohorts collected under different coverage policies', () => {
+    const baseline = capture('b-policy', { renders: 10 })
+    const candidate = capture('c-policy', { renders: 10 })
+    for (const [artifact, fiberLimit] of [
+      [baseline, 2_000],
+      [candidate, 4_000],
+    ] as const) {
+      const result = artifact.sections.react?.tools.react_get_renders?.result as Record<
+        string,
+        unknown
+      >
+      result.coverage = {
+        complete: true,
+        inputAttributionComplete: true,
+        semantics: 'exact',
+        coverageDomain: 'render-measurement',
+        targeted: { components: ['Checkout'], roots: [7] },
+        observationBudget: {
+          adaptive: true,
+          adaptiveScale: 1,
+          fiberLimit,
+          operationLimit: 20_000,
+          timeLimitMs: 12,
+          targetOperationReserve: 4_000,
+          targetTimeReserveMs: 4,
+          lifecycleBufferLimit: 2_000,
+          lifecycleTargetReserve: 200,
+        },
+      }
+    }
+
+    const result = compare(
+      [baseline],
+      [candidate],
+      ['react.renders'],
+      [{ metric: 'react.renders', maxRegressionPct: 0 }],
+      1,
+    )
+
+    expect(result.overall).toBe('not-comparable')
+    expect(result.metrics[0]?.notComparableReasons).toContain(
+      'render-coverage-policy-mismatch-between-cohorts',
+    )
+  })
+
+  it('refuses component-derived metrics when the capture recipe truncated the component list', () => {
+    const baseline = capture('b-truncated-components', {
+      unnecessary: 1,
+      selfTimeMs: 2,
+    })
+    const candidate = capture('c-truncated-components', {
+      unnecessary: 1,
+      selfTimeMs: 2,
+    })
+    const result = candidate.sections.react?.tools.react_get_renders?.result as Record<
+      string,
+      unknown
+    >
+    result.omittedByLimit = 3
+
+    const comparison = compare(
+      [baseline],
+      [candidate],
+      ['react.unnecessary', 'react.selfTimeMs'],
+      [
+        { metric: 'react.unnecessary', maxRegressionPct: 0 },
+        { metric: 'react.selfTimeMs', maxRegressionPct: 0 },
+      ],
+      1,
+    )
+
+    expect(comparison.overall).toBe('not-comparable')
+    expect(comparison.metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          verdict: 'not-comparable',
+          notComparableReasons: ['render-component-list-truncated'],
+        }),
+      ]),
+    )
   })
 })

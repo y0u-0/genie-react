@@ -1,6 +1,6 @@
 import type { Fiber, ReactRenderer, RendererRefreshUpdate } from 'bippy'
 import type { ReactRefreshHandler, ReactRefreshUpdate } from 'bippy/react-refresh'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   renderers: new Map<number, ReactRenderer>(),
@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   clearSourceCache: vi.fn(),
   registerFiber: vi.fn((fiber: { id?: number }) => (fiber.id ?? 0) as never),
   nameOf: vi.fn((fiber: { name?: string }) => fiber.name ?? 'Anonymous'),
+  probeViteClient: false,
 }))
 
 const unsubscribe = (dispose: () => void) => Object.assign(dispose, { [Symbol.dispose]: dispose })
@@ -28,6 +29,7 @@ vi.mock('bippy', () => ({
 
 vi.mock('bippy/react-refresh', () => ({
   instrumentReactRefresh: ({ onRefresh }: { onRefresh?: ReactRefreshHandler }) => {
+    if (mocks.probeViteClient) void fetch('/@vite/client')
     mocks.refreshHandler = onRefresh ?? null
     return unsubscribe(() => {
       if (mocks.refreshHandler === onRefresh) mocks.refreshHandler = null
@@ -79,9 +81,75 @@ beforeEach(() => {
   mocks.clearSourceCache.mockClear()
   mocks.registerFiber.mockClear()
   mocks.nameOf.mockClear()
+  mocks.probeViteClient = false
+})
+
+afterEach(() => {
+  tracker.disposeRefreshTracking()
+  vi.unstubAllGlobals()
 })
 
 describe('refresh tracking', () => {
+  it("blocks bippy's false Vite probe inside a Turbopack client without replacing fetch", () => {
+    const networkFetch = vi.fn<typeof fetch>()
+    vi.stubGlobal('window', globalThis)
+    vi.stubGlobal('TURBOPACK_CHUNK_LISTS', [])
+    vi.stubGlobal('fetch', networkFetch)
+    mocks.probeViteClient = true
+
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    expect(networkFetch).not.toHaveBeenCalled()
+    expect(globalThis.fetch).toBe(networkFetch)
+  })
+
+  it('recognizes a streamed Next document before Turbopack globals initialize', () => {
+    const networkFetch = vi.fn<typeof fetch>()
+    vi.stubGlobal('window', globalThis)
+    vi.stubGlobal('document', {
+      querySelector: vi.fn((selector: string) =>
+        selector.includes('/_next/') ? { href: '/_next/static/app.css' } : null,
+      ),
+    })
+    vi.stubGlobal('fetch', networkFetch)
+    mocks.probeViteClient = true
+
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    expect(networkFetch).not.toHaveBeenCalled()
+    expect(globalThis.fetch).toBe(networkFetch)
+  })
+
+  it("blocks bippy's false Vite probe in a plain browser document", () => {
+    const networkFetch = vi.fn<typeof fetch>()
+    vi.stubGlobal('window', globalThis)
+    vi.stubGlobal('document', { querySelector: vi.fn(() => null) })
+    vi.stubGlobal('fetch', networkFetch)
+    mocks.probeViteClient = true
+
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    expect(networkFetch).not.toHaveBeenCalled()
+    expect(globalThis.fetch).toBe(networkFetch)
+  })
+
+  it("leaves bippy's Vite probe enabled when the document loads Vite's client", () => {
+    const networkFetch = vi.fn<typeof fetch>()
+    vi.stubGlobal('window', globalThis)
+    vi.stubGlobal('document', {
+      querySelector: vi.fn((selector: string) =>
+        selector.includes('@vite/client') ? { src: '/@vite/client' } : null,
+      ),
+    })
+    vi.stubGlobal('fetch', networkFetch)
+    mocks.probeViteClient = true
+
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    expect(networkFetch).toHaveBeenCalledOnce()
+    expect(networkFetch).toHaveBeenCalledWith('/@vite/client')
+  })
+
   it('captures files, preserved/remounted fibers, invalidates sources, and counts excluded commits', async () => {
     const updated = fiber(1, 'Counter', '/src/Counter.tsx')
     const remounted = fiber(2, 'Form', '/src/Form.tsx')

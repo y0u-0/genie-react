@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import { dehydrate } from '../../protocol'
-import { querySubscriberObservationFor } from '../causal/external-store-registry'
+import {
+  queryObservedTracking,
+  querySubscriberObservationFor,
+} from '../causal/external-store-registry'
 import {
   callObserverMethod,
   queryObserverIdentity,
@@ -55,7 +58,11 @@ export const queryObserverSummarySchema = z.object({
     fields: z.array(z.string()).optional(),
     trackedFieldsAvailable: z.boolean(),
   }),
-  deliveryEvidence: z.enum(['policy-explicit', 'unavailable-private-tracking']),
+  deliveryEvidence: z.enum([
+    'policy-explicit',
+    'public-track-prop-observed',
+    'unavailable-private-tracking',
+  ]),
   hasSelect: z.boolean(),
   enabled: z.union([z.boolean(), z.enum(['default', 'dynamic'])]),
   currentResult: z.unknown(),
@@ -109,6 +116,15 @@ function knownQueryResult(value: unknown): Record<string, unknown> | undefined {
 export function summarizeQueryObserver(observer: object) {
   const subscriberObservation = querySubscriberObservationFor(observer)
   const identity = queryObserverIdentity(observer)
+  const observedTracking = queryObservedTracking(observer)
+  const notificationPolicy =
+    identity.notificationPolicy.mode === 'auto-tracked' && observedTracking.coverage === 'exact'
+      ? {
+          ...identity.notificationPolicy,
+          fields: observedTracking.fields,
+          trackedFieldsAvailable: true,
+        }
+      : identity.notificationPolicy
   const options = queryObserverOptions(observer)
   const current = callObserverMethod(observer, 'getCurrentResult')
   const currentResult = current.ok ? current.value : undefined
@@ -121,11 +137,13 @@ export function summarizeQueryObserver(observer: object) {
   return {
     observerId: identity.observerId,
     identityStatus: identity.identityStatus,
-    notificationPolicy: identity.notificationPolicy,
+    notificationPolicy,
     deliveryEvidence:
       identity.notificationPolicy.mode === 'all' || identity.notificationPolicy.mode === 'fields'
         ? ('policy-explicit' as const)
-        : ('unavailable-private-tracking' as const),
+        : observedTracking.coverage === 'exact'
+          ? ('public-track-prop-observed' as const)
+          : ('unavailable-private-tracking' as const),
     hasSelect: identity.hasSelect,
     enabled: enabledState,
     currentResult: dehydrate(retainedResult, { depth: 2 }),

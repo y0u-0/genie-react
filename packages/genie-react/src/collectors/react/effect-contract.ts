@@ -116,6 +116,13 @@ const effectFindingSchema = z.object({
       .describe(
         'Bounded custom-hook wrappers above this effect. Present only when effect count/order alignment is exact.',
       ),
+    definitionSource: z.null().describe('Reserved for exact effect definition evidence.'),
+    allocationCallsite: z.null().describe('Effects do not expose allocation callsites.'),
+    hookDefinitionOwner: sourceSchema,
+    hookCallsite: sourceSchema,
+    package: z.string().nullable().describe('Alias of the owning package for split provenance.'),
+    sourceMapConfidence: z.enum(['mapped', 'served', 'unknown']),
+    failureReason: z.enum(['hook-provenance-unavailable']).nullable(),
   }),
   hotness: effectHotnessSchema.describe(
     'Thresholded classification plus a 95% Wilson interval for the observed schedule rate.',
@@ -139,7 +146,7 @@ export const reactEffectAuditContract = defineAgentToolContract({
         .boolean()
         .default(true)
         .describe(
-          'Exclude library components AND library-origin effects (node_modules, incl. Vite pre-bundled deps) so your own effects surface above hook noise; set false to include them.',
+          'Include only effects with app provenance. Library and unknown ownership are excluded so unresolved evidence is never attributed to your app; set false to inspect all provenance.',
         ),
       packageName: z
         .string()
@@ -237,55 +244,134 @@ export const reactEffectAuditContract = defineAgentToolContract({
   annotations: { readOnlyHint: true },
 })
 
+const effectEventsInputSchema = z.object({
+  component: z.string().optional(),
+  afterDocumentCommitId: z.number().int().nonnegative().optional(),
+  limit: z.number().int().min(1).max(500).default(100),
+})
+
+const observedEffectRunSchema = z.object({
+  status: z.literal('observed'),
+  evidence: z.literal('exact'),
+  startedAt: z.number(),
+  completedAt: z.number(),
+  durationMs: z.number().nonnegative(),
+  outcome: z.enum(['completed', 'threw']),
+  error: z.string().optional(),
+})
+
+const effectEventSchema = z.object({
+  effectEventId: z.string(),
+  effectId: z.string(),
+  observationId: z.string().nullable(),
+  commitId: z.number().int().nonnegative(),
+  documentCommitId: z.number().int().nonnegative(),
+  componentId: z.number().int(),
+  componentName: z.string(),
+  mountId: z.string(),
+  effectIndex: z.number().int().nonnegative(),
+  kind: z.enum(['effect', 'layout', 'insertion']),
+  phase: z.enum(['mount', 'update']),
+  event: z.literal('scheduled'),
+  evidence: z.literal('exact'),
+  changedDependencySlots: z.array(z.number().int().nonnegative()),
+  changedDependencySlotsOmitted: z.number().int().nonnegative(),
+  dependencySlotsUnscanned: z.number().int().nonnegative(),
+  execution: z.union([
+    observedEffectRunSchema,
+    z.object({
+      status: z.literal('unobserved'),
+      reason: z.enum([
+        'not-yet-observed',
+        'unsupported-effect-kind',
+        'instrumentation-unavailable',
+      ]),
+    }),
+  ]),
+  cleanupExecution: z.union([
+    observedEffectRunSchema,
+    z.object({
+      status: z.literal('unobserved'),
+      reason: z.enum(['not-yet-observed', 'no-cleanup-returned', 'instrumentation-unavailable']),
+    }),
+  ]),
+  consequences: z.object({
+    status: z.literal('instrumented'),
+    observedDomains: z.tuple([
+      z.literal('query-notification'),
+      z.literal('router-notification'),
+      z.literal('react-commit'),
+    ]),
+    unobservedDomains: z.tuple([
+      z.literal('state-update'),
+      z.literal('external-store-write'),
+      z.literal('network'),
+      z.literal('event-listener'),
+      z.literal('navigation'),
+    ]),
+    events: z.array(
+      z.union([
+        z.object({
+          kind: z.literal('notification'),
+          domain: z.enum(['query-notification', 'router-notification']),
+          notificationId: z.string(),
+          timestamp: z.number(),
+          evidence: z.literal('exact'),
+        }),
+        z.object({
+          kind: z.literal('resulting-commit'),
+          documentCommitId: z.number().int().nonnegative(),
+          timestamp: z.number(),
+          evidence: z.literal('inferred'),
+          reason: z.literal('next-commit-after-effect-execution'),
+        }),
+      ]),
+    ),
+  }),
+  timeline: z.array(
+    z.object({
+      stage: z.enum(['schedule', 'execution', 'cleanup', 'consequence', 'resulting-commit']),
+      timestamp: z.number(),
+      evidence: z.enum(['exact', 'inferred']),
+      referenceId: z.string().optional(),
+      outcome: z.enum(['completed', 'threw']).optional(),
+    }),
+  ),
+})
+
+const effectEventsOutputSchema = z.object({
+  tracking: z.boolean(),
+  documentCommitId: z.number().int().nonnegative(),
+  observation: observationSchema.nullable(),
+  events: z.array(effectEventSchema),
+  omittedByLimit: z.number().int().nonnegative(),
+  evictedEvents: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Schedule events evicted from the retained history.'),
+  droppedEvents: z.number().int().nonnegative().describe('Legacy alias for evictedEvents.'),
+  coverage: effectCoverageSchema,
+})
+
 export const reactEffectEventsContract = defineAgentToolContract({
   name: 'react_effect_events',
-  title: 'Recent effect schedules',
+  title: 'Recent effect timeline events',
   description:
-    'Report bounded effect schedule events joined to observation, commit, component, mount, and effect IDs. Execution, cleanup execution, and downstream consequences stay explicitly unobserved; no timestamp-only causal edge is emitted.',
+    'Report bounded effect schedules joined to exact passive execution and cleanup observations, exact Query/Router notification consequences, and the next resulting React commit as an explicitly inferred edge. Unsupported or unavailable stages carry a reason; state updates, external-store writes, network, event-listener, and navigation consequences remain explicitly unobserved.',
   group: 'react.render',
-  input: z.object({
-    component: z.string().optional(),
-    afterDocumentCommitId: z.number().int().nonnegative().optional(),
-    limit: z.number().int().min(1).max(500).default(100),
-  }),
-  output: z.object({
-    tracking: z.boolean(),
-    documentCommitId: z.number().int().nonnegative(),
-    observation: observationSchema.nullable(),
-    events: z.array(
-      z.object({
-        effectEventId: z.string(),
-        effectId: z.string(),
-        observationId: z.string().nullable(),
-        commitId: z.number().int().nonnegative(),
-        documentCommitId: z.number().int().nonnegative(),
-        componentId: z.number().int(),
-        componentName: z.string(),
-        mountId: z.string(),
-        effectIndex: z.number().int().nonnegative(),
-        kind: z.enum(['effect', 'layout', 'insertion']),
-        phase: z.enum(['mount', 'update']),
-        event: z.literal('scheduled'),
-        evidence: z.literal('exact'),
-        changedDependencySlots: z.array(z.number().int().nonnegative()),
-        changedDependencySlotsOmitted: z.number().int().nonnegative(),
-        dependencySlotsUnscanned: z.number().int().nonnegative(),
-        execution: z.object({ status: z.literal('unobserved') }),
-        cleanupExecution: z.object({ status: z.literal('unobserved') }),
-        consequences: z.object({
-          status: z.literal('not-instrumented'),
-          events: z.tuple([]),
-        }),
-      }),
-    ),
-    omittedByLimit: z.number().int().nonnegative(),
-    evictedEvents: z
-      .number()
-      .int()
-      .nonnegative()
-      .describe('Schedule events evicted from the retained history.'),
-    droppedEvents: z.number().int().nonnegative().describe('Legacy alias for evictedEvents.'),
-    coverage: effectCoverageSchema,
-  }),
+  input: effectEventsInputSchema,
+  output: effectEventsOutputSchema,
+  annotations: { readOnlyHint: true },
+})
+
+export const reactEffectTimelineContract = defineAgentToolContract({
+  name: 'react_effect_timeline',
+  title: 'Effect causal timeline',
+  description:
+    'Read the same bounded effect causal timeline as react_effect_events through the preferred timeline-oriented name.',
+  group: 'react.render',
+  input: effectEventsInputSchema,
+  output: effectEventsOutputSchema,
   annotations: { readOnlyHint: true },
 })

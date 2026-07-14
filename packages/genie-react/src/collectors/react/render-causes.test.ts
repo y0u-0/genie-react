@@ -1,6 +1,7 @@
 import type { Fiber } from 'bippy'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  recordQueryNotification,
   registerQueryObserver,
   resetExternalStoreRegistryForTests,
 } from '../causal/external-store-registry'
@@ -119,7 +120,50 @@ describe('bounded causal inspection', () => {
     ).toMatchObject([{ kind: 'query', evidence: 'inferred', reason: 'query-result-shape' }])
   })
 
-  it('keeps exact QueriesObserver evidence when every child has registered identity', () => {
+  it('requires a matching notification ID before calling a Query cause exact', () => {
+    const before = queryResult(1)
+    const after = queryResult(2)
+    const observer = queryObserver('registered') as ReturnType<typeof queryObserver>
+    Object.assign(observer, { getCurrentResult: () => after })
+    registerQueryObserver(observer)
+
+    const withoutDelivery = diffExternalStoreChanges(
+      causalFiber(
+        [{ memoizedState: observer }, externalStoreHook(after)],
+        [{ memoizedState: observer }, externalStoreHook(before)],
+      ),
+    )
+    expect(withoutDelivery).toMatchObject([
+      {
+        kind: 'query',
+        evidence: 'inferred',
+        reason: 'query-observer-result-identity',
+        notificationId: null,
+      },
+    ])
+
+    const notification = recordQueryNotification(observer, before, after, {
+      trackedFields: ['dataUpdatedAt'],
+      trackedFieldsCoverage: 'exact',
+      fanout: 1,
+    })
+    const withDelivery = diffExternalStoreChanges(
+      causalFiber(
+        [{ memoizedState: observer }, externalStoreHook(after)],
+        [{ memoizedState: observer }, externalStoreHook(before)],
+      ),
+    )
+    expect(withDelivery).toMatchObject([
+      {
+        kind: 'query',
+        evidence: 'exact',
+        reason: 'query-notification-delivered',
+        notificationId: notification.notificationId,
+      },
+    ])
+  })
+
+  it('keeps QueriesObserver identity inferred without a group delivery notification', () => {
     const before = queryResult(1)
     const after = queryResult(2)
     const child = queryObserver('registered')
@@ -139,7 +183,7 @@ describe('bounded causal inspection', () => {
     ).toMatchObject([
       {
         kind: 'query',
-        evidence: 'exact',
+        evidence: 'inferred',
         reason: 'queries-observer-result-identity',
         queries: [{ observerId: 'query-observer:1' }],
       },

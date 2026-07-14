@@ -159,4 +159,40 @@ describe('tool output', () => {
       `example: genie-react call plugin_get_events '{"pluginId":"<pluginId>"}'`,
     )
   })
+
+  it('renders nested object and array-item schemas in text help', () => {
+    const detail = formatToolDetail(
+      tool({
+        name: 'devtools_capture_compare',
+        inputJsonSchema: {
+          type: 'object',
+          properties: {
+            policy: {
+              type: 'object',
+              properties: {
+                confidenceLevel: { type: 'number', minimum: 0.5, maximum: 0.999 },
+              },
+              required: ['confidenceLevel'],
+            },
+            budgets: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  metric: { enum: ['react.renders', 'performance.avgFps'] },
+                  maxRegressionPct: { type: 'number', minimum: 0 },
+                },
+                required: ['metric'],
+              },
+            },
+          },
+          required: [],
+        },
+      }),
+    )
+
+    expect(detail).toContain('policy.confidenceLevel: number [0.5..0.999]')
+    expect(detail).toContain('budgets[].metric: "react.renders" | "performance.avgFps"')
+    expect(detail).toContain('budgets[].maxRegressionPct?: number [>=0]')
+  })
 })

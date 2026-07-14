@@ -2,6 +2,7 @@ import { type Fiber, getFiberId, type RenderPhase } from 'bippy'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   querySubscriberFor,
+  recordRouterNotification,
   registerQueryObserver,
   registerRouterStore,
 } from '../causal/external-store-registry'
@@ -26,6 +27,7 @@ import {
   getRenders,
   getRendersLeaderboardsMeasurement,
   getRendersMeasurement,
+  getRenderTrackingCoverage,
   getSkippedCommitFiberCount,
   getTruncatedInputFiberCount,
   isTracking,
@@ -40,7 +42,7 @@ import {
   takeSnapshot,
 } from './render-tracker'
 
-// Fake fibers have no _debugStack: stub source lookup to null so every fiber classifies as app (isLibrary:false) and survives appOnly.
+// Source-map helpers stay deterministic; individual fixtures provide _debugSource when app ownership matters.
 vi.mock('bippy/source', () => ({
   getSource: async () => null,
   isSourceFile: (file: string) => !file.includes('/node_modules/'),
@@ -260,12 +262,12 @@ describe('causal render attribution', () => {
     })
   }
 
-  it('attributes an exact useSyncExternalStore snapshot and prevents a false unnecessary render', async () => {
+  it('attributes a changed useSyncExternalStore selection without claiming exact delivery', async () => {
     const fiber = causalFiber('SelectedRow', [externalStoreHook(true)], [externalStoreHook(false)])
     expect(diffExternalStoreChanges(fiber)).toMatchObject([
       {
         kind: 'external-store',
-        evidence: 'exact',
+        evidence: 'inferred',
         hookIndex: 0,
         before: false,
         after: true,
@@ -278,7 +280,7 @@ describe('causal render attribution', () => {
     expect(report).toMatchObject({
       unnecessary: 0,
       necessity: 'necessary',
-      causes: [{ kind: 'external-store', evidence: 'exact' }],
+      causes: [{ kind: 'external-store', evidence: 'inferred' }],
       causeCounts: { 'external-store': 1 },
     })
   })
@@ -348,14 +350,14 @@ describe('causal render attribution', () => {
     expect(causes).toMatchObject([
       {
         kind: 'query',
-        evidence: 'exact',
+        evidence: 'inferred',
         reason: 'query-observer-result-identity',
         queryHash: '["a"]',
         identityStatus: 'current',
       },
       {
         kind: 'query',
-        evidence: 'exact',
+        evidence: 'inferred',
         reason: 'query-observer-result-identity',
         queryHash: '["b"]',
         identityStatus: 'current',
@@ -363,7 +365,7 @@ describe('causal render attribution', () => {
     ])
   })
 
-  it('keeps Query identity exact but omits a stale hash during a key transition', () => {
+  it('keeps Query identity inferred and omits a stale hash during a key transition', () => {
     const before = { status: 'success', fetchStatus: 'idle', dataUpdatedAt: 1 }
     const after = { ...before, dataUpdatedAt: 2 }
     const observer = {
@@ -382,7 +384,7 @@ describe('causal render attribution', () => {
     )
     expect(cause).toMatchObject({
       kind: 'query',
-      evidence: 'exact',
+      evidence: 'inferred',
       identityStatus: 'transitioning',
     })
     expect(cause).not.toHaveProperty('queryHash')
@@ -465,7 +467,7 @@ describe('causal render attribution', () => {
       diffExternalStoreChanges(
         causalFiber('ScalarStore', [externalStoreHook('b')], [externalStoreHook('a')]),
       ),
-    ).toMatchObject([{ kind: 'external-store', evidence: 'exact' }])
+    ).toMatchObject([{ kind: 'external-store', evidence: 'inferred' }])
   })
 
   it('keeps a scalar selection inferred even when a registered Router store is nearby', () => {
@@ -490,7 +492,7 @@ describe('causal render attribution', () => {
     ])
   })
 
-  it('uses exact Router attribution only when the registered store returns that snapshot', () => {
+  it('uses exact Router attribution only with a matching delivered notification', () => {
     const before = { location: { pathname: '/' }, matches: [] }
     const after = { location: { pathname: '/settings' }, matches: [] }
     const store = {}
@@ -507,9 +509,29 @@ describe('causal render attribution', () => {
     ).toMatchObject([
       {
         kind: 'router',
-        evidence: 'exact',
+        evidence: 'inferred',
         reason: 'registered-router-store',
         routerId,
+        notificationId: null,
+      },
+    ])
+
+    const notification = recordRouterNotification(store, after)
+    expect(
+      diffExternalStoreChanges(
+        causalFiber(
+          'RouterStateConsumer',
+          [{ memoizedState: { deps: [store] } }, externalStoreHook(after)],
+          [{ memoizedState: { deps: [store] } }, externalStoreHook(before)],
+        ),
+      ),
+    ).toMatchObject([
+      {
+        kind: 'router',
+        evidence: 'exact',
+        reason: 'router-notification-delivered',
+        routerId,
+        notificationId: notification.notificationId,
       },
     ])
   })
@@ -770,6 +792,40 @@ describe('component naming through memo/forwardRef wrappers', () => {
     )
     expect(names).toContain('_c3')
   })
+
+  it('reports recursive wrapper ancestry instead of collapsing nested wrappers', async () => {
+    const inner = function SaveButton(): null {
+      return null
+    }
+    const forwardRef = { $$typeof: Symbol.for('react.forward_ref'), render: inner }
+    const memo = {
+      $$typeof: Symbol.for('react.memo'),
+      type: forwardRef,
+      displayName: 'MemoSaveButton',
+    }
+    render(
+      asFiber({
+        tag: 0,
+        type: inner,
+        elementType: memo,
+        memoizedProps: {},
+        memoizedState: null,
+        actualDuration: 0,
+        selfBaseDuration: 0,
+        child: null,
+        alternate: null,
+      }),
+      'mount',
+    )
+
+    const report = (await getRenders({ sort: 'renders', limit: 50 })).find(
+      (entry) => entry.name === 'MemoSaveButton',
+    )
+    expect(report?.wrapperAncestry).toEqual([
+      { kind: 'memo', name: 'MemoSaveButton' },
+      { kind: 'forward-ref', name: 'SaveButton' },
+    ])
+  })
 })
 
 describe('recordRender unnecessary accounting', () => {
@@ -1012,6 +1068,30 @@ describe('recordRender unnecessary accounting', () => {
 })
 
 describe('commit analysis budget', () => {
+  it('keeps named targets in a reserved lane after the general fiber budget is exhausted', async () => {
+    clearRenders({ components: ['CriticalRow'] })
+    const budget = createCommitAnalysisBudget(
+      0,
+      { operationLimit: 1, timeLimitMs: 100, now: () => 0 },
+      { operationLimit: 1_000, timeLimitMs: 100, now: () => 0 },
+    )
+
+    recordCommitFiber(componentFiber({ name: 'BackgroundRow', props: {} }), 'mount', budget)
+    recordCommitFiber(componentFiber({ name: 'CriticalRow', props: {} }), 'mount', budget)
+
+    expect(budget.processed).toBe(0)
+    expect(budget.targetProcessed).toBe(1)
+    expect((await getRenders({ sort: 'renders', limit: 10 })).map(({ name }) => name)).toEqual([
+      'CriticalRow',
+    ])
+    expect(getRenderTrackingCoverage('measurement').targeted).toMatchObject({
+      components: ['criticalrow'],
+      processedFibers: 1,
+      skippedFibers: 0,
+      complete: true,
+    })
+  })
+
   it('bounds expensive per-fiber commit analysis and records skipped candidates', async () => {
     const budget = createCommitAnalysisBudget(2)
     for (let i = 0; i < 5; i++) {
@@ -1099,6 +1179,35 @@ describe('commit analysis budget', () => {
 })
 
 describe('pending component unmount coverage', () => {
+  it('evicts background lifecycle entries before the named target reservation', () => {
+    clearRenders({
+      components: ['CriticalRow'],
+      lifecycle: { bufferLimit: 2, targetReserve: 1 },
+    })
+    queuePendingUnmount(1, componentFiber({ name: 'CriticalRow', props: {} }))
+    queuePendingUnmount(1, componentFiber({ name: 'BackgroundA', props: {} }))
+    queuePendingUnmount(1, componentFiber({ name: 'BackgroundB', props: {} }))
+
+    expect(getDroppedPendingUnmountFiberCount()).toBe(1)
+    expect(getRenderTrackingCoverage('measurement').targeted?.complete).toBe(true)
+
+    queuePendingUnmount(1, componentFiber({ name: 'CriticalRow', props: {} }))
+    queuePendingUnmount(1, componentFiber({ name: 'CriticalRow', props: {} }))
+    expect(getRenderTrackingCoverage('measurement').targeted?.complete).toBe(false)
+  })
+
+  it('does not silently protect targeted lifecycle entries when the reservation is zero', () => {
+    clearRenders({
+      components: ['CriticalRow'],
+      lifecycle: { bufferLimit: 1, targetReserve: 0 },
+    })
+    queuePendingUnmount(1, componentFiber({ name: 'CriticalRow', props: {} }))
+    queuePendingUnmount(1, componentFiber({ name: 'Background', props: {} }))
+
+    expect(getDroppedPendingUnmountFiberCount()).toBe(1)
+    expect(getRenderTrackingCoverage('measurement').targeted?.complete).toBe(false)
+  })
+
   it('ignores host unmounts and reports bounded component overflow', () => {
     const host = asFiber({ tag: 5, type: 'div' })
     for (let index = 0; index < 1_100; index += 1) queuePendingUnmount(1, host)
@@ -1282,7 +1391,7 @@ describe('render measurement snapshot', () => {
     })
     render(fiber, 'update')
 
-    const pending = getRendersMeasurement({ sort: 'renders', limit: 10, appOnly: true })
+    const pending = getRendersMeasurement({ sort: 'renders', limit: 10, appOnly: false })
     Object.assign(fiber, {
       memoizedProps: { value: 2 },
       alternate: { memoizedProps: { value: 1 }, memoizedState: null },
@@ -1318,7 +1427,11 @@ describe('snapshot + rendersDiff', () => {
   // A Fiber with stable physical identity whose peak and cumulative timing can be re-measured.
   const makeMeasured = (
     name: string,
-    source?: { fileName: string; lineNumber: number; columnNumber: number },
+    source: { fileName: string; lineNumber: number; columnNumber: number } = {
+      fileName: '/src/profile-test.tsx',
+      lineNumber: 1,
+      columnNumber: 1,
+    },
     sharedType?: () => null,
   ) => {
     const type = sharedType ?? ((): null => null)
@@ -1500,7 +1613,7 @@ describe('snapshot + rendersDiff', () => {
     expect(diff.selfTimeMs).toMatchObject({ before: 100, after: 100, delta: 0 })
   })
 
-  it('keeps distinct source-less component definitions separate', async () => {
+  it('keeps distinct component definitions at the same source separate', async () => {
     makeMeasured('Row')(1, 'mount')
     makeMeasured('Row')(2, 'mount')
 

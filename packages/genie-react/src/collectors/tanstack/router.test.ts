@@ -1,6 +1,10 @@
 import type { AnyRouter } from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CollectorContext, GenieCollector } from '../../client'
+import {
+  resetExternalStoreRegistryForTests,
+  routerNotificationFor,
+} from '../causal/external-store-registry'
 import { routerCollector } from './router'
 
 const ctx: CollectorContext = {
@@ -18,12 +22,15 @@ function call<T = unknown>(collector: GenieCollector, name: string, args: unknow
 
 interface StubRouter {
   router: AnyRouter
+  store: object
+  emitStore: (snapshot: unknown) => void
   navigated: Array<{ to: string }>
   invalidated: number
 }
 
 function makeRouter(): StubRouter {
   const navigated: Array<{ to: string }> = []
+  const storeListeners = new Set<(snapshot: unknown) => void>()
   let invalidated = 0
   const state = {
     location: { pathname: '/', href: '/', searchStr: '', hash: '' },
@@ -51,9 +58,16 @@ function makeRouter(): StubRouter {
       },
     ],
   }
+  const store = {
+    get: () => state,
+    subscribe(listener: (snapshot: unknown) => void) {
+      storeListeners.add(listener)
+      return { unsubscribe: () => storeListeners.delete(listener) }
+    },
+  }
   const router = {
     state,
-    stores: { __store: {} },
+    stores: { __store: store },
     subscribe: () => () => {},
     navigate: async ({ to }: { to: string }) => {
       navigated.push({ to })
@@ -66,6 +80,10 @@ function makeRouter(): StubRouter {
   }
   return {
     router: router as unknown as AnyRouter,
+    store,
+    emitStore: (snapshot) => {
+      for (const listener of storeListeners) listener(snapshot)
+    },
     navigated,
     get invalidated() {
       return invalidated
@@ -74,7 +92,10 @@ function makeRouter(): StubRouter {
 }
 
 describe('routerCollector', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    resetExternalStoreRegistryForTests()
+  })
 
   it('router_get_state surfaces location, status, and match count', async () => {
     const collector = routerCollector(makeRouter().router)
@@ -95,6 +116,27 @@ describe('routerCollector', () => {
     expect(state.matchCount).toBe(2)
     expect(state.browserLocation).toBeNull()
     expect(state.locationSync).toBe('unavailable')
+  })
+
+  it('records the exact snapshot delivered by the Router store subscription', () => {
+    const stub = makeRouter()
+    const collector = routerCollector(stub.router)
+    const stop = collector.start?.(ctx)
+    const delivered = { location: { pathname: '/settings' }, status: 'idle' }
+
+    stub.emitStore(delivered)
+
+    expect(routerNotificationFor(stub.store, delivered)).toMatchObject({
+      notificationId: expect.stringMatching(/^router-notification:/),
+      routerId: expect.stringMatching(/^router:/),
+    })
+    expect(stop).toBeTypeOf('function')
+    if (typeof stop !== 'function') throw new Error('collector did not return cleanup')
+    stop()
+
+    const afterStop = { location: { pathname: '/after-stop' }, status: 'idle' }
+    stub.emitStore(afterStop)
+    expect(routerNotificationFor(stub.store, afterStop)).toBeNull()
   })
 
   it('router_get_state exposes browser and Router disagreement in one snapshot', async () => {

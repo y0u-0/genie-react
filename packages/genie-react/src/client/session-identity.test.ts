@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createSessionIdentity, createSessionName } from './session-identity'
+import { createSessionIdentity, createSessionName, forkSessionIdentity } from './session-identity'
 
 class MemoryStorage {
   private readonly values = new Map<string, string>()
@@ -22,6 +22,17 @@ describe('session identity', () => {
     expect(reloaded.logicalSessionId).toBe(first.logicalSessionId)
     expect(first.documentGeneration).toBe(1)
     expect(reloaded.documentGeneration).toBe(2)
+  })
+
+  it('persists an auto-fork so cloned browser state stays distinct after reload', () => {
+    const storage = new MemoryStorage()
+    const identity = createSessionIdentity(storage)
+
+    forkSessionIdentity(identity, 'forked-logical-id', 1, storage)
+    const reloaded = createSessionIdentity(storage)
+
+    expect(identity).toEqual({ logicalSessionId: 'forked-logical-id', documentGeneration: 1 })
+    expect(reloaded).toEqual({ logicalSessionId: 'forked-logical-id', documentGeneration: 2 })
   })
 
   it('still creates a usable identity when session storage is blocked', () => {

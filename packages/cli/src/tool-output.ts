@@ -106,18 +106,57 @@ export function formatToolDetail(tool: ToolDescriptor): string {
   if (names.length === 0) lines.push('  (none)')
   for (const name of names) {
     const property = properties[name]
-    const parts = [`  ${name}${required.has(name) ? '' : '?'}: ${jsonSchemaType(property)}`]
-    if (isRecord(property)) {
-      const constraints = jsonSchemaConstraints(property)
-      if (constraints) parts.push(constraints)
-      if (property.default !== undefined)
-        parts.push(`(default ${JSON.stringify(property.default)})`)
-      if (typeof property.description === 'string') parts.push(`— ${property.description}`)
-    }
-    lines.push(parts.join(' '))
+    appendSchemaProperty(lines, name, property, required.has(name), 2, 0)
   }
   lines.push('', `example: genie-react call ${tool.name} '${exampleArgs(properties, required)}'`)
   return lines.join('\n')
+}
+
+function appendSchemaProperty(
+  lines: string[],
+  path: string,
+  schema: unknown,
+  required: boolean,
+  indent: number,
+  depth: number,
+): void {
+  const parts = [`${' '.repeat(indent)}${path}${required ? '' : '?'}: ${jsonSchemaType(schema)}`]
+  if (isRecord(schema)) {
+    const constraints = jsonSchemaConstraints(schema)
+    if (constraints) parts.push(constraints)
+    if (schema.default !== undefined) parts.push(`(default ${JSON.stringify(schema.default)})`)
+    if (typeof schema.description === 'string') parts.push(`— ${schema.description}`)
+  }
+  lines.push(parts.join(' '))
+  if (depth >= 5 || !isRecord(schema)) return
+
+  const nested = nestedObjectSchema(schema)
+  if (!nested || !isRecord(nested.properties)) return
+  const nestedRequired = new Set(Array.isArray(nested.required) ? nested.required : [])
+  const prefix = schema.type === 'array' ? `${path}[]` : path
+  for (const [name, child] of Object.entries(nested.properties)) {
+    appendSchemaProperty(
+      lines,
+      `${prefix}.${name}`,
+      child,
+      nestedRequired.has(name),
+      indent + 2,
+      depth + 1,
+    )
+  }
+}
+
+function nestedObjectSchema(schema: Record<string, unknown>): Record<string, unknown> | null {
+  if (schema.type === 'array' && isRecord(schema.items)) return objectSchema(schema.items)
+  const direct = objectSchema(schema)
+  if (direct?.properties !== schema.properties || isRecord(schema.properties)) return direct
+  if (Array.isArray(schema.anyOf)) {
+    for (const branch of schema.anyOf) {
+      const found = isRecord(branch) ? nestedObjectSchema(branch) : null
+      if (found) return found
+    }
+  }
+  return null
 }
 
 export function slimDescriptor(tool: ToolDescriptor): {

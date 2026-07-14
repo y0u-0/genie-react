@@ -512,7 +512,9 @@ describe('per-effect source attribution', () => {
       { tag: PASSIVE | HAS_EFFECT, deps: [] },
     ])
 
-    const rec = (await getEffectAudit({ limit: 50 })).find((r) => r.name === 'TreeSearchApp')
+    const rec = (await getEffectAudit({ limit: 50, appOnly: true })).find(
+      (r) => r.name === 'TreeSearchApp',
+    )
     expect(rec?.effects).toHaveLength(1)
     expect(rec?.effects[0]?.source?.line).toBe(99)
   })
@@ -601,7 +603,9 @@ describe('per-effect source attribution', () => {
       packageName: null,
     })
     // appOnly drops a component once all its effects are library-origin.
-    expect((await getEffectAudit({ limit: 50 })).find((r) => r.name === 'DataOnly')).toBeUndefined()
+    expect(
+      (await getEffectAudit({ limit: 50, appOnly: true })).find((r) => r.name === 'DataOnly'),
+    ).toBeUndefined()
   })
 
   it('does not mark effects library when there is no app effect AND no inspection (failure ≠ all-internal)', async () => {

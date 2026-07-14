@@ -19,6 +19,22 @@ export interface ResolvedSource {
   line: number | null
   column: number | null
   functionName: string | null
+  sourceMapConfidence?: 'mapped' | 'served'
+}
+
+export interface SourceProvenance {
+  definitionSource: ResolvedSource | null
+  allocationCallsite: ResolvedSource | null
+  hookDefinitionOwner: ResolvedSource | null
+  hookCallsite: ResolvedSource | null
+  package: string | null
+  sourceMapConfidence: 'mapped' | 'served' | 'unknown'
+  failureReason:
+    | 'source-unresolved'
+    | 'definition-and-allocation-not-distinguished'
+    | 'hook-provenance-unavailable'
+    | null
+  usageOrDefinitionFallback: ResolvedSource | null
 }
 
 export interface FiberClassification {
@@ -124,6 +140,8 @@ export async function resolveSource(fiber: Fiber): Promise<ResolvedSource | null
       const resolved: ResolvedSource = {
         ...position,
         functionName: source.functionName ?? null,
+        sourceMapConfidence:
+          original.file !== null && position.file === original.file ? 'mapped' : 'served',
       }
       if (generation === cacheGeneration) cache.set(id, resolved)
       return resolved
@@ -319,6 +337,58 @@ export function sourceAttributionForSource(source: ResolvedSource | null): Sourc
   return { role: 'usage-or-definition-fallback', evidence: 'inferred' }
 }
 
+/** Split provenance fields stay null unless that exact role is observable; the legacy source is retained only as an explicitly ambiguous fallback. */
+export function sourceProvenanceForSource(
+  source: ResolvedSource | null,
+  exact: Partial<
+    Pick<
+      SourceProvenance,
+      'definitionSource' | 'allocationCallsite' | 'hookDefinitionOwner' | 'hookCallsite'
+    >
+  > = {},
+): SourceProvenance {
+  const roleSource =
+    exact.hookCallsite ??
+    exact.hookDefinitionOwner ??
+    exact.allocationCallsite ??
+    exact.definitionSource ??
+    source
+  const hasExactRole = Object.values(exact).some((value) => value != null)
+  return {
+    definitionSource: exact.definitionSource ?? null,
+    allocationCallsite: exact.allocationCallsite ?? null,
+    hookDefinitionOwner: exact.hookDefinitionOwner ?? null,
+    hookCallsite: exact.hookCallsite ?? null,
+    package:
+      roleSource && isLibraryFile(roleSource.file) ? packageNameFromFile(roleSource.file) : null,
+    sourceMapConfidence: roleSource?.sourceMapConfidence ?? (roleSource ? 'served' : 'unknown'),
+    failureReason: hasExactRole
+      ? null
+      : source
+        ? 'definition-and-allocation-not-distinguished'
+        : 'source-unresolved',
+    usageOrDefinitionFallback: source,
+  }
+}
+
+export function packageNameFromFile(file: string): string | null {
+  const normalized = file.replaceAll('\\', '/')
+  const marker = '/node_modules/'
+  const index = normalized.lastIndexOf(marker)
+  if (index === -1) return null
+  const segments = normalized
+    .slice(index + marker.length)
+    .split('/')
+    .filter(Boolean)
+  if (segments[0] === '.pnpm') {
+    const nestedIndex = segments.lastIndexOf('node_modules')
+    if (nestedIndex >= 0) segments.splice(0, nestedIndex + 1)
+  }
+  const first = segments[0]
+  if (!first) return null
+  return first.startsWith('@') && segments[1] ? `${first}/${segments[1]}` : first
+}
+
 const EFFECT_HOOK_NAMES = new Set(['Effect', 'LayoutEffect', 'InsertionEffect'])
 const EXTERNAL_STORE_HOOK_NAMES = new Set(['SyncExternalStore'])
 const HOOK_ANCESTRY_LIMIT = 12
@@ -464,6 +534,12 @@ async function resolveHookSource(
     return {
       ...selectSourcePosition(served, hook.lineNumber ?? null, hook.columnNumber ?? null, original),
       functionName: hook.functionName ?? null,
+      sourceMapConfidence:
+        original.file !== null &&
+        selectSourcePosition(served, hook.lineNumber ?? null, hook.columnNumber ?? null, original)
+          .file === original.file
+          ? 'mapped'
+          : 'served',
     }
   } catch {
     return null

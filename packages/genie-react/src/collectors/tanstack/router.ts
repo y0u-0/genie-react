@@ -2,7 +2,7 @@ import type { AnyRouter, NavigateOptions, ToOptions } from '@tanstack/react-rout
 import { z } from 'zod'
 import { defineCollector, defineCollectorTool, type GenieCollector } from '../../client'
 import { defineAgentToolContract, dehydrate } from '../../protocol'
-import { registerRouterStore } from '../causal/external-store-registry'
+import { recordRouterNotification, registerRouterStore } from '../causal/external-store-registry'
 
 interface RouteEntry {
   id: string
@@ -248,9 +248,20 @@ export function routerCollector(router: AnyRouter): GenieCollector {
     capabilities: ['router'],
     start: (ctx) => {
       const push = () => ctx.pushSnapshot('router', { pathname: router.state.location.pathname })
-      const off = router.subscribe('onResolved', () => push())
+      const stopStoreNotifications = registeredRouter
+        ? subscribeRouterNotifications(registeredRouter)
+        : null
+      const off = router.subscribe('onResolved', () => {
+        push()
+      })
       push()
-      return off
+      return () => {
+        try {
+          off()
+        } finally {
+          stopStoreNotifications?.()
+        }
+      }
     },
     tools: [
       defineCollectorTool({
@@ -400,6 +411,41 @@ export function routerCollector(router: AnyRouter): GenieCollector {
 function routerStoreOf(router: AnyRouter): object | null {
   const stores = (router as unknown as { stores?: { __store?: unknown } }).stores
   return typeof stores?.__store === 'object' && stores.__store !== null ? stores.__store : null
+}
+
+function subscribeRouterNotifications(store: object): (() => void) | null {
+  let subscribe: unknown
+  try {
+    subscribe = (store as { subscribe?: unknown }).subscribe
+  } catch {
+    return null
+  }
+  if (typeof subscribe !== 'function') return null
+
+  let active = true
+  try {
+    const subscription: unknown = subscribe.call(store, (snapshot: unknown) => {
+      if (active && snapshot !== undefined) recordRouterNotification(store, snapshot)
+    })
+    return () => {
+      active = false
+      try {
+        if (typeof subscription === 'function') subscription()
+        else if (
+          typeof subscription === 'object' &&
+          subscription !== null &&
+          typeof (subscription as { unsubscribe?: unknown }).unsubscribe === 'function'
+        ) {
+          const unsubscribe = (subscription as { unsubscribe: () => void }).unsubscribe
+          unsubscribe.call(subscription)
+        }
+      } catch {
+        // Disabling the callback still prevents stale evidence if store cleanup fails.
+      }
+    }
+  } catch {
+    return null
+  }
 }
 
 interface ComparableLocation {
