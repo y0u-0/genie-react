@@ -1,5 +1,11 @@
 # genie-react
 
+## 0.10.1
+
+### Patch Changes
+
+- 276d8ec: Fix React Native source provenance for lazy Hermes error stacks and preserve mapped confidence after Metro symbolication. Describe `browser_get_memory` results accurately across browser and Hermes runtimes.
+
 ## 0.10.0
 
 ### Minor Changes
