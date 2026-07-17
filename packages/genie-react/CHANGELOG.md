@@ -1,5 +1,11 @@
 # genie-react
 
+## 0.11.0
+
+### Minor Changes
+
+- 0a697d7: Add separate Query and Router collector exports plus safe late collector registration for script-based setups.
+
 ## 0.10.1
 
 ### Patch Changes
