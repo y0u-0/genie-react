@@ -189,6 +189,61 @@ describe('GenieClient', () => {
     }
   })
 
+  it('replaces a collector with the same id without leaving stale tools or subscriptions', async () => {
+    const socket = new FakeSocket()
+    const firstCleanup = vi.fn()
+    const replacementCleanup = vi.fn()
+    const first = defineCollector({
+      meta: { id: 'replaceable', title: 'First' },
+      capabilities: ['first'],
+      start: () => firstCleanup,
+      tools: [
+        defineCollectorTool({
+          contract: echoContract,
+          handler: ({ message }) => ({ echoed: `first:${message}` }),
+        }),
+      ],
+    })
+    const replacement = defineCollector({
+      meta: { id: 'replaceable', title: 'Replacement' },
+      capabilities: ['replacement'],
+      start: () => replacementCleanup,
+      tools: [
+        defineCollectorTool({
+          contract: echoContract,
+          handler: ({ message }) => ({ echoed: `replacement:${message}` }),
+        }),
+      ],
+    })
+    const client = createGenieClient({ collectors: [first], socketFactory: () => socket })
+
+    client.start()
+    socket.open()
+    client.registerCollector(replacement)
+    socket.receive({
+      kind: 'bridge/request',
+      id: 'replacement-call',
+      tool: 'echo',
+      args: { message: 'ok' },
+    })
+    await flush()
+
+    expect(firstCleanup).toHaveBeenCalledOnce()
+    const hello = socket
+      .decoded()
+      .filter((message) => message.kind === 'app/hello')
+      .at(-1)
+    expect(hello.capabilities).not.toContain('first')
+    expect(hello.capabilities).toContain('replacement')
+    const response = socket
+      .decoded()
+      .find((message) => message.kind === 'app/response' && message.id === 'replacement-call')
+    expect(response.result).toEqual({ echoed: 'replacement:ok' })
+
+    client.stop()
+    expect(replacementCleanup).toHaveBeenCalledOnce()
+  })
+
   it('runs a forwarded tool and replies with the result', async () => {
     const { socket, client } = setup()
     client.start()

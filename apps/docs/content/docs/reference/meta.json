@@ -1,0 +1,5 @@
+{
+  "title": "Reference",
+  "icon": "BookOpen",
+  "pages": ["evidence", "cli", "cleanup", "troubleshooting", "packages"]
+}

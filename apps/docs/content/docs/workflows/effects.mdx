@@ -1,0 +1,65 @@
+---
+title: Effects
+description: Find repeatedly scheduled effects and the hook that owns them.
+icon: Repeat2
+---
+
+## Measure one flow
+
+Use the browser setup in
+[Explain a render and hot effect](/docs/case-studies/render-and-effect).
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite get text 'button.counter'
+npx @genie-react/cli call react_effect_timeline \
+  '{"component":"HotEffectProbe","limit":20}' --json
+```
+
+Example event:
+
+```json
+{
+  "componentName": "HotEffectProbe",
+  "effectIndex": 1,
+  "phase": "update",
+  "event": "scheduled",
+  "evidence": "exact",
+  "changedDependencySlots": [0],
+  "execution": { "status": "unobserved", "reason": "not-yet-observed" }
+}
+```
+
+## Audit repeated schedules
+
+```bash
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite click 'button.counter'
+npx @genie-react/cli call react_effect_audit \
+  '{"component":"HotEffectProbe","onlyHot":true,"minUpdates":5,"minScheduleRate":0.8}' --json
+```
+
+The audit reports the effect source, ownership, dependency mode, changed slots, schedules, update
+count, and hotness sample range.
+
+Inspect one dependency package:
+
+```bash
+npx @genie-react/cli call react_effect_audit \
+  '{"packageName":"@tanstack/react-query","appOnly":false}' --json
+```
+
+## Read the limits
+
+- Scheduled does not mean executed.
+- Cleanup present does not mean cleanup executed.
+- Genie does not claim a later request or state write came from the effect.
+- `insufficient-data` is not hot and not safe.
+
+## Agent outcome
+
+The agent can edit the real hook owner and changed dependency instead of deleting an effect from the
+component that merely hosts a library wrapper.

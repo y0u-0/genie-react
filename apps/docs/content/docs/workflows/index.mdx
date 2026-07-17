@@ -1,0 +1,33 @@
+---
+title: Workflows
+description: Small command sequences that answer one runtime question.
+icon: Workflow
+---
+
+Genie works best when the agent measures one exact flow and asks the smallest useful question.
+
+For every workflow, use agent-browser or agent-device to perform the action and verify the visible
+result. Use Genie to read the causal and performance evidence.
+
+| Goal                     | Start with                                              |
+| ------------------------ | ------------------------------------------------------- |
+| Explain a render         | `react_get_renders`, then `react_render_causes`         |
+| Inspect mounted state    | `react_find_components`, then `react_inspect_component` |
+| Check Context            | `react_inspect_context`                                 |
+| Find an effect loop      | `react_effect_timeline`, then `react_effect_audit`      |
+| Test loading or error UI | Query simulation, Suspense, or error actions            |
+| Check Query work         | `query_list`, `query_get`, and an exact `devtools_wait` |
+| Check a route            | `router_get_state` and `router_list_matches`            |
+| Find a slow flow         | `react_profile_start`, then `react_profile_report`      |
+| Check an optimization    | Repeated captures and `devtools_capture_compare`        |
+| Check memory or frames   | `browser_get_memory` or `browser_fps`                   |
+
+<Cards>
+  <Card title="Optimize renders" href="/docs/workflows/render-optimization" />
+  <Card title="Inspect Query" href="/docs/workflows/query" />
+  <Card
+    title="Test loading and errors"
+    href="/docs/workflows/loading-and-errors"
+  />
+  <Card title="Prove the result" href="/docs/workflows/performance-proof" />
+</Cards>

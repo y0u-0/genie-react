@@ -24,3 +24,38 @@ export function readGenieGlobal(): GenieRegistry | undefined {
   const value: unknown = globalThis[GENIE_GLOBAL_KEY]
   return isGenieRegistry(value) ? value : undefined
 }
+
+export interface RegisterGenieCollectorOptions {
+  /** Stop waiting when the script-tag client has not loaded after this long. */
+  timeoutMs?: number
+  /** Delay between client-readiness checks. */
+  retryMs?: number
+}
+
+/** Register now when the script-tag client is ready, or keep trying for a bounded time. */
+export function registerGenieCollector(
+  collector: unknown,
+  options: RegisterGenieCollectorOptions = {},
+): () => void {
+  const timeoutMs = Math.max(0, options.timeoutMs ?? 15_000)
+  const retryMs = Math.max(1, options.retryMs ?? 100)
+  const deadline = Date.now() + timeoutMs
+  let stopped = false
+  let retry: ReturnType<typeof setTimeout> | undefined
+
+  const attempt = () => {
+    if (stopped) return
+    const registry = readGenieGlobal()
+    if (registry) {
+      registry.register(collector)
+      return
+    }
+    if (Date.now() < deadline) retry = setTimeout(attempt, retryMs)
+  }
+
+  attempt()
+  return () => {
+    stopped = true
+    if (retry) clearTimeout(retry)
+  }
+}

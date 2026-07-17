@@ -1,0 +1,50 @@
+---
+title: Read evidence safely
+description: Know what Genie observed, inferred, missed, or could not prove.
+icon: BadgeCheck
+---
+
+Genie reports the strength and coverage of runtime evidence. Read these fields before changing code.
+
+| Field                               | Meaning                                                | Agent action                                           |
+| ----------------------------------- | ------------------------------------------------------ | ------------------------------------------------------ |
+| `exact`                             | Genie observed the direct runtime link.                | Use it as the main edit lead.                          |
+| `inferred`                          | The link is useful but not proven.                     | Confirm it with another check.                         |
+| `unknown`                           | Genie could not prove the cause.                       | Do not guess from this result.                         |
+| `not-proven-safe`                   | A render may still affect behavior.                    | Check DOM, ARIA, focus, URL, network, and transitions. |
+| `coverage.complete`                 | The main measurement finished within its limits.       | Trust the main count or timing.                        |
+| `coverage.inputAttributionComplete` | Every captured render has complete input evidence.     | Only then rule out an input cause.                     |
+| `attribution.status: stale`         | React committed while evidence was read.               | Wait for React to settle and retry.                    |
+| `propsNotEnumerated`                | Props may be a Proxy, so Genie did not enumerate them. | Inspect a known prop or path.                          |
+
+## Coverage is per question
+
+A timing profile can be complete while input attribution is partial. A before/after diff reports
+coverage for both runs. Do not use partial evidence to prove that a render has no cause.
+
+## Effects
+
+Effect events show what React scheduled. They do not prove that the effect body or cleanup ran. They
+also do not prove a later request, state write, or navigation.
+
+Effect hotness needs at least three updates by default. A smaller sample returns
+`insufficient-data`. The reported 95% interval applies only to effect hotness. Genie does not invent a
+general confidence score for causal evidence.
+
+## Query observers
+
+Query evidence may include the exact observer, component subscriber, hook callsite, tracked fields,
+and changed paths. Opaque values stay root-only and incomplete.
+
+- `current-observation` belongs to the active clear-and-measure window.
+- `previous-observation` is older evidence.
+
+## Source locations
+
+A component location can be a JSX use site or a definition fallback. Treat that source as inferred.
+An exact hook callsite is a stronger edit target when present.
+
+## Router state
+
+`router_get_state` reads Router state and browser history in one call. Check `locationSync` before
+trusting the URL.

@@ -1,0 +1,346 @@
+---
+title: Router
+description: Inspect and drive TanStack Router routes, matches, history, loaders, and cache.
+icon: Route
+---
+
+The JSON examples below show selected fields from the full response.
+
+Use Router calls to drive navigation, then use browser automation to verify the page, focus, URL,
+and accessibility state.
+
+## `router_get_state`
+
+Reads Router and browser location in one synchronous snapshot.
+
+**Input:** `{}`.
+
+```bash
+npx @genie-react/cli call router_get_state '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "routerId": "router:1",
+  "pathname": "/products/42",
+  "href": "/products/42?page=2",
+  "status": "idle",
+  "isLoading": false,
+  "isTransitioning": false,
+  "matchCount": 3,
+  "pendingMatchCount": 0,
+  "browserLocation": {
+    "href": "https://app.example/products/42?page=2",
+    "pathname": "/products/42",
+    "search": "?page=2",
+    "hash": ""
+  },
+  "locationSync": "matched",
+  "snapshotAt": 1750000000000
+}
+```
+
+**Agent use:** Decides whether navigation is settled and whether Router pathname, search, and hash
+agree with the browser before asserting the page.
+
+`locationSync` is `matched`, `mismatched`, or `unavailable`. Treat `mismatched` as inconsistent
+state and `unavailable` as missing browser evidence. This read does not wait for pending matches.
+
+## `router_list_matches`
+
+Lists every active route match and its loader data.
+
+**Input:** `depth` is an optional integer from 1 to 4 and defaults to 2. It only controls the
+returned loader-data depth.
+
+```bash
+npx @genie-react/cli call router_list_matches '{"depth":3}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "matches": [
+    {
+      "routeId": "__root__",
+      "pathname": "/",
+      "params": {},
+      "search": { "page": 2 },
+      "status": "success",
+      "isFetching": false
+    },
+    {
+      "routeId": "/products",
+      "pathname": "/products",
+      "params": {},
+      "search": { "page": 2 },
+      "status": "success",
+      "isFetching": false,
+      "loaderData": { "items": [{ "id": 1 }] }
+    },
+    {
+      "routeId": "/products/$productId",
+      "pathname": "/products/42",
+      "params": { "productId": "42" },
+      "search": { "page": 2 },
+      "status": "success",
+      "isFetching": false,
+      "loaderData": { "id": 42, "name": "Desk lamp" }
+    }
+  ]
+}
+```
+
+**Agent use:** Chooses the exact active `routeId` and verifies its params, search values, loader
+status, and loader data against the rendered page.
+
+Parent and child routes can both match the same URL. Do not infer one winner from pathname alone;
+use `routeId` and the full match stack. Loader data is depth-bounded, while params and search are
+bounded to depth 2.
+
+## `router_list_routes`
+
+Lists registered routes.
+
+**Input:** `includeRoot` is optional and defaults to `false`; `true` includes the synthetic
+`__root__` route.
+
+```bash
+npx @genie-react/cli call router_list_routes '{"includeRoot":false}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "routes": [
+    {
+      "routeId": "/products",
+      "path": "products",
+      "fullPath": "/products",
+      "rank": 1,
+      "hasLoader": true,
+      "hasBeforeLoad": false
+    },
+    {
+      "routeId": "/products/$productId",
+      "path": "$productId",
+      "fullPath": "/products/$productId",
+      "rank": 2,
+      "hasLoader": true,
+      "hasBeforeLoad": false
+    }
+  ],
+  "total": 2
+}
+```
+
+**Agent use:** Selects a registered route ID and its loader boundary before building, matching, or
+navigating to a destination.
+
+Optional `path`, `fullPath`, and `rank` fields may be absent for a route. This is a read of the
+registered route tree and does not prove that a route is currently active.
+
+## `router_build_location`
+
+Builds a destination without navigating.
+
+**Input:** `to` is a required string. `params` and `search` are optional records with string keys
+and arbitrary JSON values. `hash` is an optional string.
+
+```bash
+npx @genie-react/cli call router_build_location \
+  '{"to":"/products/$productId","params":{"productId":"42"},"search":{"tab":"reviews"}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "href": "/products/42?tab=reviews",
+  "pathname": "/products/42",
+  "searchStr": "?tab=reviews",
+  "hash": "",
+  "search": { "tab": "reviews" }
+}
+```
+
+**Agent use:** Decides the exact pathname, encoded search, and hash a planned navigation will use.
+
+This is a pure preview and does not navigate or preload. Compare its result with
+`router_get_state` after the real navigation.
+
+## `router_match_route`
+
+Checks whether the current or pending location matches a route.
+
+**Input:** `to` is a required path-pattern string. `pending`, `fuzzy`, and `includeSearch` are
+optional booleans and each defaults to `false`.
+
+```bash
+npx @genie-react/cli call router_match_route \
+  '{"to":"/products/$productId","fuzzy":false}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "matched": true, "params": { "productId": "42" } }
+```
+
+**Agent use:** Decides whether one supplied route pattern matches the current or pending location
+and extracts its path params.
+
+`fuzzy:true` allows a prefix match, so parent and child patterns may both return `matched:true`.
+This tool tests one pattern; it does not resolve ambiguity among registered routes. Use
+`router_list_matches` for the active match stack.
+
+## `router_navigate`
+
+Runs a client-side navigation and waits for it to resolve.
+
+**Input:** `to` is a required string. `replace` is optional and defaults to `false`. `params` and
+`search` are optional records with string keys and arbitrary JSON values. `hash` is an optional
+string.
+
+```bash
+npx @genie-react/cli call router_navigate \
+  '{"to":"/products/$productId","params":{"productId":"42"},"search":{"tab":"reviews"}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "pathname": "/products/42" }
+```
+
+**Agent use:** Drives the real client Router, then verifies Router, browser URL, loader, Query,
+React, and DOM state end to end.
+
+This changes the visible route and, unless `replace:true`, adds a history entry. The output only
+echoes the resolved pathname. Confirm search and hash with `router_get_state`, then navigate back or
+return to the original location after the check.
+
+## `router_preload`
+
+Preloads a destination without changing the visible route.
+
+**Input:** `to` is a required string. `params` and `search` are optional records with string keys
+and arbitrary JSON values. `hash` is an optional string.
+
+```bash
+npx @genie-react/cli call router_preload \
+  '{"to":"/products/$productId","params":{"productId":"42"}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "matched": 2,
+  "matchedRouteIds": ["/products", "/products/$productId"]
+}
+```
+
+**Agent use:** Warms the exact destination and confirms which route IDs its preload matched before
+a browser click or navigation.
+
+This can run loaders and retain inactive route-match cache without changing the visible location.
+A successful `matched:0` can mean preloading is disabled. Use `router_clear_cache` after the check
+to remove inactive preloaded matches.
+
+## `router_history`
+
+Moves through the Router history adapter.
+
+**Input:** `action` is optional, is `back`, `forward`, or `go`, and defaults to `back`. `delta` is
+an optional integer and defaults to -1; it is used only by `go`, where negative moves back and
+positive moves forward.
+
+```bash
+npx @genie-react/cli call router_history '{"action":"go","delta":-1}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "pathname": "/products", "canGoBack": true, "length": 5 }
+```
+
+**Agent use:** Moves the Router history cursor, then checks whether back, forward, or relative-go
+behavior restores the expected route and UI.
+
+**Safety:** The move starts synchronously. Wait for the exact navigation before checking the final
+URL or page; the returned pathname can still be the old location. Apply the inverse move or
+navigate to the original location to clean up.
+
+## `router_invalidate`
+
+Invalidates active route data and waits for the operation to resolve.
+
+**Input:** `{}`.
+
+```bash
+npx @genie-react/cli call router_invalidate '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true }
+```
+
+**Agent use:** Forces all active route matches through invalidation, then verifies refreshed loader
+data and UI.
+
+This can rerun loaders and their external work. It cannot target one match and does not preserve an
+undo snapshot. Reload the fixture if the refreshed data must be reset.
+
+## `router_load`
+
+Runs current route loaders and waits for them to settle.
+
+**Input:** `{}`.
+
+```bash
+npx @genie-react/cli call router_load '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "status": "idle" }
+```
+
+**Agent use:** Runs current-match loaders and decides from the returned Router status when to read
+loader data or inspect the page.
+
+This can update loader cache and cause loader side effects. It waits for `router.load()` to resolve,
+but the returned `status` is the final Router status, not loader data. Reload the fixture if the
+loaded state must be reset.
+
+## `router_clear_cache`
+
+Deletes inactive route-match cache entries.
+
+**Input:** `{}`.
+
+```bash
+npx @genie-react/cli call router_clear_cache '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true }
+```
+
+**Agent use:** Deletes inactive route matches, then verifies that revisiting one runs its loader as
+a cold route.
+
+**Safety:** This is destructive. Current active matches stay in place, but cleared routes reload on
+their next visit. There is no undo; revisit the cleared routes to rebuild their cache.

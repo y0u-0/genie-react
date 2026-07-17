@@ -1,0 +1,167 @@
+---
+title: Check a performance change
+description: Compare equivalent flows and reject weak or incomplete evidence.
+icon: ChartNoAxesCombined
+---
+
+Use the browser setup in [Check optimization evidence](/docs/case-studies/prove-an-optimization) before
+running these commands.
+
+## Quick same-session diff
+
+Start and run the before flow:
+
+```bash
+npx @genie-react/cli call react_profile_start '{}'
+agent-browser --session docs-case-proof click '[data-testid="counter"]'
+agent-browser --session docs-case-proof get text '[data-testid="counter"]'
+npx @genie-react/cli call react_profile_snapshot '{"label":"before"}'
+```
+
+Make the change, start a clean window, and drive the same flow:
+
+```bash
+npx @genie-react/cli call react_profile_start '{}'
+agent-browser --session docs-case-proof click '[data-testid="counter"]'
+agent-browser --session docs-case-proof get text '[data-testid="counter"]'
+npx @genie-react/cli call react_renders_diff \
+  '{"baseline":"before","thresholdMs":0.5}' --json
+```
+
+## Strong repeated comparison
+
+Run the same flow six times before and six times after. The comparison removes one warm-up and
+needs five usable runs. Collect the baseline IDs:
+
+```bash
+retention="$(npx @genie-react/cli call devtools_capture_list '{}' --json)"
+jq -e '(.maxRetained - .pinned) >= 12' <<<"$retention" >/dev/null
+
+baseline_ids=()
+candidate_ids=()
+all_capture_ids=()
+cleanup_captures() {
+  local retained_id
+  for retained_id in "${all_capture_ids[@]}"; do
+    npx @genie-react/cli call devtools_capture_pin \
+      "$(jq -cn --arg captureId "$retained_id" \
+        '{captureId:$captureId,pinned:false}')" --json >/dev/null || true
+  done
+}
+trap cleanup_captures EXIT
+
+for run in 0 1 2 3 4 5; do
+  agent-browser --session docs-case-proof reload
+  npx @genie-react/cli call devtools_wait \
+    '{"condition":"ready","timeoutMs":10000}'
+  npx @genie-react/cli call react_clear_renders '{}'
+  agent-browser --session docs-case-proof click '[data-testid="counter"]'
+  agent-browser --session docs-case-proof get text '[data-testid="counter"]' | \
+    rg -x 'Count: 1'
+
+  capture_args="$(jq -cn --arg name "baseline-$run" \
+    '{name:$name,include:["react","effects"]}')"
+  capture="$(npx @genie-react/cli call devtools_capture_create \
+    "$capture_args" --json)"
+  capture_id="$(printf '%s\n' "$capture" | jq -er '.captureId')"
+  baseline_ids+=("$capture_id")
+  all_capture_ids+=("$capture_id")
+  npx @genie-react/cli call devtools_capture_pin \
+    "$(jq -cn --arg captureId "$capture_id" \
+      '{captureId:$captureId,pinned:true}')" --json
+done
+```
+
+Make the source change, then collect the candidate IDs with the exact same flow:
+
+```bash
+for run in 0 1 2 3 4 5; do
+  agent-browser --session docs-case-proof reload
+  npx @genie-react/cli call devtools_wait \
+    '{"condition":"ready","timeoutMs":10000}'
+  npx @genie-react/cli call react_clear_renders '{}'
+  agent-browser --session docs-case-proof click '[data-testid="counter"]'
+  agent-browser --session docs-case-proof get text '[data-testid="counter"]' | \
+    rg -x 'Count: 1'
+
+  capture_args="$(jq -cn --arg name "candidate-$run" \
+    '{name:$name,include:["react","effects"]}')"
+  capture="$(npx @genie-react/cli call devtools_capture_create \
+    "$capture_args" --json)"
+  capture_id="$(printf '%s\n' "$capture" | jq -er '.captureId')"
+  candidate_ids+=("$capture_id")
+  all_capture_ids+=("$capture_id")
+  npx @genie-react/cli call devtools_capture_pin \
+    "$(jq -cn --arg captureId "$capture_id" \
+      '{captureId:$captureId,pinned:true}')" --json
+done
+```
+
+Build the comparison input from the returned IDs:
+
+```bash
+baseline_json="$(printf '%s\n' "${baseline_ids[@]}" | jq -Rsc 'split("\n")[:-1]')"
+candidate_json="$(printf '%s\n' "${candidate_ids[@]}" | jq -Rsc 'split("\n")[:-1]')"
+comparison_args="$(jq -cn \
+  --argjson baselineCaptureIds "$baseline_json" \
+  --argjson candidateCaptureIds "$candidate_json" \
+  '{
+    baselineCaptureIds:$baselineCaptureIds,
+    candidateCaptureIds:$candidateCaptureIds,
+    metrics:["react.renders"],
+    minimumRuns:5,
+    warmupRuns:1,
+    budgets:[{metric:"react.renders",maxRegressionPct:0}]
+  }')"
+npx @genie-react/cli call devtools_capture_compare \
+  "$comparison_args" --json
+```
+
+The linked Router demo currently makes the honest decision below. These are the decisive fields from
+the full result:
+
+```json
+{
+  "kind": "capture-comparison",
+  "minimumRuns": 5,
+  "policy": {
+    "warmupRuns": 1,
+    "confidenceLevel": 0.95,
+    "minimumEffectPct": 5
+  },
+  "overall": "not-comparable",
+  "metrics": [
+    {
+      "metric": "react.renders",
+      "direction": "lower-is-better",
+      "baseline": { "samples": 0, "median": null },
+      "candidate": { "samples": 0, "median": null },
+      "comparable": false,
+      "notComparableReasons": ["render-props-not-enumerated"],
+      "verdict": "not-comparable"
+    }
+  ],
+  "violations": []
+}
+```
+
+Do not call this a win. Fix the coverage gap or narrow the claim, then repeat both cohorts. A future
+`pass` only means Genie found no budget violation. To claim an improvement, also require
+`comparable:true`, the expected direction, `confidence.significant:true`, and an effect large enough
+to matter. `not-comparable`, `insufficient-data`, and `inconclusive` are not passes.
+
+Unpin retained evidence after export or review. The exit trap runs the same cleanup after any
+earlier failure:
+
+```bash
+cleanup_captures
+trap - EXIT
+unset all_capture_ids baseline_ids candidate_ids baseline_json candidate_json
+unset capture capture_args capture_id comparison_args retention
+unset -f cleanup_captures
+```
+
+## Agent outcome
+
+The agent gets a typed evidence decision instead of treating a smaller number as proof. It accepts a
+change only when the repeated comparison is comparable and the same live UI flow still works.

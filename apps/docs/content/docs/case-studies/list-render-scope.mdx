@@ -1,0 +1,87 @@
+---
+title: Check list render scope
+description: Separate updated, idle, and unmounted keyed rows.
+icon: ListTree
+---
+
+**Demo:** `apps/demo`, `/dashboard`
+
+## Setup
+
+Start the demo in one shell:
+
+```bash
+pnpm --filter @genie-react/demo dev
+```
+
+Open and bind the page in another shell:
+
+```bash
+agent-browser --session docs-case-start open \
+  'http://localhost:3000/dashboard?_genie=docs-case-start'
+export GENIE_BRIDGE_URL=ws://localhost:3000/__genie/ws
+export GENIE_SESSION=docs-case-start
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["dashboard","metrics"],"timeoutMs":10000}'
+```
+
+## Filter 50 rows to 5
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+agent-browser --session docs-case-start find placeholder \
+  'Filter teams…' fill 'Acme'
+npx @genie-react/cli call react_component_cohort \
+  '{"component":"MetricRow","exact":true,"limit":100}' --json \
+  | jq '{status,matched,mountedUpdated,mountedIdle,mountedUnknown,unmounted,omittedByLimit,coverage}'
+```
+
+```json
+{
+  "status": "mounted-idle",
+  "matched": 50,
+  "mountedUpdated": 0,
+  "mountedIdle": 5,
+  "mountedUnknown": 0,
+  "unmounted": 45,
+  "omittedByLimit": 0,
+  "coverage": { "complete": true, "scanTruncated": false }
+}
+```
+
+## Select one row
+
+Clear again, click the first visible row, and read the cohort:
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+agent-browser --session docs-case-start find text 'Acme NA #1' click
+npx @genie-react/cli call react_component_cohort \
+  '{"component":"MetricRow","exact":true,"limit":100}' --json \
+  | jq '{status,matched,mountedUpdated,mountedIdle,mountedUnknown,unmounted,omittedByLimit,coverage}'
+```
+
+```json
+{
+  "status": "updated",
+  "matched": 5,
+  "mountedUpdated": 1,
+  "mountedIdle": 4,
+  "mountedUnknown": 0,
+  "unmounted": 0,
+  "omittedByLimit": 0,
+  "coverage": { "complete": true, "scanTruncated": false }
+}
+```
+
+## Outcome
+
+Filtering removed the expected keyed instances. Selection updated only one row. If all five rows had
+updated, the agent would inspect changed props and callback identities before adding broad
+memoization.
+
+```bash
+agent-browser --session docs-case-start reload
+agent-browser --session docs-case-start close
+unset GENIE_BRIDGE_URL GENIE_SESSION
+```

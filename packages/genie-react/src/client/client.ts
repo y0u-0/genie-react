@@ -95,9 +95,19 @@ export class GenieClient {
   }
 
   registerCollector(collector: GenieCollector): void {
-    this.collectors.push(collector)
+    const collectorId = collector.meta.id
+    const existingIndex = this.collectors.findIndex((current) => current.meta.id === collectorId)
+    if (existingIndex >= 0) {
+      if (this.collectors[existingIndex] === collector) return
+      this.cleanups.get(collectorId)?.()
+      this.cleanups.delete(collectorId)
+      this.collectors[existingIndex] = collector
+    } else {
+      this.collectors.push(collector)
+    }
+
     if (this.socket?.readyState === SOCKET_OPEN) {
-      this.registerCollectorTools(collector)
+      this.rebuildCollectorTools()
       this.sendHello()
       this.runCollectorStart(collector)
     }
@@ -125,8 +135,7 @@ export class GenieClient {
   }
 
   private onOpen(): void {
-    this.tools.clear()
-    for (const collector of this.collectors) this.registerCollectorTools(collector)
+    this.rebuildCollectorTools()
     // Hello must precede collector start() so the bridge doesn't drop snapshots pushed before the session registers.
     this.sendHello()
     for (const collector of this.collectors) this.runCollectorStart(collector)
@@ -165,6 +174,11 @@ export class GenieClient {
 
   private registerCollectorTools(collector: GenieCollector): void {
     for (const tool of collector.tools ?? []) this.tools.set(tool.contract.name, tool)
+  }
+
+  private rebuildCollectorTools(): void {
+    this.tools.clear()
+    for (const collector of this.collectors) this.registerCollectorTools(collector)
   }
 
   private runCollectorStart(collector: GenieCollector): void {

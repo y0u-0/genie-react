@@ -1,0 +1,49 @@
+---
+title: Leave the app clean
+description: Restore temporary Query and React state after a test.
+icon: Eraser
+---
+
+Action tools can change the live app. Restore every temporary change before finishing.
+
+## Query state
+
+Restore one query:
+
+```bash
+npx @genie-react/cli call query_restore_state \
+  '{"queryKey":["cart"]}'
+```
+
+Restore every simulated query:
+
+```bash
+npx @genie-react/cli call query_restore_state '{"all":true}'
+```
+
+## Component overrides
+
+List active overrides:
+
+```bash
+npx @genie-react/cli call react_list_overrides '{}'
+```
+
+Remove them:
+
+```bash
+npx @genie-react/cli call react_reset_overrides '{}'
+```
+
+## Final check
+
+1. Confirm no override remains.
+2. Confirm no query simulation remains.
+3. Check the visible page for errors.
+4. Read `react_error_state`.
+5. Save important capture JSON. The hub keeps only the latest 20 captures.
+
+## How this helps the agent
+
+The agent can test loading, error, Suspense, state, and route branches without leaving the developer's
+tab in a fake state.

@@ -1,0 +1,295 @@
+---
+title: React tree and state
+description: Find mounted instances, inspect hooks and Context, and map React to DOM.
+icon: Component
+---
+
+The JSON examples below show selected fields from the full response.
+
+## `react_get_tree`
+
+Returns a bounded flat view of the mounted React tree.
+
+**Input:** `rootId` is an optional integer. `depth` is an integer from 1 to 80 and defaults to 30.
+`includeHost` defaults to `false`. `maxNodes` is an integer from 1 to 2000 and defaults to 400.
+`appOnly` defaults to `true`.
+
+```bash
+npx @genie-react/cli call react_get_tree \
+  '{"rootId":7,"depth":5,"maxNodes":100,"appOnly":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "rootId": 7,
+  "nodes": [
+    {
+      "id": 7,
+      "parentId": null,
+      "name": "Checkout",
+      "key": null,
+      "kind": "component",
+      "source": {
+        "file": "/src/Checkout.tsx",
+        "line": 18,
+        "column": 1,
+        "functionName": "Checkout"
+      },
+      "isLibrary": false
+    }
+  ],
+  "total": 18,
+  "truncated": false,
+  "truncatedBy": null
+}
+```
+
+**Agent use:** Use `rootId` to inspect the returned instance, or raise `depth` or `maxNodes` when
+`truncatedBy` shows that the tree is incomplete.
+
+## `react_provenance`
+
+Reports wrapper ancestry, source roles, ownership, and source-map health for mounted components.
+
+**Input:** `component` is an optional component-name substring. `limit` is an integer from 1 to 500
+and defaults to 200. `appOnly` defaults to `false`; `true` keeps only records with resolved app
+ownership.
+
+```bash
+npx @genie-react/cli call react_provenance \
+  '{"component":"SearchRow","limit":50,"appOnly":false}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "records": [
+    {
+      "id": 44,
+      "name": "SearchRow",
+      "wrapperAncestry": [
+        { "kind": "memo", "name": "Memo" },
+        { "kind": "forward-ref", "name": "SearchRow" }
+      ],
+      "ownership": "unknown",
+      "source": null,
+      "provenance": {
+        "definitionSource": null,
+        "allocationCallsite": null,
+        "hookDefinitionOwner": null,
+        "hookCallsite": null,
+        "package": null,
+        "sourceMapConfidence": "unknown",
+        "failureReason": "definition-and-allocation-not-distinguished",
+        "usageOrDefinitionFallback": {
+          "file": "/src/SearchRow.tsx",
+          "line": 18,
+          "column": 2,
+          "functionName": "SearchRow"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "scanned": 1,
+    "returned": 1,
+    "resolved": 0,
+    "unresolved": 1,
+    "ownership": { "app": 0, "library": 0, "unknown": 1 },
+    "sourceMaps": {
+      "mapped": 0,
+      "served": 0,
+      "unknown": 1,
+      "status": "degraded"
+    }
+  },
+  "hiddenByOwnership": 0,
+  "omittedByLimit": 0,
+  "truncated": false
+}
+```
+
+**Agent use:** Edit a file only when the relevant source role and ownership are resolved. Here the
+fallback is ambiguous, so first fix or inspect source maps instead of treating it as the definition.
+
+## `react_find_components`
+
+Finds mounted components by display name.
+
+**Input:** `query` is a required non-empty string. `exact` defaults to `false`. `limit` is an integer
+from 1 to 200 and defaults to 50.
+
+```bash
+npx @genie-react/cli call react_find_components \
+  '{"query":"CheckoutForm","exact":true,"limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "matches": [
+    {
+      "id": 42,
+      "name": "CheckoutForm",
+      "path": "App > Checkout > CheckoutForm",
+      "kind": "function",
+      "props": { "step": 2 },
+      "source": {
+        "file": "/src/CheckoutForm.tsx",
+        "line": 18,
+        "column": 1,
+        "functionName": "CheckoutForm"
+      },
+      "isLibrary": false
+    }
+  ]
+}
+```
+
+**Agent use:** Choose the mounted instance whose ancestor `path`, props, and source match the bug,
+then pass its `id` to inspection or mutation tools.
+
+## `react_inspect_component`
+
+Reads bounded props, class state, and hooks for one mounted instance.
+
+**Input:** `id` is a required integer. `path` is an optional array of string or number segments into
+props. `depth` is an integer from 1 to 6 and defaults to 2.
+
+```bash
+npx @genie-react/cli call react_inspect_component \
+  '{"id":42,"path":["user"],"depth":4}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "id": 42,
+  "name": "CheckoutForm",
+  "kind": "function",
+  "props": { "name": "Ada" },
+  "hooks": [
+    {
+      "index": 4,
+      "kind": "state",
+      "stateful": true,
+      "stateIndex": 0,
+      "value": { "step": 2 }
+    }
+  ],
+  "wrapperAncestry": []
+}
+```
+
+**Agent use:** Use the returned `stateIndex` and current value to decide whether a hook override is
+needed and which nested `path` to change. Hook output stops at 100 entries, and memo-versus-callback
+detection is best effort.
+
+## `react_dom_for_component`
+
+Finds host elements rendered by one React component.
+
+**Input:** `id` is a required integer. `limit` is an integer from 1 to 50 and defaults to 10.
+
+```bash
+npx @genie-react/cli call react_dom_for_component \
+  '{"id":42,"limit":5}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "id": 42,
+  "name": "CheckoutForm",
+  "elements": [
+    {
+      "tag": "form",
+      "selector": "[data-testid=\"checkout\"]",
+      "domId": null,
+      "testId": "checkout",
+      "role": "form",
+      "ariaLabel": "Checkout",
+      "name": null,
+      "classes": ["checkout"],
+      "text": "Pay now"
+    }
+  ],
+  "total": 1
+}
+```
+
+**Agent use:** Use the returned role, label, test ID, or selector for the next browser action. Prefer
+semantic fields when generated CSS classes make the selector brittle.
+
+## `react_component_for_dom`
+
+Finds the React components that own DOM elements matched by a CSS selector.
+
+**Input:** `selector` is a required string. `limit` is an integer from 1 to 20 and defaults to 5.
+`propsDepth` is an integer from 0 to 4 and defaults to 1.
+
+```bash
+npx @genie-react/cli call react_component_for_dom \
+  '{"selector":"[data-testid=\"checkout\"]","limit":5,"propsDepth":2}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "selector": "[data-testid=\"checkout\"]",
+  "matched": 1,
+  "components": [
+    {
+      "id": 42,
+      "name": "CheckoutForm",
+      "kind": "function",
+      "tag": "form",
+      "props": { "step": 2 },
+      "source": {
+        "file": "/src/CheckoutForm.tsx",
+        "line": 18,
+        "column": 1,
+        "functionName": "CheckoutForm"
+      },
+      "isLibrary": false
+    }
+  ]
+}
+```
+
+**Agent use:** Use the owner `id` and exact source to inspect the visible bug or choose the file to
+edit; compare all returned owners when the selector matches more than one element.
+
+## `react_inspect_context`
+
+Reads every React Context value consumed by one component.
+
+**Input:** `id` is a required integer. `depth` is an integer from 1 to 6 and defaults to 2.
+
+```bash
+npx @genie-react/cli call react_inspect_context \
+  '{"id":42,"depth":3}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "id": 42,
+  "name": "CheckoutForm",
+  "contexts": [
+    { "name": "ThemeContext", "value": { "mode": "dark" } },
+    { "name": "AuthContext", "value": { "role": "buyer" } }
+  ]
+}
+```
+
+**Agent use:** Compare the consumed value with the expected provider value, then inspect or override
+the named Context if the wrong provider or stale value explains the UI.

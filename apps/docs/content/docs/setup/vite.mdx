@@ -1,0 +1,45 @@
+---
+title: Vite and TanStack Start
+description: Run the hub through the Vite plugin and add app collectors.
+icon: Zap
+---
+
+`init` adds the Vite plugin:
+
+```ts title="vite.config.ts"
+import { defineConfig } from 'vite'
+import { genie } from 'genie-react/vite'
+
+export default defineConfig({
+  plugins: [genie()],
+})
+```
+
+Render `Genie` near the app root for Query and Router tools:
+
+```tsx
+import { Genie } from 'genie-react'
+
+{
+  import.meta.env.DEV && <Genie appName="Storefront" />
+}
+```
+
+Genie normally finds clients from providers and Router context. Pass them directly when the app keeps
+them elsewhere:
+
+```tsx
+{
+  import.meta.env.DEV && <Genie queryClient={queryClient} router={router} />
+}
+```
+
+## Check the setup
+
+```bash
+npx @genie-react/cli doctor --live
+npx @genie-react/cli status
+```
+
+The status result lists every available data domain. Missing Query or Router domains usually means
+the matching client was not discovered.

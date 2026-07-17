@@ -1,0 +1,56 @@
+---
+title: Other web bundlers
+description: Use the standalone hub and load the React hook before React.
+icon: Boxes
+---
+
+Start the hub:
+
+```bash
+npx @genie-react/cli hub --port 4390
+```
+
+An explicit port is strict: if `4390` is occupied, the hub exits instead of walking to another port.
+Stop the process using that port or choose another fixed port and update every HTTP and WebSocket
+URL below to match.
+
+Choose exactly one client recipe.
+
+## Recipe A: hub-served global client
+
+Load the hub client first in the document head:
+
+```html
+<script src="http://localhost:4390/__genie/client.js"></script>
+```
+
+This global client adds the React and memory tools. Do not also import `createGenieClient`; two
+clients would create duplicate sessions and measurements.
+
+## Recipe B: bundled client with explicit collectors
+
+Do not add the script tag from Recipe A. In the app entry module, import the hook before React and
+start one bundled client:
+
+```ts
+import 'genie-react/hook'
+import {
+  createGenieClient,
+  reactCollector,
+  sessionCollector,
+} from 'genie-react/client'
+import { memoryCollector, queryCollector } from 'genie-react/collectors'
+import { queryClient } from './query-client'
+
+createGenieClient({
+  url: 'ws://localhost:4390/__genie/ws',
+  collectors: [
+    sessionCollector(),
+    reactCollector(),
+    memoryCollector(),
+    queryCollector(queryClient),
+  ],
+}).start()
+```
+
+`genie-react/hook` must run before React. If it runs later, React render tools cannot attach safely.

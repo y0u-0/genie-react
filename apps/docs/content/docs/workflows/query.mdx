@@ -1,0 +1,76 @@
+---
+title: TanStack Query
+description: Read cache state, wait for one exact key, and test loading or error UI.
+icon: Database
+---
+
+## List and select
+
+```bash
+npx @genie-react/cli call query_list \
+  '{"limit":20}' --fields queryHash,status,fetchStatus
+```
+
+```json
+{
+  "queryHash": "[\"demo\",\"greeting\"]",
+  "status": "success",
+  "fetchStatus": "idle"
+}
+```
+
+Read one exact key:
+
+```bash
+npx @genie-react/cli call query_get \
+  '{"queryKey":["demo","greeting"]}' --json
+```
+
+## Wait without sleeping
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["demo","greeting"],"timeoutMs":10000}' --json
+```
+
+Example output:
+
+```json
+{
+  "ok": true,
+  "waitedMs": 42,
+  "query": {
+    "queryHash": "[\"demo\",\"greeting\"]",
+    "queryKey": ["demo", "greeting"]
+  }
+}
+```
+
+## Test a state
+
+Hold the real query in pending state:
+
+```bash
+npx @genie-react/cli call query_simulate_state \
+  '{"queryKey":["demo","greeting"],"state":"pending"}'
+```
+
+```text
+ok=true · queryHash="[\"demo\",\"greeting\"]" · simulatedState="pending" · originalStatus="success"
+```
+
+Drive the page and verify the skeleton, layout, and accessible status. Then restore it:
+
+```bash
+npx @genie-react/cli call query_restore_state \
+  '{"queryKey":["demo","greeting"]}'
+```
+
+```text
+ok=true · restored=1
+```
+
+## Agent outcome
+
+The agent can verify the cache and the rendered UI in one flow. It can hold brief loading or error
+states long enough to inspect them, then return the cache to its real state.

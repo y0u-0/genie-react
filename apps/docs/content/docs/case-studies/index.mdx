@@ -1,0 +1,76 @@
+---
+title: Case studies
+description: Real flows verified against the Genie demo apps.
+icon: BookMarked
+---
+
+Every case uses both kinds of tool:
+
+- agent-browser or agent-device performs the action and checks visible UI.
+- Genie reads the live React and TanStack evidence.
+
+The commands and outputs below came from live demo runs. Component IDs and timings change between
+sessions, so always discover the current ID first.
+
+These live cases cover the Vite, TanStack Start, Router, plain web, and Expo demos. The Next.js page
+is a setup guide and does not claim a live case.
+
+<Cards>
+  <Card
+    title="Verify a native app end to end"
+    href="/docs/case-studies/native-end-to-end"
+  >
+    Press the real iOS UI, explain its render, and prove Query cache delivery.
+  </Card>
+  <Card
+    title="Verify hard-to-reach UI states"
+    href="/docs/case-studies/verify-ui-states"
+  >
+    Read props and Context, force variants, save screenshots, and restore the
+    app.
+  </Card>
+  <Card
+    title="Trace one interaction end to end"
+    href="/docs/case-studies/render-and-effect"
+  >
+    Join one click to its hook change, render cause, effect execution, and
+    coverage.
+  </Card>
+  <Card
+    title="Prove Query cache to UI"
+    href="/docs/case-studies/query-end-to-end"
+  >
+    Follow a cache write through its exact observer notification and React
+    render.
+  </Card>
+  <Card
+    title="Measure the loading-state height gap"
+    href="/docs/case-studies/loading-layout-shift"
+  >
+    Hold loading UI long enough to measure and compare its real size.
+  </Card>
+  <Card
+    title="Verify routes and forced states"
+    href="/docs/case-studies/router-and-live-states"
+  >
+    Check navigation, Suspense, and error UI without racing short-lived states.
+  </Card>
+  <Card
+    title="Check list render scope"
+    href="/docs/case-studies/list-render-scope"
+  >
+    Separate updated, idle, unmounted, and omitted keyed rows.
+  </Card>
+  <Card
+    title="Check optimization evidence"
+    href="/docs/case-studies/prove-an-optimization"
+  >
+    Compare repeated cohorts and reject incomplete or noisy evidence.
+  </Card>
+  <Card
+    title="Keep agents on separate tabs"
+    href="/docs/case-studies/multi-agent-sessions"
+  >
+    Pin each agent to its own document and fail on ambiguous targets.
+  </Card>
+</Cards>

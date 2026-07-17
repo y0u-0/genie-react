@@ -1,0 +1,269 @@
+---
+title: Query reads
+description: Inspect TanStack Query cache data, observers, fetches, and mutations.
+icon: Database
+---
+
+The JSON examples below show selected fields from the full response.
+
+Use one exact `queryHash` or structured `queryKey` returned by the cache list. If both are sent,
+`query_get` prefers the hash, while `query_get_data` prefers the key.
+
+## `query_list`
+
+Lists queries in the live cache.
+
+**Input:** `staleOnly` is optional and defaults to `false`. `limit` is an optional integer from 1
+to 500 and defaults to 100.
+
+```bash
+npx @genie-react/cli call query_list '{"limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "queries": [
+    {
+      "queryHash": "[\"todos\"]",
+      "queryKey": ["todos"],
+      "status": "success",
+      "fetchStatus": "idle",
+      "isStale": false,
+      "isActive": true,
+      "observerCount": 1,
+      "dataUpdatedAt": 1750000000000,
+      "recentFetches": 1
+    }
+  ],
+  "total": 1,
+  "churn": { "orphaned": 0, "families": [] }
+}
+```
+
+**Agent use:** Selects the exact hash or key for a follow-up read and identifies stale, fetching,
+inactive, or churn-prone entries before checking the matching UI.
+
+`limit` truncates `queries`, not `total`. `churn` is computed across the whole cache and reports at
+most 10 families. `recentFetches` counts fetches seen in the last 10 seconds.
+
+## `query_notifications`
+
+Lists retained QueryObserver delivery events and their exact notification-to-render joins.
+
+**Input:** `observerId` is an optional exact observer ID from `query_get`. `limit` is an optional
+integer from 1 to 500 and defaults to 100.
+
+```bash
+npx @genie-react/cli call query_notifications \
+  '{"observerId":"query-observer:1","limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "events": [
+    {
+      "notificationId": "query-notification:12",
+      "observerId": "query-observer:1",
+      "observationId": "observation:1",
+      "trackedFields": ["data"],
+      "trackedFieldsCoverage": "exact",
+      "changedResultFields": ["data", "dataUpdatedAt"],
+      "deliveryReason": "tracked-field-changed:data",
+      "fanout": 1,
+      "structuralSharing": {
+        "reusedFields": ["status"],
+        "changedFields": ["data", "dataUpdatedAt"],
+        "truncated": false
+      },
+      "renderEventIds": ["render:7:3"]
+    }
+  ],
+  "omittedByLimit": 0
+}
+```
+
+**Agent use:** Attributes a component render to one exact observer notification, then decides
+whether a tracked field changed, structural sharing was preserved, and the delivery reached the
+expected render event.
+
+The runtime retains only the newest 1,000 query notification events. Results are newest first.
+`limit` and `observerId` only filter the response; they do not clear retained events. A
+`trackedFieldsCoverage` of `unavailable` cannot prove which property triggered delivery, and an
+empty `renderEventIds` cannot prove that React rendered from that notification.
+
+## `query_get`
+
+Reads one query with its data, options, fetch counts, and observers.
+
+**Input:** `queryHash` and `queryKey` are optional, but at least one is required; if both are sent,
+`queryHash` wins. `path` is an optional array of string or number segments. `depth` is an optional
+integer from 1 to 6 and defaults to 3.
+
+```bash
+npx @genie-react/cli call query_get \
+  '{"queryHash":"[\"todos\"]","path":["items",0],"depth":4}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "queryHash": "[\"todos\"]",
+  "queryKey": ["todos"],
+  "status": "success",
+  "fetchStatus": "idle",
+  "isStale": false,
+  "isInvalidated": false,
+  "observerCount": 1,
+  "hasQueryFn": true,
+  "fetchCount": 3,
+  "recentFetches": 1,
+  "data": { "id": 1, "title": "Ship docs" },
+  "observers": [
+    {
+      "observerId": "query-observer:1",
+      "notificationPolicy": {
+        "mode": "auto-tracked",
+        "fields": ["data"],
+        "trackedFieldsAvailable": true
+      },
+      "deliveryEvidence": "public-track-prop-observed",
+      "subscriberObservationStatus": "current-observation",
+      "subscriber": {
+        "componentId": 42,
+        "componentName": "TodoList",
+        "observationId": "observation:1",
+        "renderEventId": "render:7:3"
+      }
+    }
+  ],
+  "observersOmitted": 0
+}
+```
+
+**Agent use:** Selects the observer for `query_notifications` and decides whether current cache
+data, fetch activity, observer policy, and component subscriber evidence explain the visible UI.
+
+Data is depth-bounded after `path` is applied. At most 100 observers are returned; check
+`observersOmitted`. Treat subscriber evidence as current only when
+`subscriberObservationStatus` is `current-observation`.
+
+## `query_get_data`
+
+Reads only the bounded data for one query.
+
+**Input:** `queryHash` and `queryKey` are optional, but at least one is required; if both are sent,
+`queryKey` wins. `path` is an optional array of string or number segments. `depth` is an optional
+integer from 1 to 6 and defaults to 3.
+
+```bash
+npx @genie-react/cli call query_get_data \
+  '{"queryHash":"[\"todos\"]","path":["items"],"depth":2}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "found": true,
+  "status": "success",
+  "dataUpdatedAt": 1750000000000,
+  "data": [{ "id": 1, "title": "Ship docs" }]
+}
+```
+
+**Agent use:** Decides whether one exact cached value matches the rendered page when observer and
+fetch details are not needed.
+
+Data is depth-bounded after `path` is applied. `found:false` means no state exists for the exact
+key; `data` may still be absent for an existing pending query.
+
+## `query_is_fetching`
+
+Counts active query fetches and mutations.
+
+**Input:** `queryKey` is an optional structured key prefix for the query count. The mutation count
+has no filter and is always global.
+
+```bash
+npx @genie-react/cli call query_is_fetching '{"queryKey":["todos"]}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "fetching": 0, "mutating": 0 }
+```
+
+**Agent use:** Decides whether to wait before reading cache state or asserting the UI.
+
+This is a point-in-time count and does not wait. The query key matches by prefix. Use a targeted
+query-settled wait when one exact key must be stable.
+
+## `query_list_mutations`
+
+Lists mutation instances kept in the live mutation cache.
+
+**Input:** `{}`.
+
+```bash
+npx @genie-react/cli call query_list_mutations '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "mutations": [
+    {
+      "mutationId": 7,
+      "status": "success",
+      "variables": { "title": "Ship docs" },
+      "submittedAt": 1750000000000
+    }
+  ]
+}
+```
+
+**Agent use:** Selects the exact mutation ID for `mutation_get` before checking success, error, or
+retry UI.
+
+The call returns every mutation still retained by TanStack Query. Variables are depth-bounded to 2. This read does not delete retained mutations.
+
+## `mutation_get`
+
+Reads one mutation in detail.
+
+**Input:** `mutationId` is a required integer from `query_list_mutations`. `depth` is an optional
+integer from 1 to 6 and defaults to 3.
+
+```bash
+npx @genie-react/cli call mutation_get '{"mutationId":7,"depth":4}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "mutationId": 7,
+  "status": "success",
+  "mutationKey": ["addTodo"],
+  "variables": { "title": "Ship docs" },
+  "data": { "id": 9 },
+  "isPaused": false,
+  "failureCount": 0,
+  "submittedAt": 1750000000000,
+  "hasMutationFn": true
+}
+```
+
+**Agent use:** Decides whether the retained variables, result, failure state, and mutation function
+make replay technically possible. Replay safety still depends on application semantics or a
+disposable fixture.
+
+Variables and data are depth-bounded. This read does not replay or delete the retained mutation.
+`hasMutationFn:false` means `mutation_rerun` cannot execute it.

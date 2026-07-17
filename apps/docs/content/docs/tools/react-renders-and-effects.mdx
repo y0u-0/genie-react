@@ -1,0 +1,798 @@
+---
+title: Renders, effects, and profiling
+description: Measure React work, render causes, effect schedules, errors, and before/after changes.
+icon: Gauge
+---
+
+The JSON examples below show selected fields from the full response.
+
+## `react_clear_renders`
+
+Clears render counters and starts a new causal observation window.
+
+**Input:** `components` defaults to `[]`, accepts at most 50 display-name substrings, and trims each
+1–160 character string. `roots` defaults to `[]` and accepts at most 20 integer component IDs.
+`budget` is optional. `fiberLimit` defaults to 250, `operationLimit` to 20000, `timeLimitMs` to 8,
+`targetOperationReserve` to 4000, `targetTimeReserveMs` to 4, and `adaptive` to `true`; the numeric ranges are
+50–5000, 1000–200000, 1–50, 100–50000, and 0.5–25 respectively. `lifecycle`
+defaults to `{bufferLimit:1000,targetReserve:100}`; `bufferLimit` is an integer from 100 to 20000,
+`targetReserve` is an integer from 0 to 5000, and the reserve cannot exceed the buffer.
+
+```bash
+npx @genie-react/cli call react_clear_renders \
+  '{"components":["ProductCard"],"budget":{"fiberLimit":500,"timeLimitMs":12}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "tracking": true,
+  "documentCommitId": 18,
+  "observation": {
+    "id": "observation:2",
+    "epoch": 2,
+    "startedAfterDocumentCommitId": 18
+  },
+  "observationConfig": {
+    "adaptive": true,
+    "fiberLimit": 500,
+    "timeLimitMs": 12
+  }
+}
+```
+
+**Agent use:** Drive exactly one interaction next, then join render and effect evidence by
+`observation.id`. This call discards earlier counters and starts fresh retained histories, so capture
+needed evidence before clearing again.
+
+## `react_get_renders`
+
+Summarizes component render counts, changed inputs, timing, mount identity, and source.
+
+**Input:** `component` is an optional component-name substring. `sort` is `renders`, `unnecessary`,
+`referenceOnly`, `unstable`, or `selfTime` and defaults to `renders`. `limit` is an integer from 1 to
+200 and defaults to 40. `appOnly` defaults to `true`.
+
+```bash
+npx @genie-react/cli call react_get_renders \
+  '{"component":"ProductCard","sort":"selfTime","limit":10,"appOnly":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "tracking": true,
+  "commits": 3,
+  "documentCommitId": 21,
+  "observation": {
+    "id": "observation:2",
+    "epoch": 2,
+    "startedAfterDocumentCommitId": 18
+  },
+  "summary": { "totalRenders": 12, "totalUpdates": 8 },
+  "components": [
+    {
+      "id": 51,
+      "name": "ProductCard",
+      "instance": {
+        "mountId": "mount:9",
+        "key": "sku-1",
+        "logicalPath": "ProductList[key=sku-1] > ProductCard[key=sku-1]",
+        "logicalIdentityEvidence": "keyed",
+        "mountGeneration": 1
+      },
+      "renders": 4,
+      "updates": 4,
+      "selfTime": 1.2,
+      "cumulativeSelfTime": 3.4,
+      "causes": [
+        {
+          "kind": "state",
+          "evidence": "exact",
+          "name": "state[0]",
+          "before": { "selected": false },
+          "after": { "selected": true },
+          "deepDiff": {
+            "changes": [
+              {
+                "kind": "value",
+                "path": "selected",
+                "before": false,
+                "after": true
+              }
+            ],
+            "visited": 2,
+            "truncated": false
+          },
+          "hook": { "index": 0, "stateIndex": 0, "kind": "state" }
+        }
+      ]
+    }
+  ],
+  "omittedByLimit": 0,
+  "coverage": { "complete": true, "inputAttributionComplete": true }
+}
+```
+
+**Agent use:** Optimize the highest cumulative cost only after the exact changed path and complete
+coverage explain the render. Compatibility counts such as `unnecessary` are not proof that a render
+is safe to remove.
+
+## `react_render_causes`
+
+Returns joinable render events and their observed causes.
+
+**Input:** `commit` and `afterCommit` are optional nonnegative integers and are mutually exclusive.
+`component` is an optional substring. `limit` is an integer from 1 to 500 and defaults to 100.
+`appOnly` defaults to `true`.
+
+```bash
+npx @genie-react/cli call react_render_causes \
+  '{"component":"ProductCard","afterCommit":1,"limit":20,"appOnly":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "tracking": true,
+  "documentCommitId": 21,
+  "observation": {
+    "id": "observation:2",
+    "epoch": 2,
+    "startedAfterDocumentCommitId": 18
+  },
+  "events": [
+    {
+      "renderEventId": "render:20:7",
+      "observationId": "observation:2",
+      "commitId": 2,
+      "documentCommitId": 20,
+      "componentId": 51,
+      "componentName": "ProductCard",
+      "instance": {
+        "mountId": "mount:9",
+        "key": "sku-1",
+        "mountGeneration": 1,
+        "logicalIdentityEvidence": "keyed"
+      },
+      "causes": [
+        {
+          "kind": "state",
+          "evidence": "exact",
+          "name": "state[0]",
+          "before": false,
+          "after": true,
+          "deepDiff": {
+            "changes": [
+              { "kind": "value", "path": "", "before": false, "after": true }
+            ],
+            "visited": 1,
+            "truncated": false
+          },
+          "hook": { "index": 0, "stateIndex": 0, "kind": "state" }
+        }
+      ],
+      "sourceOwnership": "app"
+    }
+  ],
+  "omittedByLimit": 0,
+  "coverage": {
+    "complete": true,
+    "inputAttributionComplete": true,
+    "droppedRenderEvents": 0
+  },
+  "renderEventRetention": {
+    "evictedEvents": 0,
+    "earliestDocumentCommitId": 19,
+    "latestDocumentCommitId": 20
+  }
+}
+```
+
+**Agent use:** Join `renderEventId`, observation, document commit, mount, and hook IDs to the action,
+then change the producer of the exact input. Repeat the interaction if events were evicted or
+coverage is incomplete.
+
+## `react_component_cohort`
+
+Reports lifecycle outcomes for every matching component instance in the current observation.
+
+**Input:** `component` is a required non-empty string. `exact` defaults to `true`. `limit` is an
+integer from 1 to 200 and defaults to 50.
+
+```bash
+npx @genie-react/cli call react_component_cohort \
+  '{"component":"ProductCard","exact":true,"limit":100}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "observation": {
+    "id": "observation:2",
+    "epoch": 2,
+    "startedAfterDocumentCommitId": 18
+  },
+  "query": { "component": "ProductCard", "exact": true },
+  "status": "updated",
+  "matched": 1,
+  "mountedUpdated": 1,
+  "mountedIdle": 0,
+  "mountedUnknown": 0,
+  "unmounted": 0,
+  "returned": 1,
+  "omittedByLimit": 0,
+  "instances": [
+    {
+      "componentName": "ProductCard",
+      "status": "mounted-updated",
+      "instance": {
+        "mountId": "mount:9",
+        "key": "sku-1",
+        "logicalIdentityEvidence": "keyed",
+        "mountGeneration": 1
+      },
+      "profileCommitId": 2,
+      "documentCommitId": 20
+    }
+  ],
+  "coverage": { "complete": true, "scanTruncated": false }
+}
+```
+
+**Agent use:** Decide whether a list fix targets updated rows, unmounted rows, or identity churn.
+Do not call absent or omitted instances idle; require complete cohort coverage first.
+
+## `react_effect_audit`
+
+Ranks effect schedules and reports dependency, cleanup, hotness, and ownership evidence.
+
+**Input:** `component` is an optional substring. `onlyHot` defaults to `false`. `appOnly` defaults to
+`true`. `packageName` is an optional trimmed string of 1–214 characters and requires
+`appOnly:false`. `minUpdates` is an integer from 1 to 1000 and defaults to 3. Legacy `minFireRate`
+is from 0.1 to 1 and defaults to 1. Preferred `minScheduleRate` is optional, is from 0.1 to 1, and
+takes precedence. `limit` is an integer from 1 to 200 and defaults to 40.
+
+```bash
+npx @genie-react/cli call react_effect_audit \
+  '{"component":"Search","onlyHot":true,"minUpdates":5,"minScheduleRate":0.8,"limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "tracking": true,
+  "commits": 6,
+  "documentCommitId": 24,
+  "attribution": { "status": "current" },
+  "hotnessCriteria": {
+    "minUpdates": 5,
+    "minScheduleRate": 0.8,
+    "minFireRate": 0.8,
+    "confidenceLevel": 0.95
+  },
+  "components": [
+    {
+      "id": 60,
+      "name": "Search",
+      "componentProvenance": {
+        "ownership": "app",
+        "evidence": "inferred",
+        "reason": "nearest-symbolicated-fiber",
+        "source": {
+          "file": "/src/Search.tsx",
+          "line": 12,
+          "column": 1,
+          "functionName": "Search"
+        }
+      },
+      "effects": [
+        {
+          "index": 1,
+          "kind": "effect",
+          "depsMode": "list",
+          "depCount": 1,
+          "scheduled": 5,
+          "updates": 5,
+          "lastChangedDep": 0,
+          "cleanupFunctionObserved": true,
+          "provenance": {
+            "ownership": "app",
+            "evidence": "exact",
+            "reason": "exact-hook-order",
+            "hookCallsite": {
+              "file": "/src/useSearch.ts",
+              "line": 21,
+              "column": 3,
+              "functionName": "useSearch"
+            },
+            "hookDefinitionOwner": {
+              "file": "/src/useSearch.ts",
+              "line": 8,
+              "column": 1,
+              "functionName": "useSearch"
+            },
+            "package": null,
+            "sourceMapConfidence": "mapped",
+            "failureReason": null
+          },
+          "hotness": {
+            "label": "hot",
+            "samples": 5,
+            "observedRate": 1,
+            "minUpdates": 5,
+            "minScheduleRate": 0.8,
+            "confidenceInterval": { "level": 0.95, "lower": 0.57, "upper": 1 },
+            "scheduleReason": "meets-threshold"
+          }
+        }
+      ]
+    }
+  ],
+  "omittedByLimit": 0,
+  "effectsOmittedByLimit": 0,
+  "coverage": { "complete": true, "inputAttributionComplete": true }
+}
+```
+
+**Agent use:** Inspect the exact hook callsite and changed dependency before editing the effect. A
+schedule does not prove execution or cleanup timing, and unknown ownership must not be assigned to
+the app.
+
+## `react_effect_timeline`
+
+Returns the preferred causal timeline for effect scheduling, execution, cleanup, and observed consequences.
+
+**Input:** `component` is an optional substring. `afterDocumentCommitId` is an optional nonnegative
+integer. `limit` is an integer from 1 to 500 and defaults to 100.
+
+```bash
+npx @genie-react/cli call react_effect_timeline \
+  '{"component":"Search","afterDocumentCommitId":18,"limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "tracking": false,
+  "documentCommitId": 21,
+  "observation": {
+    "id": "observation:2",
+    "epoch": 2,
+    "startedAfterDocumentCommitId": 18
+  },
+  "events": [
+    {
+      "effectEventId": "effect:20:8",
+      "effectId": "effect:mount:4:1",
+      "observationId": "observation:2",
+      "commitId": 2,
+      "documentCommitId": 20,
+      "componentId": 60,
+      "componentName": "Search",
+      "mountId": "mount:4",
+      "effectIndex": 1,
+      "kind": "effect",
+      "phase": "update",
+      "event": "scheduled",
+      "evidence": "exact",
+      "changedDependencySlots": [0],
+      "changedDependencySlotsOmitted": 0,
+      "dependencySlotsUnscanned": 0,
+      "execution": {
+        "status": "observed",
+        "evidence": "exact",
+        "startedAt": 1042.1,
+        "completedAt": 1043.34,
+        "durationMs": 1.24,
+        "outcome": "completed"
+      },
+      "cleanupExecution": {
+        "status": "unobserved",
+        "reason": "no-cleanup-returned"
+      },
+      "consequences": {
+        "status": "instrumented",
+        "observedDomains": [
+          "query-notification",
+          "router-notification",
+          "react-commit"
+        ],
+        "unobservedDomains": [
+          "state-update",
+          "external-store-write",
+          "network",
+          "event-listener",
+          "navigation"
+        ],
+        "events": [
+          {
+            "kind": "notification",
+            "domain": "query-notification",
+            "notificationId": "query-notification:7",
+            "timestamp": 1043.5,
+            "evidence": "exact"
+          },
+          {
+            "kind": "resulting-commit",
+            "documentCommitId": 21,
+            "timestamp": 1044.2,
+            "evidence": "inferred",
+            "reason": "next-commit-after-effect-execution"
+          }
+        ]
+      },
+      "timeline": [
+        {
+          "stage": "schedule",
+          "timestamp": 1041.8,
+          "evidence": "exact",
+          "referenceId": "effect:20:8"
+        },
+        {
+          "stage": "execution",
+          "timestamp": 1042.1,
+          "evidence": "exact",
+          "outcome": "completed"
+        },
+        {
+          "stage": "consequence",
+          "timestamp": 1043.5,
+          "evidence": "exact",
+          "referenceId": "query-notification:7"
+        },
+        {
+          "stage": "resulting-commit",
+          "timestamp": 1044.2,
+          "evidence": "inferred"
+        }
+      ]
+    }
+  ],
+  "omittedByLimit": 0,
+  "evictedEvents": 0,
+  "droppedEvents": 0,
+  "coverage": { "complete": true }
+}
+```
+
+**Agent use:** Follow the exact notification ID to its consumer, but treat the next React commit as
+inferred and the listed unobserved domains as unknown. Repeat a clean observation when events were
+evicted or coverage is incomplete.
+
+## `react_effect_events`
+
+Returns the same bounded effect causal timeline under the legacy event-oriented name.
+
+**Input:** `component` is an optional substring. `afterDocumentCommitId` is an optional nonnegative
+integer. `limit` is an integer from 1 to 500 and defaults to 100.
+
+```bash
+npx @genie-react/cli call react_effect_events \
+  '{"component":"Search","afterDocumentCommitId":18,"limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "tracking": true,
+  "documentCommitId": 20,
+  "events": [
+    {
+      "effectEventId": "effect:20:8",
+      "effectId": "effect:mount:4:1",
+      "observationId": "observation:2",
+      "commitId": 2,
+      "documentCommitId": 20,
+      "componentName": "Search",
+      "mountId": "mount:4",
+      "effectIndex": 1,
+      "kind": "effect",
+      "phase": "update",
+      "event": "scheduled",
+      "evidence": "exact",
+      "changedDependencySlots": [0],
+      "changedDependencySlotsOmitted": 0,
+      "dependencySlotsUnscanned": 0,
+      "execution": { "status": "unobserved", "reason": "not-yet-observed" },
+      "cleanupExecution": {
+        "status": "unobserved",
+        "reason": "not-yet-observed"
+      },
+      "consequences": {
+        "status": "instrumented",
+        "observedDomains": [
+          "query-notification",
+          "router-notification",
+          "react-commit"
+        ],
+        "unobservedDomains": [
+          "state-update",
+          "external-store-write",
+          "network",
+          "event-listener",
+          "navigation"
+        ],
+        "events": []
+      },
+      "timeline": [
+        {
+          "stage": "schedule",
+          "timestamp": 1041.8,
+          "evidence": "exact",
+          "referenceId": "effect:20:8"
+        }
+      ]
+    }
+  ],
+  "omittedByLimit": 0,
+  "evictedEvents": 0,
+  "droppedEvents": 0,
+  "coverage": { "complete": true }
+}
+```
+
+**Agent use:** Wait and read again when execution is `not-yet-observed`; do not infer that the
+effect ran from its schedule. Prefer `react_effect_timeline` in new workflows.
+
+## `react_error_state`
+
+Reads caught errors, active Suspense boundaries, and a blank-tree hint.
+
+**Input:** `includeSource` defaults to `true`. `limit` is an integer from 1 to 100 and defaults to 20.
+
+```bash
+npx @genie-react/cli call react_error_state \
+  '{"includeSource":true,"limit":20}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "caughtErrors": [
+    {
+      "boundaryId": 10,
+      "boundaryName": "CheckoutErrorBoundary",
+      "boundarySource": {
+        "file": "/src/CheckoutErrorBoundary.tsx",
+        "line": 7,
+        "column": 1,
+        "functionName": "CheckoutErrorBoundary"
+      },
+      "throwingComponent": "PaymentForm",
+      "message": "Payment failed",
+      "isLibraryBoundary": false,
+      "forced": false
+    }
+  ],
+  "suspended": [],
+  "blankTreeHint": null
+}
+```
+
+**Agent use:** Inspect the error, stack, throwing component, and boundary, then fix only the proven
+producer. If `forced:true`, reset overrides before diagnosing production behavior.
+
+## `react_refresh_events`
+
+Reports Fast Refresh files, preserved instances, remounts, and excluded profile commits.
+
+**Input:** `afterSequence` is an optional nonnegative integer. `limit` is an integer from 1 to 50
+and defaults to 10. `includeSource` defaults to `true`.
+
+```bash
+npx @genie-react/cli call react_refresh_events \
+  '{"afterSequence":12,"limit":10,"includeSource":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "events": [
+    {
+      "sequence": 13,
+      "timestamp": 1752746705000,
+      "filePaths": ["/src/Cart.tsx"],
+      "updatedComponents": ["Cart"],
+      "remountedComponents": [],
+      "preservedState": [
+        {
+          "id": 31,
+          "name": "Cart",
+          "source": {
+            "file": "/src/Cart.tsx",
+            "line": 9,
+            "column": 1,
+            "functionName": "Cart"
+          },
+          "isLibrary": false
+        }
+      ],
+      "counts": {
+        "updatedComponents": 1,
+        "remountedComponents": 0,
+        "updatedFibers": 1,
+        "remountedFibers": 0
+      },
+      "profileCommitsExcluded": 1,
+      "truncated": false
+    }
+  ],
+  "latestSequence": 13,
+  "droppedEvents": 0,
+  "partialSources": false
+}
+```
+
+**Agent use:** Rerun the measured interaction when a refresh overlaps it, and investigate component
+identity when the edit remounted state that should have been preserved.
+
+## `react_profile_start`
+
+Clears render counters and starts a profiling observation.
+
+**Input:** `components` defaults to `[]`, accepts at most 50 display-name substrings, and trims each
+1–160 character string. `roots` defaults to `[]` and accepts at most 20 integer component IDs.
+`budget` is optional. `fiberLimit` defaults to 250, `operationLimit` to 20000, `timeLimitMs` to 8,
+`targetOperationReserve` to 4000, `targetTimeReserveMs` to 4, and `adaptive` to `true`; the numeric ranges are
+50–5000, 1000–200000, 1–50, 100–50000, and 0.5–25 respectively. `lifecycle`
+defaults to `{bufferLimit:1000,targetReserve:100}`; `bufferLimit` is an integer from 100 to 20000,
+`targetReserve` is an integer from 0 to 5000, and the reserve cannot exceed the buffer.
+
+```bash
+npx @genie-react/cli call react_profile_start \
+  '{"components":["SearchResults"],"lifecycle":{"bufferLimit":2000,"targetReserve":200}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "tracking": true,
+  "documentCommitId": 24,
+  "observation": {
+    "id": "observation:3",
+    "epoch": 3,
+    "startedAfterDocumentCommitId": 24
+  },
+  "observationConfig": {
+    "lifecycleBufferLimit": 2000,
+    "lifecycleTargetReserve": 200
+  }
+}
+```
+
+**Agent use:** Run the exact flow to measure next, then stop before reading the final report. Starting
+clears current counters but keeps named snapshots for later diffs.
+
+## `react_profile_stop`
+
+Stops profiling while retaining aggregates and named snapshots.
+
+**Input:** `{}`; this tool has no input fields.
+
+```bash
+npx @genie-react/cli call react_profile_stop '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "tracking": false, "commits": 5 }
+```
+
+**Agent use:** Read reports from the frozen five-commit window before another start or clear changes
+the counters. Stopping does not uninstall instrumentation or delete retained snapshots.
+
+## `react_profile_snapshot`
+
+Stores current app-component aggregates as a named diff baseline.
+
+**Input:** `label` is a string and defaults to `baseline`; reusing a label replaces its snapshot.
+
+```bash
+npx @genie-react/cli call react_profile_snapshot \
+  '{"label":"search-before"}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "label": "search-before",
+  "commits": 5,
+  "components": 18,
+  "coverage": { "complete": true, "inputAttributionComplete": true }
+}
+```
+
+**Agent use:** Keep this baseline only if coverage is complete, then run the same flow after the
+change and compare it by label. Reuse the label to replace stale retained data.
+
+## `react_renders_diff`
+
+Compares current render aggregates with a named profile snapshot.
+
+**Input:** `baseline` is a string and defaults to `baseline`. `thresholdMs` is a number with no
+contract range and defaults to 0.5.
+
+```bash
+npx @genie-react/cli call react_renders_diff \
+  '{"baseline":"search-before","thresholdMs":0.5}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "baseline": "search-before",
+  "commits": { "before": 5, "after": 4 },
+  "clearsSinceBaseline": 1,
+  "coverage": {
+    "baseline": { "complete": true },
+    "current": { "complete": true }
+  },
+  "selfTimeMs": { "before": 14.2, "after": 8.1, "delta": -6.1, "pct": -43 },
+  "regressed": [],
+  "improved": [
+    {
+      "name": "SearchResults",
+      "source": "/src/SearchResults.tsx:11",
+      "deltaMs": -5.4,
+      "before": { "renders": 5, "selfTime": 11.7 },
+      "after": { "renders": 4, "selfTime": 6.3 }
+    }
+  ],
+  "added": [],
+  "removed": []
+}
+```
+
+**Agent use:** Accept the change only when equivalent flows and complete coverage show the intended
+component improved without regressions. When counters were cleared, `removed` means not observed in
+the current window, not deleted from source.
+
+## `react_profile_report`
+
+Returns bounded render-cost and render-count leaderboards for the current profile.
+
+**Input:** `limit` is an integer from 1 to 100 and defaults to 20.
+
+```bash
+npx @genie-react/cli call react_profile_report \
+  '{"limit":10}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "commits": 4,
+  "tracking": false,
+  "documentCommitId": 28,
+  "attribution": { "status": "current" },
+  "coverage": { "complete": true, "inputAttributionComplete": true },
+  "slowest": [
+    { "id": 51, "name": "ProductCard", "selfTime": 2.1, "renders": 4 }
+  ],
+  "mostRerendered": [
+    { "id": 51, "name": "ProductCard", "renders": 4, "unnecessary": 0 }
+  ],
+  "mostReferenceOnly": []
+}
+```
+
+**Agent use:** Use the slowest or most-rendered row as a shortlist, then inspect its exact render
+causes before editing. Causal leaderboards are not sufficient when input attribution is incomplete.

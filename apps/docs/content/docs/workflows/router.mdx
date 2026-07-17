@@ -1,0 +1,63 @@
+---
+title: TanStack Router
+description: Compare Router and browser state, build locations, and test navigation.
+icon: Route
+---
+
+## Read the current state
+
+```bash
+npx @genie-react/cli call router_get_state '{}' --json
+```
+
+Check `locationSync`. A mismatch means Router state and browser history did not agree in the same
+snapshot.
+
+## Inspect the route tree
+
+```bash
+npx @genie-react/cli call router_list_routes '{}'
+npx @genie-react/cli call router_list_matches '{}'
+```
+
+## Build before navigating
+
+```bash
+npx @genie-react/cli call router_build_location \
+  '{"to":"/products/$productId","params":{"productId":"42"},"search":{"source":"agent-check"}}' --json
+```
+
+Use the same input to navigate:
+
+```bash
+npx @genie-react/cli call router_navigate \
+  '{"to":"/products/$productId","params":{"productId":"42"},"search":{"source":"agent-check"}}' --json
+```
+
+Wait for the route instead of sleeping:
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"navigation","name":"/products/42","timeoutMs":10000}' --json
+```
+
+Then prove Router and browser history agree. Replace `router-check` with the browser session bound to
+this Genie session:
+
+```bash
+router_state="$(npx @genie-react/cli call router_get_state '{}' --json)"
+printf '%s\n' "$router_state" | \
+  jq -e '
+    .pathname == "/products/42" and
+    .searchStr == "?source=agent-check" and
+    .locationSync == "matched"
+  '
+agent-browser --session router-check \
+  eval 'location.pathname === "/products/42" && location.search === "?source=agent-check"' \
+  | rg -x 'true'
+```
+
+## Agent outcome
+
+The agent can verify generated params and search, active matches, history state, and the final browser
+URL. It does not have to trust a click or pathname alone.

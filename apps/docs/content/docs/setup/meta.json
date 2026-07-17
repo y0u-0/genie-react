@@ -1,0 +1,5 @@
+{
+  "title": "Setup",
+  "icon": "Wrench",
+  "pages": ["index", "vite", "nextjs", "other-web", "react-native"]
+}

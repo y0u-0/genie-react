@@ -12,6 +12,8 @@ Genie lets an agent inspect the app that is running now. It can explain renders,
 
 Genie is for development only. The hub listens on localhost.
 
+[Read the full docs](https://genie-react.com/docs).
+
 ## Quick start
 
 ```bash
@@ -233,22 +235,31 @@ It normally finds the Router and Query client. You can also pass them:
 
 ### Next.js
 
-`init` adds `<GenieScript />` to the root layout and creates `instrumentation.ts`.
+`init` adds `<GenieScript />` to the root layout and creates `instrumentation.ts`. This setup uses
+the Next.js App Router. It does not use TanStack Router.
 
-To add Query tools, pass the same client used by `QueryClientProvider`:
+To add Query tools, register the same client used by `QueryClientProvider`:
 
 ```tsx
 'use client'
 
-import { Genie } from 'genie-react'
+import { queryCollector } from 'genie-react/collectors/query'
+import { registerGenieCollector } from 'genie-react/protocol'
+import { useEffect } from 'react'
 import { queryClient } from './query-client'
 
-export function GenieRuntime() {
-  return process.env.NODE_ENV === 'production' ? null : <Genie queryClient={queryClient} />
+export function GenieQueryTools() {
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return
+
+    return registerGenieCollector(queryCollector(queryClient))
+  }, [])
+
+  return null
 }
 ```
 
-Render `<GenieRuntime />` near `<GenieScript />` in the root layout.
+Render `<GenieQueryTools />` after `<GenieScript />` in the root layout.
 
 ### Other web bundlers
 
@@ -365,6 +376,8 @@ Vite runs the hub inside its development server. Next.js and other setups run a 
 | `genie-react/native` | React Native and Expo |
 | `genie-react/client` | Browser client |
 | `genie-react/collectors` | Individual collectors |
+| `genie-react/collectors/query` | Query collector without Router types |
+| `genie-react/collectors/router` | Router collector |
 | `genie-react/hub` | Local hub |
 | `genie-react/protocol` | Tool and wire types |
 | `@genie-react/cli` | Terminal commands |

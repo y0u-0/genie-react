@@ -1,0 +1,63 @@
+---
+title: Troubleshooting
+description: Fix connection, readiness, targeting, and incomplete-result problems.
+icon: CircleQuestionMark
+---
+
+## No bridge found
+
+Run the command from the app folder:
+
+```bash
+npx @genie-react/cli doctor --json \
+  | jq '{ok, bridgeCandidates, remediation}'
+```
+
+Follow the returned `remediation` entries. Start the dev server or standalone hub, then inspect the
+status connection phases separately:
+
+```bash
+npx @genie-react/cli status --verbose
+```
+
+`doctor --verbose` is not a supported command.
+
+## More than one bridge matches
+
+Move into the correct app folder or pass `--url`. Genie stops on ambiguity instead of guessing.
+
+## No ready session
+
+Open the app in a browser, then wait:
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"ready","timeoutMs":10000}'
+```
+
+## More than one tab matches
+
+Name the tab with `?_genie=my-agent`, then set `GENIE_SESSION=my-agent`.
+
+## Query or Router tools are missing
+
+Render `<Genie />` near the matching provider. Pass `queryClient` or `router` directly if automatic
+discovery cannot see it.
+
+## React tools are missing
+
+The hook must load before React. Check the Vite plugin or make the manual client script the first
+script in the document head.
+
+## A result is incomplete
+
+Read its limit, truncation, and coverage fields. Use a smaller flow, a component filter, `rootId`, a
+larger allowed limit, or a focused package filter.
+
+## A Query wait is ambiguous
+
+Use the exact `queryHash` or structured `queryKey` returned by `query_list`.
+
+## The app is busy
+
+Wait for the returned retry delay. A blocked main thread cannot answer a runtime tool safely.

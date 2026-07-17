@@ -1,0 +1,16 @@
+{
+  "title": "Case studies",
+  "icon": "BookMarked",
+  "pages": [
+    "index",
+    "native-end-to-end",
+    "verify-ui-states",
+    "render-and-effect",
+    "query-end-to-end",
+    "loading-layout-shift",
+    "router-and-live-states",
+    "list-render-scope",
+    "prove-an-optimization",
+    "multi-agent-sessions"
+  ]
+}

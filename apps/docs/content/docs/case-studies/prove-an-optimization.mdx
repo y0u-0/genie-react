@@ -1,0 +1,177 @@
+---
+title: Check optimization evidence
+description: Compare repeated runs and refuse to call incomplete evidence a win.
+icon: ChartNoAxesCombined
+---
+
+**Demo:** `apps/router-demo`
+
+A faster-looking run is not proof. Keep the app build, route, viewport, data, and interaction the
+same. Use multiple runs so warm-up and noise do not decide the result.
+
+## Setup
+
+```bash
+pnpm --filter @genie-react/router-demo dev
+```
+
+```bash
+agent-browser --session docs-case-proof open \
+  'http://localhost:3030/?_genie=docs-case-proof'
+export GENIE_BRIDGE_URL=ws://localhost:3030/__genie/ws
+export GENIE_SESSION=docs-case-proof
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"ready","timeoutMs":10000}'
+```
+
+## Collect six baseline runs
+
+The default comparison removes one warm-up and needs five usable samples. That means six captures
+per cohort.
+
+Collect and pin each returned ID:
+
+```bash
+baseline_ids=()
+for run in 0 1 2 3 4 5; do
+  agent-browser --session docs-case-proof reload
+  npx @genie-react/cli call devtools_wait \
+    '{"condition":"ready","timeoutMs":10000}'
+  npx @genie-react/cli call react_clear_renders '{}'
+  agent-browser --session docs-case-proof find role button click --name 'Count: 0'
+  agent-browser --session docs-case-proof get text '[data-testid="counter"]' | \
+    rg -x 'Count: 1'
+
+  capture_args="$(jq -cn --arg name "baseline-$run" \
+    '{name:$name,include:["react","effects"]}')"
+  capture="$(npx @genie-react/cli call devtools_capture_create \
+    "$capture_args" --json)"
+  capture_id="$(printf '%s\n' "$capture" | jq -er '.captureId')"
+  baseline_ids+=("$capture_id")
+  npx @genie-react/cli call devtools_capture_pin \
+    "$(jq -cn --arg captureId "$capture_id" \
+      '{captureId:$captureId,pinned:true}')" --json
+done
+```
+
+Make the source change. Then collect the candidate cohort with the same route, data, and action:
+
+```bash
+candidate_ids=()
+for run in 0 1 2 3 4 5; do
+  agent-browser --session docs-case-proof reload
+  npx @genie-react/cli call devtools_wait \
+    '{"condition":"ready","timeoutMs":10000}'
+  npx @genie-react/cli call react_clear_renders '{}'
+  agent-browser --session docs-case-proof find role button click --name 'Count: 0'
+  agent-browser --session docs-case-proof get text '[data-testid="counter"]' | \
+    rg -x 'Count: 1'
+
+  capture_args="$(jq -cn --arg name "candidate-$run" \
+    '{name:$name,include:["react","effects"]}')"
+  capture="$(npx @genie-react/cli call devtools_capture_create \
+    "$capture_args" --json)"
+  capture_id="$(printf '%s\n' "$capture" | jq -er '.captureId')"
+  candidate_ids+=("$capture_id")
+  npx @genie-react/cli call devtools_capture_pin \
+    "$(jq -cn --arg captureId "$capture_id" \
+      '{captureId:$captureId,pinned:true}')" --json
+done
+```
+
+## Compare the cohorts
+
+```bash
+baseline_json="$(printf '%s\n' "${baseline_ids[@]}" | jq -Rsc 'split("\n")[:-1]')"
+candidate_json="$(printf '%s\n' "${candidate_ids[@]}" | jq -Rsc 'split("\n")[:-1]')"
+comparison_args="$(jq -cn \
+  --argjson baselineCaptureIds "$baseline_json" \
+  --argjson candidateCaptureIds "$candidate_json" \
+  '{
+    baselineCaptureIds:$baselineCaptureIds,
+    candidateCaptureIds:$candidateCaptureIds,
+    metrics:["react.renders","react.selfTimeMs","effects.hot"],
+    minimumRuns:5,
+    warmupRuns:1,
+    confidenceLevel:0.95,
+    minimumEffectPct:5,
+    budgets:[
+      {metric:"react.renders",maxRegressionPct:0},
+      {metric:"react.selfTimeMs",maxRegressionPct:5}
+    ]
+  }')"
+npx @genie-react/cli call devtools_capture_compare \
+  "$comparison_args" --json
+```
+
+## A useful failed proof
+
+The latest live Router demo comparison collected all 12 captures. Genie removed one warm-up from
+each cohort, then refused the React comparison:
+
+The decisive fields from that result were:
+
+```json
+{
+  "kind": "capture-comparison",
+  "minimumRuns": 5,
+  "policy": {
+    "warmupRuns": 1,
+    "confidenceLevel": 0.95,
+    "minimumEffectPct": 5
+  },
+  "overall": "not-comparable",
+  "metrics": [
+    {
+      "metric": "react.renders",
+      "baseline": { "samples": 0, "median": null },
+      "candidate": { "samples": 0, "median": null },
+      "comparable": false,
+      "notComparableReasons": ["render-props-not-enumerated"],
+      "verdict": "not-comparable"
+    },
+    {
+      "metric": "effects.hot",
+      "baseline": { "samples": 5, "median": 0, "p95": 0, "mad": 0 },
+      "candidate": { "samples": 5, "median": 0, "p95": 0, "mad": 0 },
+      "comparable": true,
+      "confidence": {
+        "pValue": 1,
+        "significant": false,
+        "observedEffectPct": 0
+      },
+      "verdict": "informational"
+    }
+  ],
+  "violations": []
+}
+```
+
+This is a good result. The tool stopped the agent from presenting an attractive timing number as a
+proven optimization. Complete capture count is not the same as comparable evidence.
+
+## Accept a change only when
+
+- The same visible flow passes before and after.
+- Both cohorts have enough usable samples after warm-up removal.
+- The metric says `comparable: true`.
+- The result is statistically meaningful, not just a smaller number.
+- Every budget passes.
+- agent-browser or agent-device confirms behavior, layout, focus, and accessibility still work.
+
+`not-comparable`, `insufficient-data`, and `inconclusive` are not passes. Fix the evidence gap or
+narrow the claim, then run the same cohorts again.
+
+After export or review, unpin every capture and release the browser binding:
+
+```bash
+for capture_id in "${baseline_ids[@]}" "${candidate_ids[@]}"; do
+  npx @genie-react/cli call devtools_capture_pin \
+    "$(jq -cn --arg captureId "$capture_id" \
+      '{captureId:$captureId,pinned:false}')" --json
+done
+agent-browser --session docs-case-proof close
+unset GENIE_BRIDGE_URL GENIE_SESSION
+unset baseline_ids candidate_ids baseline_json candidate_json
+unset capture capture_args capture_id comparison_args
+```

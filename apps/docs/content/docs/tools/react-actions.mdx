@@ -1,0 +1,189 @@
+---
+title: React actions
+description: Test prop, hook, Context, Suspense, and error states in the live app.
+icon: FlaskConical
+---
+
+The JSON examples below show selected fields from the full response.
+
+These tools change live state. List and reset overrides after every test.
+
+## `react_override_props`
+
+Merges temporary props into one mounted component and re-renders it.
+
+**Input:** `id` is a required integer. `props` is a required object with string keys.
+
+```bash
+npx @genie-react/cli call react_override_props \
+  '{"id":42,"props":{"disabled":true,"submitLabel":"Try again"}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true }
+```
+
+**Agent use:** Check whether the disabled branch and retry copy render correctly, then decide whether
+the parent must supply different real props. A later real props update can replace the override;
+call `react_reset_overrides` after the check.
+
+## `react_override_hook_state`
+
+Changes one `useState` or `useReducer` value and re-renders the component.
+
+**Input:** `id` and `value` are required. Pass exactly one of `stateIndex` or legacy `hookIndex`;
+each is an integer from 0 to 99. `path` is an array of string or number segments and defaults to
+`[]`, which replaces the whole value.
+
+```bash
+npx @genie-react/cli call react_override_hook_state \
+  '{"id":42,"stateIndex":0,"path":["step"],"value":3}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "name": "CheckoutForm", "hookIndex": 4, "stateIndex": 0 }
+```
+
+**Agent use:** Verify the UI at step 3, then decide whether that state needs a source-level test or
+fix. Inspect the component first because only stateful hooks are valid targets. The component's next
+state update can take control; call `react_reset_overrides` after the check.
+
+## `react_override_context`
+
+Changes the nearest consumed React Context provider for its subtree.
+
+**Input:** `id` and `value` are required. `context` is an optional string, but it is required when
+the target consumes more than one Context.
+
+```bash
+npx @genie-react/cli call react_override_context \
+  '{"id":42,"context":"ThemeContext","value":{"mode":"light"}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "providerId": 9, "contextName": "ThemeContext" }
+```
+
+**Agent use:** Check whether the subtree works with the light theme, then decide whether the bug is
+in the consumer or provider. Plain objects shallow-merge; other values replace. A parent render can
+replace the override, a default value with no Provider cannot be overridden, and cleanup requires
+`react_reset_overrides`.
+
+## `react_toggle_suspense_fallback`
+
+Forces or releases the nearest Suspense fallback.
+
+**Input:** `id` is a required integer. `showFallback` defaults to `true`.
+
+```bash
+npx @genie-react/cli call react_toggle_suspense_fallback \
+  '{"id":42,"showFallback":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "boundaryId": 12, "showingFallback": true, "activeOverrides": 1 }
+```
+
+**Agent use:** Inspect the held loading UI, then decide whether its layout, copy, and accessible
+status are ready. Release with the returned `boundaryId` and `showFallback:false`, or call
+`react_reset_overrides`; the override otherwise lasts until page reload.
+
+## `react_force_error_boundary`
+
+Forces or releases the nearest error boundary.
+
+**Input:** `id` is a required integer. `forceError` defaults to `true`.
+
+```bash
+npx @genie-react/cli call react_force_error_boundary \
+  '{"id":42,"forceError":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "boundaryId": 10,
+  "boundaryName": "CheckoutErrorBoundary",
+  "erroring": true,
+  "activeOverrides": 1
+}
+```
+
+**Agent use:** Confirm that `CheckoutErrorBoundary` contains the failure, then decide whether its
+fallback and retry path need changes. The child ID may disappear while erroring, so release with the
+returned boundary ID or `react_reset_overrides`. If the boundary itself remounted and stays latched,
+reload the app.
+
+## `react_list_overrides`
+
+Lists every React override that is still retained.
+
+**Input:** `{}`; this tool has no input fields.
+
+```bash
+npx @genie-react/cli call react_list_overrides '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "overrides": [
+    {
+      "kind": "hook",
+      "componentId": 42,
+      "componentName": "CheckoutForm",
+      "detail": "hook 4 ← {step: 3}",
+      "mounted": true
+    },
+    {
+      "kind": "suspense",
+      "componentId": 12,
+      "componentName": "Suspense",
+      "detail": "fallback forced",
+      "mounted": true
+    }
+  ],
+  "total": 2
+}
+```
+
+**Agent use:** If `total` is nonzero, treat later observations as synthetic and reset before making
+a source-code decision. `componentId:null` with `mounted:false` means the tracked target unmounted.
+
+## `react_reset_overrides`
+
+Releases all retained React overrides without needing their original component IDs.
+
+**Input:** `{}`; this tool has no input fields.
+
+```bash
+npx @genie-react/cli call react_reset_overrides '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "cleared": [
+    { "kind": "hook", "componentName": "CheckoutForm", "outcome": "restored" },
+    { "kind": "suspense", "componentName": "Suspense", "outcome": "released" }
+  ],
+  "remaining": 0
+}
+```
+
+**Agent use:** Continue with real-state verification only when `remaining` is 0. An outcome is
+`restored`, `released`, or `skipped-unmounted`; a released unmounted hook can keep its last shown
+value until the component's own next state update.

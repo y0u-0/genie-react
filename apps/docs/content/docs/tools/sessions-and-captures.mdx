@@ -1,0 +1,490 @@
+---
+title: Sessions and captures
+description: Check readiness, wait for runtime state, and compare saved runs.
+icon: PanelsTopLeft
+---
+
+The JSON examples below show selected fields from the full response.
+
+Identity names are not interchangeable. `sessionName` is the human alias sourced from `_genie`.
+`logicalSessionId` follows one tab across reloads, while `sessionId` names one physical connection
+and `documentGeneration` names its document. A capture's `reactCommit` is only a consistency marker.
+`captureId` names a retained artifact, `pinned` is protection state on that artifact, and
+`interactionId` names one recording window. The CLI's `--marker` is separate caller-correlation
+metadata.
+
+## `devtools_status`
+
+Checks the selected app document and lists every connected tab.
+
+**Input:** `includeTools` is an optional boolean and defaults to `true`; set it to `false` to omit
+the tool descriptors.
+
+```bash
+npx @genie-react/cli call devtools_status '{"includeTools":false}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "connected": true,
+  "ready": true,
+  "sessionId": "physical-2",
+  "domains": ["react", "query"],
+  "toolCount": 67,
+  "sessions": [
+    {
+      "sessionId": "physical-2",
+      "logicalSessionId": "logical-review",
+      "documentGeneration": 2,
+      "sessionName": "review",
+      "current": true,
+      "ready": true
+    }
+  ],
+  "warnings": []
+}
+```
+
+**Agent use:** Confirm `logical-review` resolved to the expected physical document and generation;
+if it did not, stop and choose a unique physical or logical ID from `sessions` before any mutation.
+
+**Limits:** `sessionId` is the current physical connection and can change on reload.
+`logicalSessionId` is the reload-stable tab identity. `sessionName` is the optional human alias from
+`_genie`, not another physical ID. A repeated name is ambiguous. `documentGeneration` identifies
+the document within the logical session. The list contains connected tabs only; inspect `current`,
+`ready`, collision, lineage, and `staleMs` fields before trusting default routing.
+
+## `devtools_wait`
+
+Blocks the caller until one runtime condition succeeds, fails, or reaches its timeout.
+
+**Input:** `condition` is optional and defaults to `connected`; it accepts `connected`, `ready`,
+`component`, `query-settled`, `navigation`, `react-quiet`, or `settled`. `name` is an optional string
+for a component, route, or legacy exact query selector. `queryHash` is an optional non-empty string,
+and `queryKey` is an optional array; use only one, only with `query-settled`, and not with `name`.
+`timeoutMs` is an optional positive integer up to 60,000 and defaults to 10,000. `domains` is an
+optional list of 1–5 unique values from `react`, `query`, `router`, `frames`, and `network`; it
+defaults to `["react"]` and is configurable only for `settled`. `quietMs` is an optional integer from
+100–5,000 and defaults to 500 for React quiet checks.
+
+```bash
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","name":"greeting","timeoutMs":500}' \
+  --session logical-review --json --fail-on-result-error
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": false,
+  "condition": "query-settled",
+  "waitedMs": 8,
+  "reason": "query selector \"greeting\" is ambiguous (2 exact matches); use queryHash or queryKey from query_list",
+  "validConditions": [
+    "connected",
+    "ready",
+    "component",
+    "query-settled",
+    "navigation",
+    "react-quiet",
+    "settled"
+  ]
+}
+```
+
+**Agent use:** Treat `ok:false` as a failed synchronization point; here, call `query_list`, select
+one exact `queryHash` or structured `queryKey`, and retry before reading or changing Query state.
+
+**Limits:** An untargeted `query-settled` waits for both fetches and mutations to reach zero.
+Legacy query names match exact hashes or exact keys and fail on ambiguity. `settled` reports every
+requested domain separately; unsupported, pending, hidden, or throttled evidence never becomes
+idle. Generic `network` quiet is unsupported unless the app instruments it. The call retains no
+subscription after it returns.
+
+## `devtools_capture_create`
+
+Creates one immutable, schema-versioned runtime artifact for the selected physical document.
+
+**Input:** `name` is required, trimmed, 1–80 characters, and cannot contain control characters.
+`include` is an optional list of 1–6 unique values from `react`, `effects`, `query`, `router`,
+`memory`, and `performance`; it defaults to `["react","effects","query","router","memory"]` and
+does not include `performance`.
+`maxAttempts` is an optional integer from 1–5 and defaults to 3.
+
+```bash
+npx @genie-react/cli call devtools_capture_create \
+  '{"name":"checkout before 1","include":["react","effects","query","performance"],"maxAttempts":3}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "captureId": "cap_8f3d6a91-2c47-4e5b-9d18-7a64c2f0b315",
+  "name": "checkout before 1",
+  "session": {
+    "sessionId": "physical-2",
+    "logicalSessionId": "logical-review",
+    "documentGeneration": 2,
+    "sessionName": "review"
+  },
+  "include": ["react", "effects", "query", "performance"],
+  "consistency": {
+    "kind": "react-commit-stable",
+    "attempts": 1,
+    "reactCommit": 42,
+    "reason": "React document commit markers matched before, during, and after all captured sections."
+  },
+  "complete": true,
+  "warnings": [],
+  "sizeBytes": 18420,
+  "pinned": false
+}
+```
+
+**Agent use:** Save the returned `captureId` as one cohort sample and verify the physical session,
+document generation, consistency, completeness, and warnings before using it as baseline evidence.
+
+**Limits:** The bridge keeps at most 20 captures in memory and each artifact is at most 2,000,000
+bytes. It retries moving React commits up to `maxAttempts`; continued commits produce best-effort,
+incomplete evidence. A reload or disconnect aborts a capture because it cannot cross physical
+documents. Export durable evidence before a bridge restart.
+
+## `devtools_capture_list`
+
+Lists bounded summaries for retained captures, newest first.
+
+**Input:** No fields; pass `{}`.
+
+```bash
+npx @genie-react/cli call devtools_capture_list '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "captures": [
+    {
+      "captureId": "cap_8f3d6a91-2c47-4e5b-9d18-7a64c2f0b315",
+      "name": "checkout before 1",
+      "complete": true,
+      "pinned": true
+    }
+  ],
+  "total": 19,
+  "maxRetained": 20,
+  "pinned": 1,
+  "remainingSlots": 1,
+  "retentionWarnings": []
+}
+```
+
+**Agent use:** Resolve names to exact capture IDs and, when slots are low, export or pin important
+evidence before creating another run.
+
+**Limits:** The list omits full sections. At capacity, creation evicts the oldest unpinned capture.
+When all 20 are pinned, creation is refused. Captures disappear when the bridge is cleared or
+restarted.
+
+## `devtools_capture_read`
+
+Reads a retained capture by its exact capture ID.
+
+**Input:** `captureId` is a required non-empty string. `view` is optional, accepts `summary` or
+`full`, and defaults to `summary`. `sections` is an optional list of at most 6 unique capture domains
+from `react`, `effects`, `query`, `router`, `memory`, and `performance`; it is valid only with
+`view:"full"`.
+
+```bash
+npx @genie-react/cli call devtools_capture_read \
+  '{"captureId":"cap_8f3d6a91-2c47-4e5b-9d18-7a64c2f0b315","view":"full","sections":["react","effects"]}' \
+  --json --max-bytes 20000
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "captureId": "cap_8f3d6a91-2c47-4e5b-9d18-7a64c2f0b315",
+  "sections": {
+    "react": {
+      "status": "ok",
+      "tools": {
+        "react_get_renders": {
+          "status": "ok",
+          "args": { "sort": "renders", "limit": 50, "appOnly": true },
+          "result": {
+            "tracking": true,
+            "commits": 2,
+            "documentCommitId": 42,
+            "summary": {
+              "totalRenders": 3,
+              "totalUpdates": 2,
+              "semantics": "exact",
+              "coverageDomain": "render-measurement"
+            },
+            "components": [
+              {
+                "id": 42,
+                "name": "CheckoutRow",
+                "renders": 3,
+                "updates": 2
+              }
+            ],
+            "omittedByLimit": 0,
+            "comparable": true,
+            "notComparableReasons": [],
+            "coverage": {
+              "complete": true,
+              "inputAttributionComplete": true,
+              "semantics": "exact",
+              "coverageDomain": "render-causality"
+            }
+          }
+        }
+      }
+    }
+  },
+  "complete": true,
+  "pinned": true,
+  "integrity": {
+    "algorithm": "sha256",
+    "scope": "capture-content-v1",
+    "digest": "4b6c1e29f0a873d5c2149bf6780e3ad15276c4f98b30de61a2c7954ef8130b67"
+  }
+}
+```
+
+**Agent use:** Verify the stored arguments and integrity, then use the bounded render summary only
+when coverage is complete and `comparable` is true. Cite this capture instead of mutable live state.
+
+**Limits:** The default summary has no `sections` and reports `availableSections`. A full read can
+be large, so select sections and set a CLI byte ceiling. Reading does not refresh retention order or
+protect the capture from eviction; pin or export it separately.
+
+## `devtools_capture_pin`
+
+Pins a retained capture against eviction or removes that protection.
+
+**Input:** `captureId` is a required non-empty string. `pinned` is an optional boolean and defaults
+to `true`.
+
+```bash
+npx @genie-react/cli call devtools_capture_pin \
+  '{"captureId":"cap_8f3d6a91-2c47-4e5b-9d18-7a64c2f0b315","pinned":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "captureId": "cap_8f3d6a91-2c47-4e5b-9d18-7a64c2f0b315",
+  "name": "checkout before 1",
+  "complete": true,
+  "sizeBytes": 18419,
+  "pinned": true
+}
+```
+
+**Agent use:** Check that `pinned:true` came back for the exact `captureId`, then export it if the
+evidence must survive bridge shutdown.
+
+**Limits:** A pin is a boolean state on a capture, not a new ID or a durable export. Pins consume
+the same 20 retention slots. Unpin with `pinned:false` after export or review; if every slot stays
+pinned, new captures are refused.
+
+## `devtools_capture_compare`
+
+Compares repeated baseline and candidate capture cohorts with typed statistical verdicts.
+
+**Input:** `baselineCaptureIds` and `candidateCaptureIds` are required lists of 1–10 non-empty,
+unique IDs; the lists cannot overlap. `metrics` is an optional list of 1–10 unique values and
+defaults to all: `react.commits`, `react.renders`, `react.updates`, `react.unnecessary`,
+`react.selfTimeMs`, `effects.hot`, `query.pending`, `memory.usedHeapBytes`,
+`performance.avgFps`, and `performance.droppedFrames`. `minimumRuns` is an optional integer from
+1–10 and defaults to 5. `warmupRuns` is an optional integer from 0–3 and defaults to 1.
+`outlierThreshold` is an optional number from 2–10 and defaults to 3.5. `confidenceLevel` is an
+optional number from 0.5–0.999 and defaults to 0.95. `minimumEffectPct` is an optional number from
+0–100 and defaults to 5. `budgets` is an optional list of at most 10 unique requested metrics and
+defaults to `[]`; each budget needs at least one of non-negative `maxRegressionPct`, numeric
+`maxValue`, or numeric `minValue`, and `minValue` cannot exceed `maxValue`. Every budget requires
+`metric`.
+
+```bash
+npx @genie-react/cli call devtools_capture_compare \
+  '{"baselineCaptureIds":["cap_df2ec6f0-0ca8-46b1-baaa-79523f7ec53f","cap_1953a196-6d52-401e-a480-352cfde9e303","cap_a1640caf-dcdb-45fe-98ca-48beb139c912","cap_e0c8e0c0-99c4-4e07-895e-a503f2e52aa3","cap_735cabb4-0641-4094-9096-7be4b08a2621","cap_a5f2cdba-5416-4108-b193-b4cc83aa8930"],"candidateCaptureIds":["cap_064ad176-2a96-4e6c-b15e-e6fd1bee04b7","cap_17c147bf-4da9-46af-85aa-07cbbf4d0063","cap_abc11cde-8ba0-441f-90aa-691d213e1e6b","cap_00ad1b6c-34d4-4ab9-9743-590d7e17a525","cap_3dc8b860-8151-44e3-914c-c371a1666012","cap_53e9c1b3-24e5-4240-84d0-a18187cc975a"],"metrics":["react.renders"],"budgets":[{"metric":"react.renders","maxRegressionPct":5}]}' \
+  --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "kind": "capture-comparison",
+  "comparisonId": "cmp_216fdb4c-c823-4889-85fb-98d009e7621d",
+  "minimumRuns": 5,
+  "policy": {
+    "warmupRuns": 1,
+    "outlierThreshold": 3.5,
+    "confidenceLevel": 0.95,
+    "minimumEffectPct": 5
+  },
+  "excluded": {
+    "warmupBaselineCaptureIds": ["cap_df2ec6f0-0ca8-46b1-baaa-79523f7ec53f"],
+    "warmupCandidateCaptureIds": ["cap_064ad176-2a96-4e6c-b15e-e6fd1bee04b7"]
+  },
+  "overall": "pass",
+  "metrics": [
+    {
+      "metric": "react.renders",
+      "direction": "lower-is-better",
+      "baseline": { "samples": 5, "median": 12, "p95": 14, "mad": 1 },
+      "candidate": { "samples": 5, "median": 8, "p95": 10, "mad": 1 },
+      "delta": { "median": -4, "regressionPct": -33.3333 },
+      "comparable": true,
+      "confidence": {
+        "significant": true,
+        "observedEffectPct": -33.3333
+      },
+      "verdict": "pass",
+      "reasons": []
+    }
+  ],
+  "violations": [],
+  "warnings": []
+}
+```
+
+**Agent use:** A `pass` means no budget violation was proven. For lower-is-better metrics, a negative
+`observedEffectPct` is an improvement. To claim one, also require the expected direction,
+`confidence.significant:true`, and a useful effect size. For other verdicts, inspect missing and
+outlier IDs, comparability reasons, confidence, and warnings, then collect like-for-like replacement
+runs.
+
+**Limits:** The default warm-up means six IDs per cohort are needed for five usable runs. Missing
+metrics and small cohorts stay `insufficient-data`; noise or weak effects can stay `inconclusive`.
+Environment differences can make a comparison unsafe. Comparison does not pin its input captures,
+so export or pin evidence before retention cleanup.
+
+## `devtools_interaction_begin`
+
+Clears React observations and starts one bounded interaction window on the selected physical document.
+
+**Input:** `name` is required, trimmed, 1–80 characters, and cannot contain control characters.
+`components` is an optional list of at most 20 trimmed names, each 1–160 characters, and defaults to
+`[]`. `roots` is an optional list of at most 20 integers and defaults to `[]`. `budget` is optional:
+`fiberLimit` is an integer 50–5,000 (default 250), `operationLimit` is an integer 1,000–200,000
+(default 20,000), `timeLimitMs` is 1–50 (default 8), `targetOperationReserve` is an integer
+100–50,000 (default 4,000), `targetTimeReserveMs` is 0.5–25 (default 4), and `adaptive` is boolean
+(default `true`). `lifecycle` is optional: `bufferLimit` is an integer 100–20,000 (default 1,000)
+and `targetReserve` is an integer 0–5,000 (default 100) that cannot exceed `bufferLimit`.
+
+```bash
+npx @genie-react/cli call devtools_interaction_begin \
+  '{"name":"open checkout row","components":["CheckoutRow"],"budget":{"adaptive":true}}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "kind": "interaction-observation",
+  "interactionId": "int_3b74e2c8-91a6-4f5d-b207-6c83a1d94e50",
+  "name": "open checkout row",
+  "state": "recording",
+  "startedAt": "2026-07-17T09:00:00.000Z",
+  "session": {
+    "sessionId": "physical-2",
+    "logicalSessionId": "logical-review",
+    "documentGeneration": 2
+  },
+  "observationId": "observation:4",
+  "startDocumentCommitId": 42,
+  "warnings": []
+}
+```
+
+**Agent use:** Keep the returned `interactionId`, verify its physical document and boundary IDs,
+drive exactly one named UI action, then stop that same ID even if the UI result is surprising.
+
+**Limits:** The interaction ID is bridge-owned and is not a capture ID, observation ID, session
+alias, or marker. Only one interaction can record per physical document, with at most 20 active
+across the bridge. Starting another does not clear an active boundary. A recording cannot cross a
+reload or disconnect, so always stop it promptly; disconnected recordings are pruned.
+
+## `devtools_interaction_stop`
+
+Freezes and returns the bounded evidence for one interaction ID.
+
+**Input:** `interactionId` is a required non-empty string. `domains` is an optional list of 1–5
+unique values from `react`, `query`, `router`, `frames`, and `network`, and defaults to `["react"]`.
+`quietMs` is an optional integer from 100–5,000 and defaults to 500. `timeoutMs` is an optional
+positive integer up to 60,000 and defaults to 10,000.
+
+```bash
+npx @genie-react/cli call devtools_interaction_stop \
+  '{"interactionId":"int_3b74e2c8-91a6-4f5d-b207-6c83a1d94e50","domains":["react","query","router","frames"],"quietMs":500,"timeoutMs":10000}' \
+  --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "kind": "interaction-capture",
+  "interactionId": "int_3b74e2c8-91a6-4f5d-b207-6c83a1d94e50",
+  "name": "open checkout row",
+  "state": "completed",
+  "boundary": {
+    "observationId": "observation:4",
+    "startDocumentCommitId": 42,
+    "stopDocumentCommitId": 44,
+    "finalDocumentCommitId": 45,
+    "recordedCommits": 2,
+    "postInteractionCommits": 1,
+    "trackingFrozen": true,
+    "postInteractionPolicy": "excluded-by-profile-freeze"
+  },
+  "settle": {
+    "ok": true,
+    "waitedMs": 622,
+    "domains": {
+      "react": { "status": "met" },
+      "query": { "status": "met" },
+      "router": { "status": "met" },
+      "frames": { "status": "met" }
+    }
+  },
+  "coverage": {
+    "complete": true,
+    "comparable": true,
+    "notComparableReasons": [],
+    "boundary": "profile-frozen-before-settle"
+  },
+  "warnings": [
+    "1 post-interaction React commit occurred during settle and was excluded by the profile freeze."
+  ]
+}
+```
+
+**Agent use:** Require `coverage.comparable:true`, inspect every settle domain and warning, then use
+the render, cause, effect, and component-cohort sections to choose the next source inspection.
+
+**Limits:** Stop must use the same physical document; a reload or disconnect expires the active
+interaction. React profiling freezes before settle, so later commits are counted but excluded when
+freeze succeeds. The bridge caches the newest 20 completed interactions; repeating stop is
+idempotent only while its result remains cached. There is no separate cancel call, so stopping is
+the cleanup step.

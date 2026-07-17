@@ -1,0 +1,77 @@
+---
+title: Install
+description: Add Genie and let the CLI wire it into the app.
+icon: PackagePlus
+---
+
+## Add the packages
+
+```bash
+pnpm add -D genie-react @genie-react/cli
+```
+
+Use npm or yarn if the project does not use pnpm.
+
+## Wire the app
+
+Run this from the app folder:
+
+```bash
+npx @genie-react/cli init
+```
+
+`init` detects Vite and Next.js. Preview its changes first when needed:
+
+```bash
+npx @genie-react/cli init --dry-run
+```
+
+For a non-interactive run, `--yes` suppresses only the final post-init tip. It makes the same file
+changes as `init` and does not choose among setup options:
+
+```bash
+npx @genie-react/cli init --yes
+```
+
+## Start and check
+
+Keep the development server running in the first terminal:
+
+```bash title="Terminal 1"
+pnpm dev
+```
+
+Open the app in a browser. Then verify the running setup from a second terminal. `doctor` reports
+discovery and remediation as JSON; `status` must show at least one ready, non-stale session.
+
+```bash title="Terminal 2"
+doctor_json="$(npx @genie-react/cli doctor --live --json)"
+jq '{ok, bridgeCandidates, remediation, live}' <<<"$doctor_json"
+jq -e '.ok == true' <<<"$doctor_json" >/dev/null
+
+status_json="$(npx @genie-react/cli status --sessions-only --json)"
+jq '{connected, ready, sessionId, sessions}' <<<"$status_json"
+jq -e '
+  .connected and .ready and
+  any(.sessions[]; .ready == true and .staleMs == null)
+' <<<"$status_json" >/dev/null
+```
+
+If either assertion exits non-zero, read `remediation`, keep Terminal 1 running, open or reload the
+app, and rerun the whole Terminal 2 block.
+
+Do not put `doctor` or `status` after `pnpm dev` in the same shell:
+
+```bash
+# pnpm dev blocks until you stop the server.
+```
+
+## How this helps the agent
+
+The agent can check the complete path from config file to hub, client script, and browser session.
+It does not need to guess why a tool call cannot connect.
+
+<Callout type="info" title="Development only">
+  Genie listens on localhost and should only run in development. The provided
+  integrations skip production.
+</Callout>

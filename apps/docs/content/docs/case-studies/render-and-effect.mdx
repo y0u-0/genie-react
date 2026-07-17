@@ -1,0 +1,174 @@
+---
+title: Trace one interaction end to end
+description: Join one browser action to its renders, causes, effects, and coverage.
+icon: Repeat2
+---
+
+**Demo:** `apps/vite-demo`
+
+This flow avoids timestamp guessing. Genie starts one observation, agent-browser performs one action,
+and Genie freezes one evidence bundle.
+
+## Setup
+
+Start the demo:
+
+```bash
+pnpm --filter @genie-react/vite-demo dev
+```
+
+Open and bind the page:
+
+```bash
+agent-browser --session docs-case-vite open \
+  'http://localhost:3040/?_genie=docs-case-vite'
+export GENIE_BRIDGE_URL=ws://localhost:3040/__genie/ws
+export GENIE_SESSION=docs-case-vite
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"ready","timeoutMs":10000}'
+```
+
+## Record one click
+
+Start a narrow observation. Targeting `App` and `HotEffectProbe` reserves the tracking budget for
+the components that matter.
+
+```bash
+begin="$(npx @genie-react/cli call devtools_interaction_begin \
+  '{"name":"counter click","components":["App","HotEffectProbe"]}' --json)"
+interaction_id="$(printf '%s\n' "$begin" | jq -r '.interactionId')"
+
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite get text 'button.counter'
+
+npx @genie-react/cli call devtools_interaction_stop \
+  "{\"interactionId\":\"$interaction_id\",\"domains\":[\"react\"],\"quietMs\":200,\"timeoutMs\":5000}" \
+  --json
+```
+
+The visible check returned:
+
+```text
+Count is 1
+```
+
+Selected live output from the same Vite run:
+
+```json
+{
+  "kind": "interaction-capture",
+  "state": "completed",
+  "boundary": {
+    "observationId": "observation:1",
+    "startDocumentCommitId": 5,
+    "stopDocumentCommitId": 6,
+    "recordedCommits": 1,
+    "postInteractionCommits": 0,
+    "trackingFrozen": true
+  },
+  "settle": {
+    "ok": true,
+    "domains": { "react": { "status": "met" } }
+  },
+  "coverage": {
+    "complete": false,
+    "comparable": false,
+    "notComparableReasons": [
+      "render-props-not-enumerated",
+      "render-coverage-incomplete",
+      "render-cause-coverage-incomplete"
+    ]
+  }
+}
+```
+
+This is useful because the boundary is exact and the limitation is explicit. The agent may use the
+exact `App` state cause, but it must not claim the whole interaction is safe to compare.
+
+## Read the joined evidence
+
+The returned bundle used the same `observationId` for renders, causes, effects, and component
+cohorts. Selected fields were:
+
+```json
+{
+  "appRender": {
+    "name": "App",
+    "renders": 1,
+    "necessity": "necessary",
+    "cause": {
+      "kind": "state",
+      "evidence": "exact",
+      "name": "state[0]",
+      "before": 0,
+      "after": 1
+    }
+  },
+  "effect": {
+    "componentName": "HotEffectProbe",
+    "changedDependencySlots": [0],
+    "execution": {
+      "status": "observed",
+      "evidence": "exact",
+      "outcome": "completed"
+    },
+    "unobservedConsequences": [
+      "state-update",
+      "external-store-write",
+      "network",
+      "event-listener",
+      "navigation"
+    ]
+  },
+  "cohort": {
+    "component": "HotEffectProbe",
+    "status": "updated",
+    "matched": 1,
+    "mountedUpdated": 1
+  }
+}
+```
+
+The agent now knows three different things:
+
+- The click changed `App` state from `0` to `1` with exact evidence.
+- `HotEffectProbe` scheduled and executed because dependency slot `0` changed.
+- Network and state-write consequences were not observed, so the agent cannot invent that link.
+
+## Prove repeated scheduling
+
+One run proves one execution. It does not prove a hot pattern. Run the same action four times, then
+ask for a sample-aware audit:
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite click 'button.counter'
+agent-browser --session docs-case-vite click 'button.counter'
+npx @genie-react/cli call react_effect_audit \
+  '{"component":"HotEffectProbe","minUpdates":3,"minScheduleRate":1,"limit":5}'
+agent-browser --session docs-case-vite get text 'button.counter' \
+  | rg -Fx 'Count is 5'
+```
+
+Selected live lines:
+
+```text
+HotEffectProbe #28 [0] effect deps=list(1) scheduled 4/4 HOT
+scheduled on 4/4 updates — dependency [0] changes reference
+```
+
+The edit lead is now narrow: inspect the value created for dependency slot `0`. Do not remove the
+effect until the UI driver and the interaction capture prove the behavior still works.
+
+```bash
+agent-browser --session docs-case-vite close
+unset GENIE_BRIDGE_URL GENIE_SESSION interaction_id begin
+```
+
+## Outcome
+
+Before, the agent had separate reports and had to line them up by time. Now one interaction ID joins
+the browser action, commit boundary, render cause, effect execution, cohort, and coverage. The agent
+can make a smaller fix and knows exactly what it still has to verify.

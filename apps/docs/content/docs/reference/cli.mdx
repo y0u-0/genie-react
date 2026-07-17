@@ -1,0 +1,59 @@
+---
+title: CLI commands
+description: Setup, discovery, live calls, and machine output.
+icon: Terminal
+---
+
+## Commands
+
+| Command  | Purpose                                                        |
+| -------- | -------------------------------------------------------------- |
+| `init`   | Wire Genie into a Vite or Next.js app.                         |
+| `doctor` | Check config and packages. Add `--live` for the running stack. |
+| `hub`    | Start the standalone local hub.                                |
+| `link`   | Link packages from a local Genie checkout.                     |
+| `tools`  | List groups or show one tool contract.                         |
+| `status` | Show bridge, app, session, and readiness state.                |
+| `call`   | Run one live tool.                                             |
+| `batch`  | Run several calls over one connection.                         |
+
+## Discover a tool
+
+```bash
+npx @genie-react/cli tools
+npx @genie-react/cli tools react.render
+npx @genie-react/cli tools react_render_causes
+```
+
+The last command shows the description, input schema, limits, and a runnable example.
+
+## Time limits
+
+```bash
+npx @genie-react/cli call react_get_tree '{}' \
+  --connect-timeout 8000 \
+  --wait 15000 \
+  --timeout 30000
+```
+
+| Option              | What it bounds                                         |
+| ------------------- | ------------------------------------------------------ |
+| `--connect-timeout` | Opening the bridge WebSocket. Range: 100–120000 ms.    |
+| `--wait`            | Waiting for an app session. Range: 1–120000 ms.        |
+| `--timeout`         | One tool call. The bridge clamps it to 1000–120000 ms. |
+
+`[busy]` means the app's main thread is blocked. Wait for the returned delay and retry.
+
+## Targeting
+
+```bash
+npx @genie-react/cli status --session checkout-agent
+npx @genie-react/cli status --url ws://localhost:4390/__genie/ws
+```
+
+Use `GENIE_SESSION` and `GENIE_BRIDGE_URL` to set these once per shell.
+
+## Stable failures
+
+Machine-mode failures keep stdout as valid JSON. They include a stable `reason` and a safe next
+command when recovery is known. A failed batch item does not stop later items.

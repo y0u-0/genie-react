@@ -1,0 +1,317 @@
+---
+title: Query actions
+description: Refetch, reset, replace, and simulate TanStack Query state in the live app.
+icon: RefreshCw
+---
+
+The JSON examples below show selected fields from the full response.
+
+These calls change the live cache. Use exact keys where possible. After a synthetic test, restore
+the state and use browser automation to check the real UI again.
+
+## `query_invalidate`
+
+Marks matching queries stale and lets active queries refetch.
+
+**Input:** `queryKey` is an optional structured key prefix. `exact` is optional and defaults to
+`false`. Omitting `queryKey` targets every query, regardless of `exact`.
+
+```bash
+npx @genie-react/cli call query_invalidate \
+  '{"queryKey":["todos"],"exact":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "matched": 1 }
+```
+
+**Agent use:** Marks the selected cache entry stale, then decides whether its active refetch updates
+both the cache and visible UI.
+
+This changes live cache state and can start network requests for active matches. `matched` is the
+count captured before invalidation. Wait for the exact query to settle; no manual cleanup is needed
+after the refetch restores server data.
+
+## `query_refetch`
+
+Fetches matching existing queries now.
+
+**Input:** `queryKey` is an optional structured key prefix. `exact` is optional and defaults to
+`false`. Omitting `queryKey` targets every query, regardless of `exact`.
+
+```bash
+npx @genie-react/cli call query_refetch \
+  '{"queryKey":["todos"],"exact":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "matched": 1 }
+```
+
+**Agent use:** Runs the selected query function again, then decides whether the query-function
+result reached the rendered UI.
+
+This can cause network or query-function side effects. The call waits for TanStack's refetch
+operation, but the output reports only the pre-refetch match count. No synthetic state is retained.
+
+## `query_cancel`
+
+Cancels matching in-flight queries while keeping their prior data.
+
+**Input:** `queryKey` is an optional structured key prefix. `exact` is optional and defaults to
+`false`. Omitting `queryKey` targets every query, regardless of `exact`.
+
+```bash
+npx @genie-react/cli call query_cancel \
+  '{"queryKey":["todos"],"exact":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "matched": 1 }
+```
+
+**Agent use:** Cancels the selected in-flight fetch, then checks which previous cache and page state
+was retained. Domain safety requires a separate application assertion.
+
+This affects live fetches and reports the pre-cancel match count, including idle matches. It does
+not remove cached data. Trigger the app's normal fetch path again if the test must restore activity.
+
+## `query_reset`
+
+Resets matching queries to their initial state.
+
+**Input:** `queryKey` is an optional structured key prefix. `exact` is optional and defaults to
+`false`. Omitting `queryKey` targets every query, regardless of `exact`.
+
+```bash
+npx @genie-react/cli call query_reset \
+  '{"queryKey":["todos"],"exact":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "matched": 1 }
+```
+
+**Agent use:** Returns the selected query to its initial state, then checks its loading or empty UI.
+
+This discards the current query state and can refetch active matches. `matched` is the count before
+reset. Refetch or reload the fixture to restore the expected data after the check.
+
+## `query_remove`
+
+Removes matching queries from the cache.
+
+**Input:** `queryKey` is an optional structured key prefix. `exact` is optional and defaults to
+`false`. Omitting `queryKey` targets every query, regardless of `exact`.
+
+```bash
+npx @genie-react/cli call query_remove \
+  '{"queryKey":["todos"],"exact":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "matched": 1 }
+```
+
+**Agent use:** Removes one exact entry, then decides whether the next mount follows the expected
+cold-cache path.
+
+**Safety:** This deletes matched cache data and any simulation retained for those queries. The
+query function may not be available until an observer renders again. Revisit the UI or reload the
+fixture, then refetch, to restore data.
+
+## `query_clear`
+
+Clears every query, mutation, and query simulation.
+
+**Input:** `{}`.
+
+```bash
+npx @genie-react/cli call query_clear '{}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "queriesCleared": 8, "mutationsCleared": 2 }
+```
+
+**Agent use:** Deletes all Query state, then checks the application's full cold-cache behavior.
+
+**Safety:** This is global and destructive. It removes every query, mutation, and retained query
+simulation. Prefer `query_remove` for one key. Reload the test fixture or exercise every affected
+UI path to rebuild state; there is no cache-wide undo.
+
+## `query_set_data`
+
+Replaces cached data for one exact key.
+
+**Input:** `queryKey` is a required exact structured array. `data` is required and accepts any JSON
+value, including `null`.
+
+```bash
+npx @genie-react/cli call query_set_data \
+  '{"queryKey":["todos"],"data":{"items":[]}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true }
+```
+
+**Agent use:** Writes an exact cache value, then decides whether observer delivery makes the
+rendered UI show the intended empty, edge, or optimistic state.
+
+**Safety:** This replaces the cached value and can create a missing key. Read the value back and
+prove cache-to-UI delivery with `query_notifications`. Restore real data by refetching or reloading
+the fixture.
+
+## `query_simulate_state`
+
+Holds an existing query in a synthetic pending or error state.
+
+**Input:** `queryHash` and `queryKey` are optional, but at least one is required; if both are sent,
+`queryHash` wins. `state` is required and is `pending` or `error`. `errorMessage` is a nonempty
+string, defaults to `Simulated query error`, and is ignored for `pending`.
+
+```bash
+npx @genie-react/cli call query_simulate_state \
+  '{"queryHash":"[\"todos\"]","state":"error","errorMessage":"Todos unavailable"}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true,
+  "queryHash": "[\"todos\"]",
+  "simulatedState": "error",
+  "originalStatus": "success"
+}
+```
+
+**Agent use:** Holds one exact query in a chosen error or pending state so the agent can inspect the
+corresponding live UI.
+
+**Safety:** Only existing queries can be simulated. A real fetch is cancelled first. Always
+restore the captured state with `query_restore_state`; collector cleanup also restores simulations
+that still reference live cache entries.
+
+## `query_restore_state`
+
+Restores captured state after a query simulation.
+
+**Input:** `all` is optional and defaults to `false`. With `all:false`, at least one of the optional
+`queryHash` or `queryKey` fields is required; if both are sent, `queryHash` wins. With `all:true`,
+send neither identifier.
+
+```bash
+npx @genie-react/cli call query_restore_state \
+  '{"queryHash":"[\"todos\"]"}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "restored": 1 }
+```
+
+**Agent use:** Restores the exact pre-simulation snapshot so later cache and UI checks use real
+state.
+
+Restoring one query without a retained simulation is an error. Use `{"all":true}` for cleanup when
+the simulated key is unknown; it returns the number of live simulations restored.
+
+## `query_fetch`
+
+Fetches one exact query and returns its bounded data.
+
+**Input:** `queryKey` is a required exact structured array. `staleTime` is an optional nonnegative
+integer in milliseconds and defaults to 0. `depth` is an optional integer from 1 to 6 and defaults
+to 3.
+
+```bash
+npx @genie-react/cli call query_fetch \
+  '{"queryKey":["todos"],"staleTime":0,"depth":3}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "data": { "items": [{ "id": 1 }] },
+  "status": "success",
+  "dataUpdatedAt": 1750000000000
+}
+```
+
+**Agent use:** Forces or reuses one exact query fetch, then compares its bounded result and cache
+timestamp with the rendered page.
+
+**Safety:** The cache needs a query function from a mounted observer or registered default.
+`staleTime:0` normally forces a fetch and may cause external effects in an impure query function.
+The returned data is depth-bounded; no synthetic state is retained.
+
+## `query_ensure`
+
+Returns usable data and fetches only when the cache needs it.
+
+**Input:** `queryKey` is a required exact structured array. `revalidateIfStale` is optional and
+defaults to `false`. `depth` is an optional integer from 1 to 6 and defaults to 3.
+
+```bash
+npx @genie-react/cli call query_ensure \
+  '{"queryKey":["todos"],"revalidateIfStale":true}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "data": { "items": [{ "id": 1 }] },
+  "status": "success",
+  "dataUpdatedAt": 1750000000000
+}
+```
+
+**Agent use:** Confirms that one exact key has usable data before checking the UI.
+
+**Safety:** Missing data still needs a query function. Stale revalidation runs in the background,
+so wait for settlement when it is enabled. The returned data is depth-bounded; no synthetic state
+is retained.
+
+## `mutation_rerun`
+
+Replays one retained mutation.
+
+**Input:** `mutationId` is a required integer from `query_list_mutations`. `variables` is optional
+and accepts any JSON value; omit it to reuse the retained variables.
+
+```bash
+npx @genie-react/cli call mutation_rerun \
+  '{"mutationId":7,"variables":{"title":"Retry"}}' --json
+```
+
+**Output (selected fields):**
+
+```json
+{ "ok": true, "mutationId": 7, "status": "success", "data": { "id": 10 } }
+```
+
+**Agent use:** Replays one exact retained mutation, then verifies its server side effects, cache
+changes, callbacks, and resulting UI.
+
+**Safety:** This is not idempotent and can create real external effects. It also needs the retained
+mutation function. The returned data is depth-bounded to 3. Use a disposable fixture or perform the
+application's domain-specific reversal after the check; there is no generic undo.

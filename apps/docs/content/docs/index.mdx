@@ -1,0 +1,37 @@
+---
+title: Genie React
+description: Live React and TanStack DevTools for coding agents.
+icon: WandSparkles
+---
+
+Always pair Genie with [agent-browser](https://github.com/vercel-labs/agent-browser) or
+[agent-device](https://github.com/callstack/agent-device). The UI driver performs the action. Genie
+explains what happened inside React, Query, and Router. Together, the agent can reproduce a problem,
+find its runtime cause, change the code, and check the result.
+
+| UI driver                                           | Genie                                                                 |
+| --------------------------------------------------- | --------------------------------------------------------------------- |
+| Clicks, types, navigates, and checks the visible UI | Reads components, renders, effects, cache, routes, memory, and frames |
+| Verifies text, layout, focus, and accessibility     | Explains the runtime cause and measures the result                    |
+
+## What the agent can do
+
+| Goal                                                                                 | What changes for the agent                                                                                     |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| [Verify a native app end to end](/docs/case-studies/native-end-to-end)               | Press the real iOS UI, explain its exact hook update, and prove Query cache delivery to visible native text.   |
+| [Verify hard-to-reach UI states](/docs/case-studies/verify-ui-states)                | Read live props, hooks, and Context. Force rare states, check the page, save screenshots, and restore the app. |
+| [Investigate repeated renders and hot effects](/docs/case-studies/render-and-effect) | Join one UI action to its render cause, changed hook value, effect execution, source ownership, and coverage.  |
+| [Prove Query data reached the UI](/docs/case-studies/query-end-to-end)               | Follow one cache change through the exact observer notification and React render to visible text.              |
+| [Check optimization evidence](/docs/case-studies/prove-an-optimization)              | Repeat the same flow, compare multiple runs, reject weak evidence, and verify behavior with the UI driver.     |
+
+Genie reports what it observed and what it missed. The agent can act on exact evidence and collect
+another run when coverage is incomplete.
+
+## Start here
+
+<Cards>
+  <Card title="Install Genie" href="/docs/getting-started/install" />
+  <Card title="Run the first check" href="/docs/getting-started/first-check" />
+  <Card title="Optimize renders" href="/docs/workflows/render-optimization" />
+  <Card title="Browse every tool" href="/docs/tools" />
+</Cards>

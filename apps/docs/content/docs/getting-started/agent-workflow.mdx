@@ -1,0 +1,60 @@
+---
+title: Autonomous agent workflow
+description: Pair a UI driver with Genie so the agent can reproduce, fix, and verify the work.
+icon: Bot
+---
+
+Always use Genie with a UI driver.
+
+| Step                              | Tool                          | Result                                                                  |
+| --------------------------------- | ----------------------------- | ----------------------------------------------------------------------- |
+| Open the app and perform the flow | agent-browser or agent-device | The real user action runs.                                              |
+| Read what happened underneath     | Genie                         | The agent gets components, causes, cache, routes, effects, and timings. |
+| Change the source                 | Coding agent                  | The smallest evidence-backed fix is made.                               |
+| Repeat the same flow              | agent-browser or agent-device | Visible behavior, layout, focus, and accessibility are checked.         |
+| Compare live evidence             | Genie                         | The agent checks the same selected runtime evidence again.              |
+| Restore test state                | Genie and the UI driver       | The developer gets a clean app.                                         |
+
+## Web
+
+```text
+agent-browser drives and checks the page
+            ↓
+Genie explains React, Query, Router, memory, and frames
+            ↓
+the agent edits, repeats, and verifies
+```
+
+Run the full browser loop in [First live check](/docs/getting-started/first-check).
+
+## React Native
+
+Use agent-device for taps, typing, screenshots, and native accessibility. Use Genie for React,
+Query, Router, hooks, effects, and renders.
+
+Run the full device loop in
+[Verify a native app end to end](/docs/case-studies/native-end-to-end).
+
+## Done means both pass
+
+The work is complete only when:
+
+- The UI driver confirms the feature still works.
+- Genie supports the result with the selected evidence.
+- Genie reports enough coverage for that claim. Incomplete or truncated coverage needs another run.
+- Temporary Query state and React overrides are restored.
+
+Genie cannot prove a path it did not observe. Match each claim to a visible assertion, a focused Genie
+read, and that read's coverage fields.
+
+## Return the result
+
+Never end after the plan or tool calls. Return a short report:
+
+- What the agent reproduced.
+- What the evidence proved, including coverage limits.
+- What changed.
+- Which live checks and tests passed.
+- What the developer should do next, or `nothing` when the work is complete.
+
+If no change was made, say why. If verification failed, show the failed check and the next action.

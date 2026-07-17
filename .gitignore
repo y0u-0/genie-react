@@ -12,3 +12,6 @@ coverage
 .nitro
 .vinxi
 .genie
+.source
+.vercel
+*.tgz

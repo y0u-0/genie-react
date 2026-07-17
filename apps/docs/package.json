@@ -1,0 +1,44 @@
+{
+  "name": "@genie-react/docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev --port 3100",
+    "build": "vite build",
+    "preview": "vite preview --port 3100",
+    "deploy": "pnpm build && wrangler deploy",
+    "cf:typegen": "wrangler types --include-runtime false",
+    "typecheck": "fumadocs-mdx && tsc --noEmit",
+    "lint": "biome check .",
+    "check:content": "node scripts/check-docs.mjs",
+    "check:live-contracts": "node scripts/check-live-contracts.mjs",
+    "check": "pnpm lint && pnpm typecheck && pnpm check:content && pnpm build",
+    "format": "biome format --write ."
+  },
+  "dependencies": {
+    "@tanstack/react-router": "1.170.17",
+    "@tanstack/react-start": "1.168.27",
+    "fumadocs-core": "16.11.4",
+    "fumadocs-mdx": "15.1.1",
+    "fumadocs-ui": "16.11.4",
+    "lucide-react": "^1.24.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.45.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/mdx": "^2.0.14",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.4",
+    "wrangler": "^4.112.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

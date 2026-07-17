@@ -1,0 +1,8 @@
+node_modules
+.source
+.tanstack
+.output
+.vercel
+dist
+.wrangler
+worker-configuration.d.ts

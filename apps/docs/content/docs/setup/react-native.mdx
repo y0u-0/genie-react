@@ -1,0 +1,113 @@
+---
+title: React Native and Expo
+description: Connect the repository Expo demo to the local hub.
+icon: Smartphone
+---
+
+The repository includes a real Expo and Metro integration at `examples/expo-demo`. It mounts Genie
+with the same `QueryClient` used by `QueryClientProvider` and also passes its TanStack Router.
+
+## Run the Expo demo
+
+From the repository root, install dependencies once:
+
+```bash
+pnpm install
+```
+
+Start the fixed-port hub in the first terminal:
+
+```bash title="Terminal 1 — hub"
+pnpm --filter @genie-react/expo-demo hub
+```
+
+Start one supported local target in a second terminal:
+
+```bash title="Terminal 2 — iOS Simulator"
+pnpm --filter @genie-react/expo-demo ios
+```
+
+```bash title="Terminal 2 — Android Emulator"
+pnpm --filter @genie-react/expo-demo android
+```
+
+The package also exposes the Expo launcher when you want to choose the target interactively:
+
+```bash title="Terminal 2 — Expo launcher"
+pnpm --filter @genie-react/expo-demo start
+```
+
+The bundled defaults cover local virtual devices only:
+
+| Target           | Hub URL                          |
+| ---------------- | -------------------------------- |
+| iOS Simulator    | `ws://127.0.0.1:4390/__genie/ws` |
+| Android Emulator | `ws://10.0.2.2:4390/__genie/ws`  |
+
+The hub listens on the development machine's loopback interface. A physical device cannot use
+these loopback examples directly; it requires an external, tested port forward. This repository
+does not provide a tunnel command. After that forward exists, point Expo at its reachable address:
+
+```bash
+EXPO_PUBLIC_GENIE_URL=ws://<forwarded-host>:4390/__genie/ws \
+  pnpm --filter @genie-react/expo-demo start
+```
+
+## Verify the mounted runtime
+
+After Expo has opened the app, inspect the machine-readable session state from a third terminal and
+pin subsequent calls to the one ready `Expo demo` session:
+
+```bash title="Terminal 3 — agent checks"
+export GENIE_BRIDGE_URL='ws://localhost:4390/__genie/ws'
+
+status_json="$(
+  pnpm --filter @genie-react/expo-demo exec genie-react status --json
+)"
+jq '{
+  connected,
+  ready,
+  sessionId,
+  sessions: [
+    .sessions[]
+    | {sessionId, app: .app.name, ready, staleMs, domains, toolCount}
+  ]
+}' <<<"$status_json"
+
+export GENIE_SESSION="$(
+  jq -er '
+    [
+      .sessions[]
+      | select(
+          .ready == true and
+          .staleMs == null and
+          .app.name == "Expo demo"
+        )
+    ] as $matches
+    | if ($matches | length) == 1
+      then $matches[0].sessionId
+      else error("expected exactly one ready Expo demo session")
+      end
+  ' <<<"$status_json"
+)"
+
+pnpm --filter @genie-react/expo-demo exec genie-react call \
+  react_find_components '{"query":"App","exact":true}' --json \
+  | jq '{matches}'
+
+pnpm --filter @genie-react/expo-demo exec genie-react tools --json
+```
+
+If session selection fails, keep both long-running terminals open, make sure Expo has mounted the
+screen, then rerun the whole `status_json` block. Do not reuse an empty or stale session ID.
+
+The demo source defines `increment-button`, `counter-value`, and `genie-hub-url` test IDs for a
+device driver. React Native has no DOM selectors: `react_dom_for_component` returns native view
+details, while browser memory and FPS readings are unavailable. Use device-native performance
+evidence for those measurements.
+
+Run the repository's TypeScript and Metro export checks with:
+
+```bash
+pnpm --filter @genie-react/expo-demo check
+```

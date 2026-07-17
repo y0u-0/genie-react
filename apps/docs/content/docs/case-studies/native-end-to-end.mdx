@@ -1,0 +1,248 @@
+---
+title: Verify a native app end to end
+description: Press the real UI, explain its render, and prove Query cache delivery on iOS.
+icon: Smartphone
+---
+
+**Demo:** `examples/expo-demo`
+
+The UI driver proves what the user sees. Genie proves why React changed and which Query observer
+received the data. This case ran in Expo Go on an iPhone simulator.
+
+## Start the demo
+
+Terminal 1:
+
+```bash
+pnpm --filter @genie-react/expo-demo hub
+```
+
+Terminal 2:
+
+```bash
+EXPO_PUBLIC_GENIE_URL=ws://127.0.0.1:4390/__genie/ws \
+  pnpm --filter @genie-react/expo-demo start -- --clear --port 8081
+```
+
+Terminal 3:
+
+```bash
+agent-device open 'Expo Go' exp://127.0.0.1:8081 \
+  --relaunch \
+  --session genie-expo-check \
+  --platform ios
+agent-device wait text 'Native integration demo' 30000 \
+  --session genie-expo-check
+
+export GENIE_BRIDGE_URL=ws://127.0.0.1:4390/__genie/ws
+genie() {
+  pnpm --filter @genie-react/expo-demo exec genie-react "$@"
+}
+
+status_json="$(genie status --json)"
+export GENIE_SESSION="$(
+  jq -er '
+    [
+      .sessions[]
+      | select(
+          .ready == true and
+          .staleMs == null and
+          .app.name == "Expo demo"
+        )
+    ] as $matches
+    | if ($matches | length) == 1
+      then $matches[0].sessionId
+      else error("expected exactly one ready Expo demo session")
+      end
+  ' <<<"$status_json"
+)"
+genie status --json
+```
+
+Selected live status:
+
+```json
+{
+  "schemaVersion": "1.0",
+  "connected": true,
+  "ready": true,
+  "app": { "name": "Expo demo", "reactVersion": "19.2.3" },
+  "domains": [
+    "session",
+    "react",
+    "memory",
+    "perf",
+    "plugin",
+    "router",
+    "query"
+  ],
+  "toolCount": 73,
+  "warnings": []
+}
+```
+
+The agent now knows the intended native app is connected and exposes every expected domain.
+
+## Press once and explain the render
+
+Start a clean observation with enough budget for the native tree:
+
+```bash
+genie call react_clear_renders \
+  '{
+    "components":["App"],
+    "budget":{
+      "fiberLimit":5000,
+      "operationLimit":200000,
+      "timeLimitMs":50,
+      "targetOperationReserve":50000,
+      "targetTimeReserveMs":25,
+      "adaptive":false
+    }
+  }' --json
+
+agent-device get text 'id="counter-value"' \
+  --session genie-expo-check --json
+agent-device press 'id="increment-button"' \
+  --session genie-expo-check --json
+agent-device wait text '1' 5000 --session genie-expo-check
+agent-device get text 'id="counter-value"' \
+  --session genie-expo-check --json
+```
+
+Selected visible result:
+
+```json
+{
+  "success": true,
+  "data": {
+    "text": "1"
+  }
+}
+```
+
+Read the cause:
+
+```bash
+genie call react_render_causes \
+  '{"component":"App","limit":20,"appOnly":false}' --json
+```
+
+Selected live output:
+
+```json
+{
+  "observation": { "id": "observation:1" },
+  "events": [
+    {
+      "renderEventId": "render:5:42",
+      "componentName": "App",
+      "causes": [
+        {
+          "kind": "state",
+          "evidence": "exact",
+          "name": "state[0]",
+          "before": 0,
+          "after": 1,
+          "hook": { "index": 0, "stateIndex": 0, "kind": "state" }
+        }
+      ],
+      "necessity": "necessary",
+      "assessment": {
+        "behaviorEvidence": {
+          "subtreeHostMutations": { "status": "observed", "count": 20 }
+        },
+        "optimizationSafety": "not-proven-safe"
+      }
+    }
+  ],
+  "coverage": {
+    "complete": false,
+    "inputAttributionComplete": false,
+    "droppedRenderEvents": 0
+  }
+}
+```
+
+The agent proved the visible `0 → 1` change and tied it to one exact hook update. The render changed
+native host output, so removing it would be wrong. The incomplete global coverage also prevents a
+broader performance claim from this sample.
+
+## Prove Query cache to native UI
+
+Write one exact cache value, then check both the live observer and visible text:
+
+```bash
+agent-device scroll down --pixels 700 --session genie-expo-check
+
+genie call query_set_data \
+  '{"queryKey":["expo-tool-audit"],"data":{"label":"agent-proof","revision":2}}' \
+  --json
+
+genie call devtools_wait \
+  '{"condition":"react-quiet","quietMs":300,"timeoutMs":5000}' \
+  --json --fail-on-result-error
+agent-device wait text 'query:success:agent-proof:2' 5000 \
+  --session genie-expo-check
+
+genie call query_get \
+  '{"queryKey":["expo-tool-audit"]}' --json
+
+agent-device get text 'id="fixture-query-value"' \
+  --session genie-expo-check --json
+```
+
+Selected live Query output:
+
+```json
+{
+  "queryHash": "[\"expo-tool-audit\"]",
+  "status": "success",
+  "fetchStatus": "idle",
+  "data": { "label": "agent-proof", "revision": 2 },
+  "observerCount": 1,
+  "observers": [
+    {
+      "notificationPolicy": {
+        "mode": "auto-tracked",
+        "fields": ["status", "data"]
+      },
+      "deliveryEvidence": "public-track-prop-observed",
+      "subscriber": {
+        "componentName": "QueryFixture",
+        "renderEventId": "render:7:170"
+      }
+    }
+  ]
+}
+```
+
+Selected visible result:
+
+```json
+{
+  "success": true,
+  "data": {
+    "text": "query:success:agent-proof:2"
+  }
+}
+```
+
+The cache value, observer fields, subscriber component, render event, and native text agree. This
+proves cache-to-UI delivery instead of stopping at `query_set_data: ok`.
+
+## Restore and close
+
+```bash
+agent-device press 'id="fixture-query-restore"' \
+  --session genie-expo-check --json
+agent-device wait text 'query:success:server-value:1' 5000 \
+  --session genie-expo-check
+agent-device get text 'id="fixture-query-value"' \
+  --session genie-expo-check --json
+agent-device close --session genie-expo-check
+unset GENIE_BRIDGE_URL GENIE_SESSION status_json
+unset -f genie
+```
+
+The final text must be `query:success:server-value:1` before the agent closes the session.

@@ -1,0 +1,168 @@
+---
+title: Verify hard-to-reach UI states
+description: Read component and Context values, force variants, and return screenshots.
+icon: ScanSearch
+---
+
+**Demo:** `apps/vite-demo`
+
+An agent often cannot reach every review state through clicks alone. A role, feature flag, theme, or
+rare prop may need a long setup. Genie can read the current values, replace them in development,
+and restore them after the UI driver captures proof.
+
+## Setup
+
+```bash
+pnpm --filter @genie-react/vite-demo dev
+```
+
+```bash
+agent-browser --session docs-case-states open \
+  'http://localhost:3040/?_genie=docs-case-states'
+export GENIE_BRIDGE_URL=ws://localhost:3040/__genie/ws
+export GENIE_SESSION=docs-case-states
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"ready","timeoutMs":10000}'
+
+shot_dir="${TMPDIR:-/tmp}/genie-state-review"
+mkdir -p "$shot_dir"
+```
+
+## Read the current values
+
+Discover exact mounted instances. Never copy component IDs from an older run.
+
+```bash
+theme_id="$(npx @genie-react/cli call react_find_components \
+  '{"query":"ThemeReadout","exact":true}' --json | \
+  jq -er '.matches | if length == 1 then .[0].id else error("expected one ThemeReadout") end')"
+
+memo_id="$(npx @genie-react/cli call react_find_components \
+  '{"query":"MemoChild","exact":true}' --json | \
+  jq -er '.matches | if length == 1 then .[0].id else error("expected one MemoChild") end')"
+
+npx @genie-react/cli call react_inspect_context \
+  "{\"id\":$theme_id,\"depth\":3}" --json
+npx @genie-react/cli call react_inspect_component \
+  "{\"id\":$memo_id,\"depth\":3}" --json
+agent-browser --session docs-case-states screenshot "$shot_dir/00-baseline.png"
+```
+
+Live `react_inspect_context` output:
+
+```json
+{
+  "id": 31,
+  "name": "ThemeReadout",
+  "contexts": [
+    {
+      "name": "ThemeContext",
+      "value": { "label": "lab", "accent": "#646cff" }
+    }
+  ]
+}
+```
+
+Live `react_inspect_component` output:
+
+```json
+{
+  "id": 29,
+  "name": "MemoChild",
+  "kind": "memo",
+  "props": { "badge": { "text": "lab" } },
+  "hooks": [],
+  "wrapperAncestry": [{ "kind": "memo", "name": "MemoChild" }]
+}
+```
+
+IDs vary by session; the command output above shows the shape to expect, not IDs to reuse.
+
+The agent now has a baseline from the mounted app, not a guess from source defaults.
+
+## Force and capture each state
+
+Test a Context variant:
+
+```bash
+npx @genie-react/cli call react_override_context \
+  "{\"id\":$theme_id,\"context\":\"ThemeContext\",\"value\":{\"label\":\"review\",\"accent\":\"#ff4d8d\"}}" \
+  --json
+agent-browser --session docs-case-states get text body | rg 'theme label: review'
+agent-browser --session docs-case-states screenshot "$shot_dir/01-context-review.png"
+```
+
+Test a prop variant:
+
+```bash
+npx @genie-react/cli call react_override_props \
+  "{\"id\":$memo_id,\"props\":{\"badge\":{\"text\":\"approval\"}}}" --json
+agent-browser --session docs-case-states get text body | rg 'memo child badge: approval'
+agent-browser --session docs-case-states screenshot "$shot_dir/02-prop-approval.png"
+npx @genie-react/cli call react_list_overrides '{}' --json
+```
+
+Selected live output:
+
+```json
+{
+  "overrides": [
+    {
+      "kind": "context",
+      "componentName": "ThemeContext",
+      "mounted": true
+    },
+    {
+      "kind": "props",
+      "componentName": "MemoChild",
+      "mounted": true
+    }
+  ],
+  "total": 2
+}
+```
+
+The two text checks prove the visible values. The screenshots give the developer a fast visual
+review. The agent can repeat this pattern for each role, theme, locale, flag, form value, and wizard
+step in a state matrix.
+
+For loading and error screenshots, use [Verify routes and forced states](/docs/case-studies/router-and-live-states).
+
+## Restore the app
+
+```bash
+npx @genie-react/cli call react_reset_overrides '{}' --json
+agent-browser --session docs-case-states get text body | rg -F 'theme label: lab'
+agent-browser --session docs-case-states get text body | rg -F 'memo child badge: lab'
+npx @genie-react/cli call react_list_overrides '{}' --json
+```
+
+```json
+{
+  "ok": true,
+  "cleared": [
+    {
+      "kind": "context",
+      "componentName": "ThemeContext",
+      "outcome": "restored"
+    },
+    { "kind": "props", "componentName": "MemoChild", "outcome": "restored" }
+  ],
+  "remaining": 0
+}
+```
+
+```bash
+printf 'Screenshots: %s\n' "$shot_dir"
+agent-browser --session docs-case-states close
+unset GENIE_BRIDGE_URL GENIE_SESSION memo_id shot_dir theme_id
+```
+
+## Outcome
+
+The agent can review hard-to-reach states without changing source or building one-off test routes.
+Genie proves which live values were replaced. agent-browser proves what the user sees and saves the
+screenshots. Resetting the overrides leaves the developer's app clean.
+
+These overrides are for development checks. The final feature still needs its real user flow,
+accessibility checks, and normal tests.

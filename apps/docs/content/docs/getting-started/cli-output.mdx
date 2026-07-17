@@ -1,0 +1,66 @@
+---
+title: CLI output
+description: Pick compact text, JSON, JSONL, or selected fields.
+icon: SquareTerminal
+---
+
+## Human-readable output
+
+The default output is short and designed for a terminal:
+
+```bash
+npx @genie-react/cli call react_get_renders '{"limit":5}'
+```
+
+## One JSON value
+
+Use `--json` when the next step needs the full result:
+
+```bash
+npx @genie-react/cli call react_get_renders '{}' --json | jq '.coverage'
+```
+
+## Selected fields as JSONL
+
+Use `--fields` to keep only the records the agent needs:
+
+```bash
+npx @genie-react/cli call query_list '{}' \
+  --fields queryHash,status,fetchStatus
+```
+
+```json
+{
+  "queryHash": "[\"demo\",\"greeting\"]",
+  "status": "success",
+  "fetchStatus": "idle"
+}
+```
+
+## Batch calls
+
+Batch calls share one connection and run in order:
+
+```bash
+npx @genie-react/cli batch \
+  '[{"tool":"react_get_tree","args":{"depth":2}},{"tool":"react_get_renders","args":{"limit":5}}]' \
+  --ndjson
+```
+
+- `batch` and `batch --ndjson` write one JSON object per line.
+- `batch --json` writes one JSON array.
+- Batch continues after an item fails and exits non-zero if any item failed.
+- CLI status, batch, and error envelopes include `schemaVersion`.
+
+## Diagnose startup
+
+```bash
+npx @genie-react/cli status --verbose
+```
+
+Verbose startup details go to stderr. JSON stdout stays valid.
+
+## How this helps the agent
+
+The agent can request only the data it needs, pipe it through normal shell tools, and recover from a
+stable machine-readable error without parsing prose.

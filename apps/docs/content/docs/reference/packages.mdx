@@ -1,0 +1,34 @@
+---
+title: Packages and exports
+description: Choose the package entry point for each setup.
+icon: Package
+---
+
+| Package or export        | Purpose                                                     |
+| ------------------------ | ----------------------------------------------------------- |
+| `genie-react`            | The `<Genie />` app component.                              |
+| `genie-react/vite`       | Vite plugin and embedded hub.                               |
+| `genie-react/next`       | Next.js hub registration and `<GenieScript />`.             |
+| `genie-react/native`     | React Native and Expo component.                            |
+| `genie-react/hook`       | React DevTools hook for manual web setup.                   |
+| `genie-react/client`     | Browser client and core collectors.                         |
+| `genie-react/collectors` | Optional Query, Router, memory, and performance collectors. |
+| `genie-react/collectors/query` | Query collector without Router types.               |
+| `genie-react/collectors/router` | Router collector.                                  |
+| `genie-react/hub`        | Standalone local hub API.                                   |
+| `genie-react/protocol`   | Tool contracts, schemas, and wire types.                    |
+| `@genie-react/cli`       | The `genie-react` terminal command.                         |
+
+## Peer support
+
+| Dependency      | Supported version |
+| --------------- | ----------------- |
+| React           | 18 or newer       |
+| Vite            | 5 or newer        |
+| TanStack Query  | 5 or newer        |
+| TanStack Router | 1 or newer        |
+
+Query and Router are separate optional integrations. The Vite plugin supplies development stubs
+when either package is absent. The Next.js Query setup registers `queryCollector` directly and does
+not install or use TanStack Router. Native and collector-only entries register only the integrations
+the app passes.

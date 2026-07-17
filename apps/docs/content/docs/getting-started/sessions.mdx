@@ -1,0 +1,52 @@
+---
+title: Sessions and tabs
+description: Keep every agent attached to the correct running tab.
+icon: PanelsTopLeft
+---
+
+Each browser tab is a session. Several apps, tabs, and agents can connect to one local hub.
+
+## Name the tab
+
+Add `_genie` to the app URL:
+
+```text
+http://localhost:3000/?_genie=checkout-agent
+```
+
+Pin later calls in the shell:
+
+```bash
+export GENIE_SESSION=checkout-agent
+```
+
+Or target one call:
+
+```bash
+npx @genie-react/cli status --session checkout-agent
+```
+
+The name survives navigation, reloads, HMR, and reconnects. A physical session ID also works, but it
+can change after a reconnect.
+
+## Find the right session
+
+```bash
+npx @genie-react/cli status --sessions-only
+```
+
+Run the command from the app folder. Genie uses the local bridge discovery file. Several matching
+bridges are an error. When several sessions are connected and no session is pinned, the CLI selects
+the most recent one and prints a warning. Set `GENIE_SESSION` to a unique name, logical ID, or
+physical ID before any mutation. Repeated session names remain ambiguous and fail.
+
+Use a direct bridge only when discovery is not enough:
+
+```bash
+export GENIE_BRIDGE_URL=ws://localhost:4390/__genie/ws
+```
+
+## How this helps the agent
+
+The agent can keep one stable target through a long edit and reload loop. It will not clear renders,
+change Query state, or navigate another agent's tab by mistake.

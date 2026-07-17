@@ -1,0 +1,45 @@
+---
+title: Getting started
+description: Connect Genie to a running app and make the first live call.
+icon: Rocket
+---
+
+Genie connects a terminal to the React app open in your browser. The agent can read runtime
+state that source code and screenshots do not show.
+
+<Callout type="info" title="Use both tools">
+  Always pair Genie with agent-browser on web or agent-device on React Native.
+  The UI driver performs the flow and checks the result. Genie explains the live
+  app state underneath it.
+</Callout>
+
+## The loop
+
+1. Add Genie to the app.
+2. Open the app in a browser.
+3. Pin the right tab.
+4. Clear old measurements.
+5. Drive one exact flow.
+6. Read the result.
+7. Make a change and run the same flow again.
+
+## Requirements
+
+- React 18 or newer
+- Node.js 20 or newer for the package and CLI
+- A running development build
+- A browser driver for automated UI actions
+
+Use [agent-browser](https://github.com/vercel-labs/agent-browser) for web apps or
+[agent-device](https://github.com/callstack/agent-device) for React Native.
+
+<Cards>
+  <Card title="Install Genie" href="/docs/getting-started/install" />
+  <Card
+    title="Use the autonomous agent loop"
+    href="/docs/getting-started/agent-workflow"
+  />
+  <Card title="Run the first check" href="/docs/getting-started/first-check" />
+  <Card title="Target one tab" href="/docs/getting-started/sessions" />
+  <Card title="Choose an output mode" href="/docs/getting-started/cli-output" />
+</Cards>

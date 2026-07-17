@@ -1,0 +1,74 @@
+---
+title: Optimize renders
+description: Find the expensive component, its observed cause, and a safe fix.
+icon: Gauge
+---
+
+## 1. Create a clean window
+
+```bash
+npx @genie-react/cli call react_clear_renders '{}'
+```
+
+Drive one exact interaction in the browser.
+
+## 2. Rank the work
+
+```bash
+npx @genie-react/cli call react_get_renders \
+  '{"sort":"selfTime","limit":10}'
+```
+
+Example output:
+
+```text
+4 commits · 6 components · 24 renders · 24 updates · 4 reference-only prop candidates · 2 no observed input change
+reference-only props: onClick×4
+  Button #81 4× (0m 4u) · 4 reference-only props · peak self 0.2ms · ↻ props: onClick(reference-only) (button.tsx:50)
+```
+
+Use `selfTime` for the slowest single render. Use cumulative time in JSON when repeated small renders
+are the larger cost.
+
+## 3. Read the cause
+
+```bash
+npx @genie-react/cli call react_render_causes \
+  '{"component":"Button","limit":20}' --json
+```
+
+Look for an `exact` prop, state, Context, Query, Router, child, or mount cause. Treat an inferred parent
+cause as a lead, not proof.
+
+## 4. Check the whole cohort
+
+For every mounted `Button` instance:
+
+```bash
+npx @genie-react/cli call react_component_cohort \
+  '{"component":"Button","exact":true,"limit":100}' --json
+```
+
+This separates updated, mounted-idle, unmounted, and absent instances. Check `omittedByLimit` before
+calling the list complete.
+
+## 5. Make the smallest fix
+
+Examples:
+
+- Move a changing Context value closer to its consumers.
+- Stop recreating a callback or object when the exact changed path proves it matters.
+- Narrow a Query or Router subscription.
+- Remove a state write that repeats the same value.
+
+Do not add blanket memoization from a render count alone.
+
+## 6. Verify behavior and cost
+
+Run the same browser flow. Check visible output, DOM, ARIA, focus, URL, requests, and transitions. Then
+use [repeated captures](/docs/workflows/performance-proof) to prove the runtime change.
+
+## Agent outcome
+
+The agent moves from “this component looks expensive” to “this exact mounted instance rendered four
+times because this input changed, and the same flow is cheaper after the fix.”

@@ -1,0 +1,15 @@
+{
+  "title": "Genie React",
+  "pages": [
+    "index",
+    "---Start---",
+    "getting-started",
+    "setup",
+    "---Workflows---",
+    "workflows",
+    "case-studies",
+    "---Reference---",
+    "tools",
+    "reference"
+  ]
+}

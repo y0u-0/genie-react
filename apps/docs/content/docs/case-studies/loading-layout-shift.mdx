@@ -1,0 +1,116 @@
+---
+title: Measure the loading-state height gap
+description: Hold Query pending, measure both layouts, and choose a fix.
+icon: Rows3
+---
+
+**Demo:** `apps/demo`, `/dashboard`
+
+The dashboard has 50 loaded rows. The agent measured the loaded container, held its real Query in
+pending state, measured again, and restored it.
+
+## Setup
+
+Start the demo in one shell:
+
+```bash
+pnpm --filter @genie-react/demo dev
+```
+
+Open and bind the page in another shell:
+
+```bash
+agent-browser --session docs-case-start open \
+  'http://localhost:3000/dashboard?_genie=docs-case-start'
+export GENIE_BRIDGE_URL=ws://localhost:3000/__genie/ws
+export GENIE_SESSION=docs-case-start
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["dashboard","metrics"],"timeoutMs":10000}'
+```
+
+## Measure loaded state
+
+```bash
+agent-browser --session docs-case-start eval --stdin <<'JS'
+(() => {
+  const table = document.querySelector('input[placeholder="Filter teams…"]')
+    ?.nextElementSibling
+  const rect = table?.getBoundingClientRect()
+  return {
+    height: Math.round(rect?.height ?? 0),
+    rows: table?.querySelectorAll('button').length ?? 0,
+    statusText: table?.querySelector('p')?.textContent?.trim() ?? null,
+  }
+})()
+JS
+```
+
+## Hold pending and measure again
+
+```bash
+npx @genie-react/cli call query_simulate_state \
+  '{"queryKey":["dashboard","metrics"],"state":"pending"}'
+
+agent-browser --session docs-case-start eval --stdin <<'JS'
+(() => {
+  const table = document.querySelector('input[placeholder="Filter teams…"]')
+    ?.nextElementSibling
+  const rect = table?.getBoundingClientRect()
+  return {
+    height: Math.round(rect?.height ?? 0),
+    rows: table?.querySelectorAll('button').length ?? 0,
+    statusText: table?.querySelector('p')?.textContent?.trim() ?? null,
+  }
+})()
+JS
+```
+
+Live result:
+
+```text
+loaded:  { height: 2085, rows: 50, statusText: null }
+pending: { height: 103, rows: 0, statusText: "Loading metrics…" }
+```
+
+The loading-to-loaded gap was 1,982 px.
+
+## Agent decision
+
+Add row-shaped placeholders, reserve space, or choose another deliberate layout rule. Then rerun the
+same measurements and visible browser check.
+
+## Restore
+
+```bash
+restore="$(npx @genie-react/cli call query_restore_state \
+  '{"queryKey":["dashboard","metrics"]}' --json)"
+jq -e '.ok == true and .restored == 1' <<<"$restore" >/dev/null
+
+agent-browser --session docs-case-start eval --stdin <<'JS'
+(() => {
+  const table = document.querySelector('input[placeholder="Filter teams…"]')
+    ?.nextElementSibling
+  const rect = table?.getBoundingClientRect()
+  return {
+    height: Math.round(rect?.height ?? 0),
+    rows: table?.querySelectorAll('button').length ?? 0,
+    statusText: table?.querySelector('p')?.textContent?.trim() ?? null,
+  }
+})()
+JS
+```
+
+```text
+restore: { ok: true, restored: 1 }
+loaded again: { height: 2085, rows: 50 }
+```
+
+```bash
+agent-browser --session docs-case-start close
+unset GENIE_BRIDGE_URL GENIE_SESSION restore
+```
+
+## Outcome
+
+Genie plus agent-browser measures the exact gap without temporary source changes. After editing the
+loading UI, the agent can repeat this check to see whether the gap became smaller.

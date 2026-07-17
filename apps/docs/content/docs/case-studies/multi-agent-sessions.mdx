@@ -1,0 +1,75 @@
+---
+title: Keep agents on separate tabs
+description: Use a stable alias across reloads and fail safely on duplicates.
+icon: PanelsTopLeft
+---
+
+**Demo:** `apps/plain-demo`
+
+Start the hub and demo in separate shells:
+
+```bash
+npx @genie-react/cli hub --port 4390
+```
+
+```bash
+pnpm --filter @genie-react/plain-demo dev
+```
+
+## Open and pin one tab
+
+```bash
+agent-browser --session docs-session open \
+  'http://127.0.0.1:3050/?_genie=live-plain-final'
+export GENIE_BRIDGE_URL=ws://127.0.0.1:4390/__genie/ws
+npx @genie-react/cli status --sessions-only
+export GENIE_SESSION=live-plain-final
+npx @genie-react/cli call devtools_wait '{"condition":"ready"}'
+agent-browser --session docs-session reload
+npx @genie-react/cli call devtools_wait '{"condition":"ready"}'
+npx @genie-react/cli call react_find_components \
+  '{"query":"App","exact":true}' --json \
+  | jq -e '.matches | length == 1' >/dev/null
+agent-browser --session docs-session get text body \
+  | rg -F 'Genie Plain Demo Lab'
+```
+
+Live result across reload:
+
+```text
+before reload: physical be045bce… · logical afd9a346… · generation 1
+after reload:  physical df005e35… · logical afd9a346… · generation 2
+```
+
+The same alias reconnected, found the one mounted `App`, and reached the expected visible page after
+reload.
+
+## Duplicate markers fail safely
+
+Open a second browser session with the same marker:
+
+```bash
+agent-browser --session docs-session-copy open \
+  'http://127.0.0.1:3050/?_genie=live-plain-final'
+npx @genie-react/cli status --session live-plain-final
+```
+
+The live command returned:
+
+```text
+Status check failed: Session name "live-plain-final" is ambiguous (2 tabs).
+Use a physical or logical id from devtools_status.
+```
+
+## Outcome
+
+A long-running agent stays on one logical document through reload. It cannot
+silently clear measurements or change state in another agent's tab.
+
+Close the duplicate tab. Keep only the owned tab while the job runs:
+
+```bash
+agent-browser --session docs-session-copy close
+agent-browser --session docs-session close
+unset GENIE_BRIDGE_URL GENIE_SESSION
+```

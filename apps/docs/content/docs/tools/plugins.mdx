@@ -1,0 +1,103 @@
+---
+title: Plugins
+description: Discover, read, and emit TanStack DevTools plugin events.
+icon: Plug
+---
+
+The JSON examples below show selected fields from the full response.
+
+Plugin event types and effects belong to the app or third-party plugin. Inspect live traffic before
+emitting an event.
+
+## `plugin_list`
+
+Lists plugin channels discovered from traffic or declared by the Genie provider.
+
+**Input:** No fields; pass `{}`.
+
+```bash
+npx @genie-react/cli call plugin_list '{}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "plugins": [
+    { "pluginId": "cart", "eventCount": 12 },
+    { "pluginId": "feature-flags", "eventCount": 0 }
+  ]
+}
+```
+
+**Agent use:** Choose the exact `pluginId` that owns the behavior, then read a wide event window
+before deciding whether an emit is safe or which UI state to verify.
+
+**Limits:** Traffic-based discovery starts after a channel's first event. IDs declared through the
+Genie provider appear earlier with `eventCount:0`, which means no buffered traffic, not proof that
+the plugin is inactive. Each physical app document owns its buffers; reload clears them. The
+collector removes its DevTools bus subscription on teardown.
+
+## `plugin_get_events`
+
+Reads the newest buffered events for one exact plugin channel, ordered newest last.
+
+**Input:** `pluginId` is a required string. `limit` is an optional integer from 1–200 and defaults
+to 50.
+
+```bash
+npx @genie-react/cli call plugin_get_events \
+  '{"pluginId":"cart","limit":100}' --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "events": [
+    {
+      "type": "cart:item-added",
+      "payload": { "sku": "A1", "quantity": 1 },
+      "ts": 1784282400000
+    }
+  ]
+}
+```
+
+**Agent use:** Match the expected event type and payload to the UI result; if ordering is causal to
+the diagnosis, widen `limit` and corroborate with runtime or browser evidence before acting.
+
+**Limits:** Each plugin keeps only its latest 200 events and payloads are dehydrated to depth 3.
+An unknown plugin ID returns `events:[]`; call `plugin_list` to distinguish a wrong ID from a quiet
+declared channel. Nested synchronous dispatch can record a response before its triggering request,
+so array order alone does not prove cause. Reads create no subscription and require no cleanup.
+
+## `plugin_emit`
+
+Emits one event through the live TanStack DevTools bus.
+
+**Input:** `pluginId` and `type` are required strings. `payload` is optional and accepts any value.
+
+```bash
+npx @genie-react/cli call plugin_emit \
+  '{"pluginId":"cart","type":"refresh","payload":{"source":"agent-check"}}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "ok": true
+}
+```
+
+**Agent use:** After `ok:true`, read `plugin_get_events` and verify the intended visible state; if
+the plugin documents an inverse or reset event, send it after the check and verify cleanup too.
+
+**Limits:** A bare `type` becomes `pluginId:type`; an already qualified type for that plugin stays
+unchanged. `ok:false` means no DevTools bus was present, not that the plugin handled the event.
+Plugin-defined listeners can change app or external state. The emit cannot retract an event and
+creates no subscription, so cleanup must use the plugin's documented protocol or a fresh test
+document.

@@ -1,0 +1,131 @@
+---
+title: Browser metrics
+description: Measure page memory and frame performance around a real browser flow.
+icon: Monitor
+---
+
+The JSON examples below show selected fields from the full response.
+
+These are page-wide signals, not React-only measurements. Repeat the same browser or device flow
+for every before-and-after sample.
+
+## `browser_get_memory`
+
+Reads the current page-wide JavaScript heap estimate exposed by Chromium.
+
+**Input:** No fields; pass `{}`.
+
+```bash
+npx @genie-react/cli call browser_get_memory '{}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "supported": true,
+  "usedJSHeapSize": 24576000,
+  "totalJSHeapSize": 36700160,
+  "jsHeapSizeLimit": 4294705152,
+  "note": "Browser JavaScript (V8) heap for the whole page, not React-specific memory. Values are coarsened by the browser for security."
+}
+```
+
+**Agent use:** Record `usedJSHeapSize` before and after the same repeated flow; if either sample is
+unsupported or from a different document, do not claim a memory improvement.
+
+**Limits:** This is an instantaneous, coarsened reading from non-standard Chromium
+`performance.memory`. It covers the whole page, not one React component. Firefox, Safari,
+React Native, and runtimes without numeric heap fields return `supported:false` with a note; absent
+fields are not zero. The call creates no subscription and needs no cleanup.
+
+## `browser_measure_memory`
+
+Requests a page-wide memory estimate with per-realm attribution when the browser supports it.
+
+**Input:** No fields; pass `{}`.
+
+```bash
+npx @genie-react/cli call browser_measure_memory '{}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "supported": true,
+  "bytes": 28400000,
+  "breakdown": [
+    {
+      "bytes": 21000000,
+      "attribution": [
+        { "url": "https://app.test/checkout", "scope": "Window" }
+      ],
+      "types": ["JavaScript", "DOM"]
+    }
+  ],
+  "note": "Page-wide browser memory estimate across all realms (JS heap, DOM, etc.), not React-specific memory. The browser may delay sampling."
+}
+```
+
+**Agent use:** Compare `bytes` and the same attribution scopes across repeated, controlled flows;
+when `supported:false`, fall back to `browser_get_memory` and label the weaker evidence.
+
+**Limits:** `performance.measureUserAgentSpecificMemory()` requires a Chromium-based browser and a
+cross-origin-isolated page with COOP `same-origin` and COEP `require-corp`. Sampling can be delayed
+and can return a tool error if the browser rejects it. The total includes all page realms, JS heap,
+and DOM memory, not one component. The call leaves no ongoing sampler.
+
+## `browser_fps`
+
+Samples page-wide animation-frame health for one fixed time window.
+
+**Input:** `durationMs` is an optional integer from 250–10,000 and defaults to 5,000.
+
+```bash
+npx @genie-react/cli call browser_fps '{"durationMs":5000}' \
+  --session logical-review --json
+```
+
+**Output (selected fields):**
+
+```json
+{
+  "durationMs": 5004,
+  "frames": 299,
+  "avgFps": 59.8,
+  "worstFrameMs": 34.2,
+  "longFrames": 0,
+  "droppedFrames": 1,
+  "refreshRate": 60,
+  "hidden": false,
+  "visibility": {
+    "startedHidden": false,
+    "endedHidden": false,
+    "hiddenDuringSample": false
+  },
+  "throttleState": "none-detected",
+  "calibration": {
+    "method": "frame-interval-distribution",
+    "confidence": "high",
+    "sampleCount": 299,
+    "intervalMs": { "p10": 16.6, "p50": 16.7, "p90": 16.8 },
+    "modesHz": [60]
+  },
+  "refreshRateModes": { "firstHalfHz": 60, "secondHalfHz": 60 },
+  "comparable": true,
+  "notComparableReasons": [],
+  "verdict": "smooth"
+}
+```
+
+**Agent use:** Drive the same scroll, animation, or interaction during each sample and compare only
+runs with `comparable:true`; otherwise fix visibility or sampling conditions and repeat the run.
+
+**Limits:** The call blocks for its sampling window, so start or drive the interaction from browser
+automation before or concurrently with it. It measures page-wide main-thread frame pacing, not
+React work alone. A tab hidden at start errors. Hiding it during sampling, sparse calibration, or a
+refresh-rate mode change sets comparability evidence that must be read. The internal timeout ends a
+stalled sample; no animation-frame subscription remains after the result.

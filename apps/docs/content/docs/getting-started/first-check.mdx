@@ -1,0 +1,124 @@
+---
+title: First live check
+description: Drive one browser action, read its renders, verify the UI, and clean up.
+icon: Play
+---
+
+This runnable example uses `apps/plain-demo`. Start each long-running process in its own terminal.
+
+```bash title="Terminal 1 — hub"
+pnpm --filter @genie-react/cli build
+pnpm --filter @genie-react/plain-demo exec genie-react hub --port 4390
+```
+
+The explicit port is strict, so this command fails instead of silently choosing another port.
+
+```bash title="Terminal 2 — demo"
+pnpm --filter @genie-react/plain-demo dev
+```
+
+## Run one complete loop
+
+The tab name pins every Genie call to the browser session owned by this agent.
+
+```bash title="Terminal 3 — agent loop"
+set -euo pipefail
+export GENIE_SESSION=first-check
+export GENIE_BRIDGE_URL='ws://localhost:4390/__genie/ws'
+export APP_URL='http://127.0.0.1:3050/?_genie=first-check'
+genie() {
+  pnpm --filter @genie-react/plain-demo exec genie-react "$@"
+}
+
+agent-browser --session "$GENIE_SESSION" open "$APP_URL"
+wait_json="$(genie call devtools_wait \
+  '{"condition":"ready","timeoutMs":15000}' \
+  --json --fail-on-result-error)"
+jq -e '.ok == true' <<<"$wait_json" >/dev/null
+
+status_json="$(genie status --sessions-only --json)"
+jq '{connected, ready, sessionId, sessions}' <<<"$status_json"
+jq -e '
+  .connected and .ready and
+  any(.sessions[]; .ready == true and .staleMs == null)
+' <<<"$status_json" >/dev/null
+agent-browser --session "$GENIE_SESSION" snapshot -i
+
+clear_json="$(genie call react_clear_renders \
+  '{
+    "components":["EffectCounter"],
+    "budget":{
+      "fiberLimit":5000,
+      "operationLimit":200000,
+      "timeLimitMs":50,
+      "targetOperationReserve":50000,
+      "targetTimeReserveMs":25,
+      "adaptive":false
+    }
+  }' --json)"
+jq -e '.ok == true' <<<"$clear_json" >/dev/null
+agent-browser --session "$GENIE_SESSION" find testid increment click
+
+quiet_json="$(genie call devtools_wait \
+  '{"condition":"react-quiet","quietMs":300,"timeoutMs":5000}' \
+  --json --fail-on-result-error)"
+jq -e '.ok == true' <<<"$quiet_json" >/dev/null
+
+renders_json="$(genie call react_get_renders \
+  '{"component":"EffectCounter","sort":"selfTime","limit":3}' --json)"
+jq '{
+  component: .components[0].name,
+  causes: .components[0].causes,
+  targetInputCoverage: .components[0].inputCoverage,
+  globalCoverage: .coverage
+}' <<<"$renders_json"
+jq -e '
+  .attribution.status == "current" and
+  (.components | length) == 1 and
+  .components[0].inputCoverage.complete == true and
+  any(.components[0].causes[]; .kind == "state" and .evidence == "exact")
+' <<<"$renders_json" >/dev/null
+
+causes_json="$(genie call react_render_causes \
+  '{"component":"EffectCounter","limit":3}' --json)"
+jq '{events, coverage}' <<<"$causes_json"
+jq -e '
+  (.events | length) > 0 and
+  .omittedByLimit == 0 and
+  .coverage.droppedRenderEvents == 0 and
+  all(.events[];
+    .assessment.inputCoverage.complete == true and
+    any(.causes[]; .kind == "state" and .evidence == "exact")
+  )
+' <<<"$causes_json" >/dev/null
+
+agent-browser --session "$GENIE_SESSION" get text '[data-testid="increment"]'
+
+agent-browser --session "$GENIE_SESSION" reload
+agent-browser --session "$GENIE_SESSION" wait '[data-testid="increment"]'
+agent-browser --session "$GENIE_SESSION" get text '[data-testid="increment"]'
+genie call react_clear_renders '{}' --json >/dev/null
+agent-browser --session "$GENIE_SESSION" close
+unset APP_URL GENIE_BRIDGE_URL GENIE_SESSION
+unset causes_json clear_json quiet_json renders_json status_json wait_json
+unset -f genie
+```
+
+The two visible checks should print:
+
+```text
+increment 1
+increment 0
+```
+
+The first value proves the click changed the visible UI. The Genie reads show which mounted React
+instance rendered and the exact state hook change from `0` to `1`. This demo can report incomplete
+global coverage because another fiber's Proxy props were not enumerated. The target component still
+reports complete input coverage, and the event has no omitted or dropped rows. Do not turn that
+targeted result into a complete-page claim. Reload restores the counter. The last clear removes the
+measurement before the agent closes its tab.
+
+## How this helps the agent
+
+The agent can tie one browser action to a mounted instance, source line, cost, and observed cause. It
+checks both target and global coverage, keeps the exact targeted result, and states the wider limit.

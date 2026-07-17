@@ -50,6 +50,14 @@
       "types": "./dist/collectors.d.ts",
       "import": "./dist/collectors.js"
     },
+    "./collectors/query": {
+      "types": "./dist/collectors/query.d.ts",
+      "import": "./dist/collectors/query.js"
+    },
+    "./collectors/router": {
+      "types": "./dist/collectors/router.d.ts",
+      "import": "./dist/collectors/router.js"
+    },
     "./native": {
       "types": "./dist/native.d.ts",
       "import": "./dist/native.js",

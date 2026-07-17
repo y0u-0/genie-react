@@ -1,0 +1,75 @@
+---
+title: Memory and frame rate
+description: Read browser heap signals and measure visible animation work.
+icon: Activity
+---
+
+## Quick heap read
+
+```bash
+npx @genie-react/cli call browser_get_memory '{}' --json
+```
+
+Use `browser_measure_memory` when the browser supports the detailed measurement API.
+
+## Frame-rate window
+
+This example uses the Vite demo. Start it in another shell:
+
+```bash
+pnpm --filter @genie-react/vite-demo dev
+```
+
+Open the app with agent-browser and bind Genie to the same page:
+
+```bash
+agent-browser --session fps-check open \
+  'http://localhost:3040/?_genie=fps-check'
+export GENIE_BRIDGE_URL=ws://localhost:3040/__genie/ws
+export GENIE_SESSION=fps-check
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"ready","timeoutMs":10000}'
+```
+
+Start the browser action during the sample. The shell waits for both commands and keeps their output
+separate:
+
+```bash
+(
+  sleep 0.25
+  agent-browser --session fps-check scroll down 1200
+) >&2 &
+action_pid=$!
+
+fps_status=0
+fps_json="$(npx @genie-react/cli call browser_fps \
+  '{"durationMs":2000}' --json)" || fps_status=$?
+
+action_status=0
+wait "$action_pid" || action_status=$?
+
+test "$fps_status" -eq 0
+test "$action_status" -eq 0
+jq '{avgFps,droppedFrames,hidden,comparable,notComparableReasons}' \
+  <<<"$fps_json"
+jq -e '.hidden == false and .comparable == true' \
+  <<<"$fps_json" >/dev/null
+```
+
+Frame-rate results are invalid when the browser throttles a background tab. Repeat the same visible
+flow on the same machine before and after a change. Accept a sample only when `hidden` is `false`
+and `comparable` is `true`. Read `notComparableReasons` before retrying a rejected sample.
+
+Clean up the browser binding:
+
+```bash
+agent-browser --session fps-check close
+unset GENIE_BRIDGE_URL GENIE_SESSION action_pid fps_json fps_status action_status
+```
+
+## Agent outcome
+
+The agent can test whether a render optimization also improves the visible frame window and can read
+a current heap signal separately. Proving heap growth needs repeated equivalent flows and memory
+samples; one heap read is not a trend. React render counts are not a proxy for every performance
+problem.

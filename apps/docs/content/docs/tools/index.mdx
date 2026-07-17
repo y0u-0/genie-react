@@ -1,0 +1,56 @@
+---
+title: Tool reference
+description: Inputs, outputs, limits, and agent use for every live Genie tool.
+icon: Blocks
+---
+
+The built-in collectors expose 73 tools. The active app may expose fewer. Run `status` to see its
+domains, then discover one exact contract:
+
+```bash
+npx @genie-react/cli tools react_render_causes
+```
+
+All calls use this shape:
+
+```bash
+npx @genie-react/cli call <tool> '<JSON input>' --json
+```
+
+Every entry includes the exact input, a call, selected output fields, and the decision that output
+enables. The examples come from live demo runs, source tests, or the validated contract. IDs, counts,
+paths, and times change with the app.
+
+Use the contract command before automation. It is the final source for the installed version:
+
+```bash
+npx @genie-react/cli tools react_render_causes --json
+```
+
+<Cards>
+  <Card
+    title="Sessions and captures"
+    href="/docs/tools/sessions-and-captures"
+  />
+  <Card title="React tree and state" href="/docs/tools/react-tree-and-state" />
+  <Card title="React live actions" href="/docs/tools/react-actions" />
+  <Card
+    title="Renders and effects"
+    href="/docs/tools/react-renders-and-effects"
+  />
+  <Card title="Query reads" href="/docs/tools/query-reads" />
+  <Card title="Query actions" href="/docs/tools/query-actions" />
+  <Card title="Router" href="/docs/tools/router" />
+  <Card title="Browser" href="/docs/tools/browser" />
+  <Card title="Plugins" href="/docs/tools/plugins" />
+</Cards>
+
+## Rules for safe use
+
+- Target one named session before changing live state.
+- Prefer one `devtools_interaction_begin` and `devtools_interaction_stop` pair around each measured
+  flow. It joins renders, causes, effects, and coverage under one interaction ID.
+- Read coverage, omissions, truncation, and evictions.
+- Treat `inferred` and `unknown` as leads, not proof.
+- Distinguish effect scheduling, execution, cleanup, and observed consequences.
+- Restore Query simulations and React overrides.

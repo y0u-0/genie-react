@@ -1,0 +1,147 @@
+---
+title: Verify routes and forced states
+description: Check Router history, props, Suspense, and error boundaries.
+icon: Route
+---
+
+**Demo:** `apps/router-demo`
+
+This case needs `jq`.
+
+## Setup
+
+Start the demo in one shell:
+
+```bash
+pnpm --filter @genie-react/router-demo dev
+```
+
+Open and bind the page in another shell:
+
+```bash
+agent-browser --session docs-case-router open \
+  'http://localhost:3030/?_genie=docs-case-router'
+export GENIE_BRIDGE_URL=ws://localhost:3030/__genie/ws
+export GENIE_SESSION=docs-case-router
+npx @genie-react/cli call devtools_wait '{"condition":"ready","timeoutMs":10000}'
+```
+
+## Verify a navigation
+
+```bash
+npx @genie-react/cli call router_build_location \
+  '{"to":"/suspense","search":{"source":"docs"}}'
+npx @genie-react/cli call router_navigate \
+  '{"to":"/suspense","search":{"source":"docs"}}'
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"navigation","name":"/suspense","timeoutMs":5000}'
+router_state="$(npx @genie-react/cli call router_get_state '{}' --json)"
+jq -e \
+  '.pathname == "/suspense" and .locationSync == "matched"' \
+  <<<"$router_state" >/dev/null
+npx @genie-react/cli call router_list_matches '{}'
+agent-browser --session docs-case-router wait '[data-testid="lazy-content"]'
+agent-browser --session docs-case-router get text '[data-testid="lazy-content"]'
+```
+
+```text
+/suspense?source=docs · idle · 2 matches · browser matched
+
+matches:
+- __root__      success
+- /suspense     success
+
+browser: Lazy content loaded
+```
+
+The agent only inspects the new page after `locationSync` is `matched`.
+
+## Verify a prop state
+
+Return home, find the current component ID, then override it:
+
+```bash
+npx @genie-react/cli call router_navigate '{"to":"/"}'
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"navigation","name":"/","timeoutMs":5000}'
+agent-browser --session docs-case-router wait '[data-testid="unmountable"]'
+unmountable_id="$(
+  npx @genie-react/cli call react_find_components \
+    '{"query":"Unmountable","exact":true}' --json |
+    jq -er 'if (.matches | length) == 1 then .matches[0].id else error("expected one Unmountable") end'
+)"
+npx @genie-react/cli call react_override_props \
+  "$(jq -cn --argjson id "$unmountable_id" '{id:$id,props:{caption:"GENIE OVERRIDE"}}')"
+agent-browser --session docs-case-router get text \
+  '[data-testid="unmountable"]'
+```
+
+```text
+GENIE OVERRIDE
+```
+
+## Hold Suspense and error UI
+
+```bash
+npx @genie-react/cli call router_navigate '{"to":"/suspense"}'
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"navigation","name":"/suspense","timeoutMs":5000}'
+agent-browser --session docs-case-router wait '[data-testid="lazy-content"]'
+lazy_panel_id="$(
+  npx @genie-react/cli call react_find_components \
+    '{"query":"LazyPanel","exact":true}' --json |
+    jq -er 'if (.matches | length) == 1 then .matches[0].id else error("expected one LazyPanel") end'
+)"
+npx @genie-react/cli call react_toggle_suspense_fallback \
+  "$(jq -cn --argjson id "$lazy_panel_id" '{id:$id,showFallback:true}')"
+npx @genie-react/cli call react_error_state '{}'
+agent-browser --session docs-case-router wait \
+  '[data-testid="suspense-fallback"]'
+agent-browser --session docs-case-router get text \
+  '[data-testid="suspense-fallback"]'
+```
+
+```text
+0 caught · 1 suspended
+fallback SHOWING
+browser: Loading lazy panel…
+```
+
+On the error route:
+
+```bash
+npx @genie-react/cli call router_navigate '{"to":"/error"}'
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"navigation","name":"/error","timeoutMs":5000}'
+agent-browser --session docs-case-router wait '[data-testid="throw"]'
+bomb_id="$(
+  npx @genie-react/cli call react_find_components \
+    '{"query":"Bomb","exact":true}' --json |
+    jq -er 'if (.matches | length) == 1 then .matches[0].id else error("expected one Bomb") end'
+)"
+npx @genie-react/cli call react_force_error_boundary \
+  "$(jq -cn --argjson id "$bomb_id" '{id:$id,forceError:true}')"
+npx @genie-react/cli call react_error_state '{}'
+agent-browser --session docs-case-router wait '[data-testid="error-ui"]'
+agent-browser --session docs-case-router get text '[data-testid="error-ui"]'
+```
+
+```text
+1 caught · 0 suspended
+Boundary caught "Simulated error coming from DevTools"
+browser: Caught: Simulated error coming from DevTools · Reset
+```
+
+The agent can now check fallback text, dimensions, focus, ARIA, containment, and retry controls.
+
+## Restore
+
+```bash
+npx @genie-react/cli call react_list_overrides '{}'
+npx @genie-react/cli call react_reset_overrides '{}'
+npx @genie-react/cli call router_navigate '{"to":"/"}'
+agent-browser --session docs-case-router close
+unset GENIE_BRIDGE_URL GENIE_SESSION bomb_id lazy_panel_id router_state unmountable_id
+```
+
+The live reset returned `remaining: 0`.

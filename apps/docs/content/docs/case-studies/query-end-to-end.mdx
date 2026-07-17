@@ -1,0 +1,135 @@
+---
+title: Prove Query cache to UI
+description: Change one cache entry, join its observer notification to a render, and restore real data.
+icon: DatabaseZap
+---
+
+**Demo:** `apps/demo` with TanStack Start
+
+This test separates four layers that are often confused: the Query cache, observer delivery, React
+rendering, and visible UI.
+
+## Setup
+
+Start the demo:
+
+```bash
+pnpm --filter @genie-react/demo dev
+```
+
+Open and bind the page:
+
+```bash
+agent-browser --session docs-case-start open \
+  'http://localhost:3000/?_genie=docs-case-start'
+export GENIE_BRIDGE_URL=ws://localhost:3000/__genie/ws
+export GENIE_SESSION=docs-case-start
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["demo","greeting"],"timeoutMs":10000}'
+```
+
+## Change one cache entry
+
+Start one interaction boundary, write test data, and check the page:
+
+```bash
+begin="$(npx @genie-react/cli call devtools_interaction_begin \
+  '{"name":"query cache write","components":["App"]}' --json)"
+interaction_id="$(printf '%s\n' "$begin" | jq -r '.interactionId')"
+
+npx @genie-react/cli call query_set_data \
+  '{"queryKey":["demo","greeting"],"data":{"message":"cache probe","at":0}}' --json
+agent-browser --session docs-case-start \
+  eval 'document.body.innerText.includes("cache probe")'
+
+npx @genie-react/cli call query_notifications '{"limit":10}' --json
+npx @genie-react/cli call devtools_interaction_stop \
+  "{\"interactionId\":\"$interaction_id\",\"domains\":[\"react\",\"query\"],\"quietMs\":200,\"timeoutMs\":5000}" \
+  --json
+```
+
+The browser returned `true`. Selected live notification output:
+
+```json
+{
+  "notificationId": "query-notification:2",
+  "observerId": "query-observer:1",
+  "observationId": "observation:1",
+  "trackedFields": ["status", "fetchStatus", "isError", "data"],
+  "trackedFieldsCoverage": "exact",
+  "changedResultFields": ["data", "dataUpdatedAt"],
+  "deliveryReason": "tracked-field-changed:data",
+  "fanout": 1,
+  "structuralSharing": {
+    "changedFields": ["data", "dataUpdatedAt"],
+    "truncated": false
+  },
+  "renderEventIds": ["render:7:218"]
+}
+```
+
+The stopped interaction used the same observation and reported:
+
+```json
+{
+  "boundary": {
+    "observationId": "observation:1",
+    "startDocumentCommitId": 6,
+    "stopDocumentCommitId": 7,
+    "recordedCommits": 1,
+    "postInteractionCommits": 0,
+    "trackingFrozen": true
+  },
+  "settle": {
+    "ok": true,
+    "domains": {
+      "react": { "status": "met" },
+      "query": { "status": "met" }
+    }
+  }
+}
+```
+
+The agent can now make an exact statement: the observed Query subscriber tracked `data`, the cache
+write changed `data`, that notification joined render event `render:7:218`, and the page displayed
+the new value. It does not need to guess whether the failure is in the network, cache, subscription,
+or DOM.
+
+## Restore real data
+
+Use the real UI to refetch, wait for that exact query, then verify both cache and page:
+
+```bash
+agent-browser --session docs-case-start find role button click --name 'Refetch'
+npx @genie-react/cli call devtools_wait \
+  '{"condition":"query-settled","queryKey":["demo","greeting"],"timeoutMs":5000}' --json
+npx @genie-react/cli call query_get_data \
+  '{"queryKey":["demo","greeting"]}' --json
+agent-browser --session docs-case-start \
+  eval 'document.body.innerText.includes("Hello from TanStack Query")'
+```
+
+Selected live result:
+
+```json
+{
+  "found": true,
+  "status": "success",
+  "data": {
+    "message": "Hello from TanStack Query"
+  }
+}
+```
+
+The final browser check returned `true`.
+
+```bash
+agent-browser --session docs-case-start close
+unset GENIE_BRIDGE_URL GENIE_SESSION interaction_id begin
+```
+
+## Outcome
+
+Before, the agent could see that data changed. Now it can follow one value from cache write to exact
+observer delivery, React render, and visible text. It can also restore the real query result without
+leaving test state behind.

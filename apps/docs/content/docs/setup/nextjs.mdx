@@ -1,0 +1,181 @@
+---
+title: Next.js
+description: Start the local hub and load the client before the app runs.
+icon: Layers
+---
+
+`init` adds `GenieScript` to the root layout and creates `instrumentation.ts`. This is a Next.js
+App Router setup. TanStack Router is not installed or used.
+
+```tsx title="app/layout.tsx"
+import { GenieScript } from 'genie-react/next'
+import type { ReactNode } from 'react'
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <GenieScript />
+        {children}
+      </body>
+    </html>
+  )
+}
+```
+
+```ts title="instrumentation.ts"
+export async function register(): Promise<void> {
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    process.env.NEXT_RUNTIME === 'nodejs'
+  ) {
+    const { registerGenie } = await import('genie-react/next')
+    await registerGenie()
+  }
+}
+```
+
+This is enough for the core session, React, memory, and performance tools.
+
+## Add Query tools
+
+Skip this section when the app does not use TanStack Query.
+
+Create the client once:
+
+```tsx title="app/query-client.ts"
+'use client'
+
+import { QueryClient } from '@tanstack/react-query'
+
+export const queryClient = new QueryClient()
+```
+
+Register Query tools on the client started by `GenieScript`:
+
+```tsx title="app/genie-query-tools.tsx"
+'use client'
+
+import { queryCollector } from 'genie-react/collectors/query'
+import { registerGenieCollector } from 'genie-react/protocol'
+import { useEffect } from 'react'
+import { queryClient } from './query-client'
+
+export function GenieQueryTools() {
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return
+
+    return registerGenieCollector(queryCollector(queryClient))
+  }, [])
+
+  return null
+}
+```
+
+Render it after `GenieScript`:
+
+```tsx title="app/layout.tsx"
+import { GenieScript } from 'genie-react/next'
+import type { ReactNode } from 'react'
+import { GenieQueryTools } from './genie-query-tools'
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <GenieScript />
+        <GenieQueryTools />
+        {children}
+      </body>
+    </html>
+  )
+}
+```
+
+Use the same client in the page that owns the Query provider:
+
+```tsx title="app/query-page.tsx"
+'use client'
+
+import { QueryClientProvider } from '@tanstack/react-query'
+import type { ReactNode } from 'react'
+import { queryClient } from './query-client'
+
+export function QueryPage({ children }: { children: ReactNode }) {
+  return (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  )
+}
+```
+
+## Check Query tools
+
+Keep the Next.js development server running in one terminal, open the app, and check it from another:
+
+```bash title="Terminal 1"
+pnpm dev
+```
+
+Open the page that mounts the Query provider. The demo uses
+`http://localhost:3000/query-demo?_genie=next-check`.
+
+```bash title="Terminal 2"
+export GENIE_SESSION=next-check
+status_json="$(npx @genie-react/cli status --json)"
+tools_json="$(npx @genie-react/cli tools --json)"
+query_json="$(npx @genie-react/cli call query_list '{"limit":10}' --json)"
+jq '{
+  connected,
+  ready,
+  sessionId,
+  domains,
+  toolCount
+}' <<<"$status_json"
+jq '{app, total, query: [.groups[] | select(.group == "query")]}' \
+  <<<"$tools_json"
+jq '{queries, total}' <<<"$query_json"
+jq -e '
+  .connected and .ready and
+  ((.domains | index("query")) != null)
+' <<<"$status_json" >/dev/null
+jq -e '
+  any(.groups[]; .group == "query" and (.tools | index("query_list") != null))
+' <<<"$tools_json" >/dev/null
+jq -e '
+  .total > 0 and
+  any(.queries[]; .status == "success" and .observerCount > 0)
+' <<<"$query_json" >/dev/null
+unset GENIE_SESSION query_json status_json tools_json
+```
+
+Selected live output:
+
+```json
+{
+  "connected": true,
+  "ready": true,
+  "domains": ["session", "react", "memory", "perf", "query"],
+  "toolCount": 59
+}
+```
+
+```json
+{
+  "queries": [
+    {
+      "queryHash": "[\"greeting\"]",
+      "queryKey": ["greeting"],
+      "status": "success",
+      "fetchStatus": "idle",
+      "isActive": true,
+      "observerCount": 1
+    }
+  ],
+  "total": 1
+}
+```
+
+The first assertion checks the supported status fields. The second checks the separate tool
+inventory. A `query` domain plus `query_list` proves that the runtime received the Query collector.
+Both components import the same `queryClient`. No TanStack Router package, provider, or runtime is
+involved. Router tools do not appear in this setup.

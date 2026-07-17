@@ -1,0 +1,16 @@
+{
+  "title": "Workflows",
+  "icon": "Workflow",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "render-optimization",
+    "components-and-context",
+    "effects",
+    "query",
+    "router",
+    "loading-and-errors",
+    "performance-proof",
+    "memory-and-fps"
+  ]
+}

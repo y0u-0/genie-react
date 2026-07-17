@@ -1,0 +1,90 @@
+---
+title: Components, hooks, and Context
+description: Read and test the state used by one mounted component.
+icon: Component
+---
+
+## Find the instance
+
+```bash
+npx @genie-react/cli call react_find_components \
+  '{"query":"CheckoutForm","exact":true}' --json
+```
+
+Example output:
+
+```json
+{
+  "matches": [
+    {
+      "id": 42,
+      "name": "CheckoutForm",
+      "path": "App > CheckoutForm",
+      "kind": "function",
+      "props": { "cartId": "cart-17" },
+      "source": {
+        "file": "src/CheckoutForm.tsx",
+        "line": 18,
+        "column": 1,
+        "functionName": "CheckoutForm",
+        "sourceMapConfidence": "mapped"
+      },
+      "isLibrary": false
+    }
+  ]
+}
+```
+
+The ID and props are illustrative. Always use the values returned by the mounted app.
+
+## Inspect props and hooks
+
+```bash
+npx @genie-react/cli call react_inspect_component \
+  '{"id":42,"depth":3}' --json
+```
+
+Use the returned `stateIndex` when changing a `useState` or `useReducer` value:
+
+```bash
+npx @genie-react/cli call react_override_hook_state \
+  '{"id":42,"stateIndex":0,"value":"review"}' --json
+```
+
+## Read or test Context
+
+```bash
+npx @genie-react/cli call react_inspect_context \
+  '{"id":42,"depth":3}' --json
+```
+
+```bash
+npx @genie-react/cli call react_override_context \
+  '{"id":42,"context":"ThemeContext","value":{"mode":"dark"}}' --json
+```
+
+## Map React to the UI
+
+From a component to its elements:
+
+```bash
+npx @genie-react/cli call react_dom_for_component '{"id":42,"limit":5}' --json
+```
+
+From a visible element to its owner:
+
+```bash
+npx @genie-react/cli call react_component_for_dom \
+  '{"selector":"[data-testid=checkout]"}' --json
+```
+
+## Clean up
+
+```bash
+npx @genie-react/cli call react_reset_overrides '{}'
+```
+
+## Agent outcome
+
+The agent can test selected props, stateful hooks, Context values, Suspense, and error states. It can
+also locate the browser element and source file without guessing from a component name alone.

@@ -1,0 +1,6 @@
+{
+  "title": "Getting started",
+  "icon": "Rocket",
+  "defaultOpen": true,
+  "pages": ["index", "install", "agent-workflow", "first-check", "sessions", "cli-output"]
+}

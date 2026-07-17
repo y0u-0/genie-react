@@ -1,0 +1,16 @@
+{
+  "title": "Tool reference",
+  "icon": "Blocks",
+  "pages": [
+    "index",
+    "sessions-and-captures",
+    "react-tree-and-state",
+    "react-actions",
+    "react-renders-and-effects",
+    "query-reads",
+    "query-actions",
+    "router",
+    "browser",
+    "plugins"
+  ]
+}

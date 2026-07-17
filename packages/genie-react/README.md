@@ -111,4 +111,4 @@ For a stronger performance check, repeat the same flow at least three times befo
 
 Works with React 18 and 19, Vite, TanStack Start, Next.js, React Native, Expo, TanStack Query, and TanStack Router.
 
-See the [full setup and tool list](https://github.com/Genie-sa/genie-react#readme).
+See the [full setup, workflows, and all tools](https://genie-react.com/docs).
