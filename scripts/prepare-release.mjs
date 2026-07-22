@@ -1,8 +1,17 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -24,6 +33,29 @@ function parseArguments(argv) {
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+function boundedOutput(value, limit = 4000) {
+  const output = typeof value === 'string' ? value.trim() : ''
+  if (output.length <= limit) return output
+  return `…${output.slice(-limit)}`
+}
+
+function runCommand(command, args, { cwd, label, timeout = 30_000, maxBuffer = 256_000 } = {}) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer,
+    timeout,
+  })
+  if (!result.error && result.status === 0) {
+    return { stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+  }
+  const detail = [boundedOutput(result.stdout), boundedOutput(result.stderr)]
+    .filter(Boolean)
+    .join('\n')
+  const outcome = result.error?.message ?? `exit ${result.status ?? 'unknown'}`
+  throw new Error(`${label ?? command} failed (${outcome})${detail ? `\n${detail}` : ''}`)
 }
 
 function publicPackages() {
@@ -64,11 +96,11 @@ function dependencyFirst(packages) {
 }
 
 function pack(entry, outputDirectory) {
-  const output = execFileSync('pnpm', ['pack', '--json', '--pack-destination', outputDirectory], {
+  const { stdout } = runCommand('pnpm', ['pack', '--json', '--pack-destination', outputDirectory], {
     cwd: entry.directory,
-    encoding: 'utf8',
+    label: `Pack ${entry.manifest.name}`,
   })
-  const result = JSON.parse(output)
+  const result = JSON.parse(stdout)
   if (result.name !== entry.manifest.name || result.version !== entry.manifest.version) {
     throw new Error(
       `Packed identity mismatch for ${entry.manifest.name}: ${result.name}@${result.version}`,
@@ -79,7 +111,9 @@ function pack(entry, outputDirectory) {
 
 function inspectPackage(tarball, extractionRoot) {
   const extractionDirectory = mkdtempSync(join(extractionRoot, 'inspect-'))
-  execFileSync('tar', ['-xzf', tarball, '-C', extractionDirectory])
+  runCommand('tar', ['-xzf', tarball, '-C', extractionDirectory], {
+    label: `Inspect ${tarball}`,
+  })
   const packageDirectory = join(extractionDirectory, 'package')
   return {
     manifest: readJson(join(packageDirectory, 'package.json')),
@@ -104,6 +138,42 @@ function assertPublishable(manifest) {
   }
 }
 
+function assertPackageTarget(name, packageDirectory, label, target) {
+  if (!target.startsWith('./')) {
+    throw new Error(`${name} ${label} must be package-relative, got ${target}`)
+  }
+  const targetPath = resolve(packageDirectory, target)
+  if (targetPath !== packageDirectory && !targetPath.startsWith(`${packageDirectory}${sep}`)) {
+    throw new Error(`${name} ${label} escapes the package: ${target}`)
+  }
+  if (!existsSync(targetPath)) throw new Error(`${name} ${label} is missing: ${target}`)
+}
+
+function assertTargetTree(name, packageDirectory, label, value) {
+  if (typeof value === 'string') {
+    assertPackageTarget(name, packageDirectory, label, value)
+    return
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => {
+      assertTargetTree(name, packageDirectory, `${label}[${index}]`, entry)
+    })
+    return
+  }
+  if (value && typeof value === 'object') {
+    for (const [condition, target] of Object.entries(value)) {
+      assertTargetTree(name, packageDirectory, `${label}.${condition}`, target)
+    }
+  }
+}
+
+function assertManifestTargets(manifest, packageDirectory) {
+  assertTargetTree(manifest.name, packageDirectory, 'exports', manifest.exports)
+  for (const field of ['main', 'module', 'types', 'bin']) {
+    assertTargetTree(manifest.name, packageDirectory, field, manifest[field])
+  }
+}
+
 function assertTrustedPublishingRepository(manifest) {
   const githubRepository = process.env.GITHUB_REPOSITORY
   if (!githubRepository) return
@@ -116,17 +186,136 @@ function assertTrustedPublishingRepository(manifest) {
   }
 }
 
-function smokeInstall(tarballs, temporaryRoot) {
+function runtimeTarget(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const target = runtimeTarget(entry)
+      if (target) return target
+    }
+    return null
+  }
+  if (!value || typeof value !== 'object') return null
+  for (const condition of ['import', 'node', 'default', 'require', 'browser']) {
+    const target = runtimeTarget(value[condition])
+    if (target) return target
+  }
+  return null
+}
+
+function publicJsSpecifiers(manifest) {
+  if (typeof manifest.exports === 'string') return [manifest.name]
+  return Object.entries(manifest.exports ?? {})
+    .filter(([subpath, target]) => subpath !== './package.json' && runtimeTarget(target))
+    .map(([subpath]) => (subpath === '.' ? manifest.name : `${manifest.name}${subpath.slice(1)}`))
+}
+
+function installedPackageDirectory(projectDirectory, name) {
+  return join(projectDirectory, 'node_modules', ...name.split('/'))
+}
+
+function assertInstalledIdentity(projectDirectory, expected) {
+  const directory = installedPackageDirectory(projectDirectory, expected.name)
+  const manifest = readJson(join(directory, 'package.json'))
+  if (manifest.name !== expected.name || manifest.version !== expected.version) {
+    throw new Error(
+      `Installed identity mismatch for ${expected.name}: ${manifest.name}@${manifest.version}`,
+    )
+  }
+  return { directory, manifest }
+}
+
+function verifyImports(projectDirectory, runtimeManifest) {
+  const specifiers = publicJsSpecifiers(runtimeManifest)
+  if (specifiers.length === 0) throw new Error(`${runtimeManifest.name} has no public JS exports`)
+  const verifierPath = join(projectDirectory, 'verify-imports.mjs')
+  writeFileSync(
+    verifierPath,
+    `const specifiers = ${JSON.stringify(specifiers)}
+for (const specifier of specifiers) await import(specifier)
+const cli = await import('@genie-react/cli')
+if (Object.keys(cli).length === 0) throw new Error('@genie-react/cli has no library exports')
+`,
+  )
+  const result = runCommand(process.execPath, [verifierPath], {
+    cwd: projectDirectory,
+    label: 'Import installed package entry points',
+  })
+  if (result.stdout !== '' || result.stderr !== '') {
+    throw new Error('Installed package imports must not write to stdout or stderr')
+  }
+}
+
+function verifyCliBin(projectDirectory, cliDirectory, cliManifest) {
+  const binTarget =
+    typeof cliManifest.bin === 'string' ? cliManifest.bin : cliManifest.bin?.['genie-react']
+  if (typeof binTarget !== 'string') throw new Error('@genie-react/cli has no genie-react bin')
+  const installedBin = join(projectDirectory, 'node_modules', '.bin', 'genie-react')
+  const expectedBin = resolve(cliDirectory, binTarget)
+  if (realpathSync(installedBin) !== realpathSync(expectedBin)) {
+    throw new Error('Installed genie-react bin does not point at the packed CLI')
+  }
+
+  const help = runCommand(installedBin, ['--help'], {
+    cwd: projectDirectory,
+    label: 'Installed genie-react --help',
+    timeout: 10_000,
+    maxBuffer: 64_000,
+  })
+  if (
+    help.stderr !== '' ||
+    help.stdout.includes('\u001b') ||
+    !help.stdout.endsWith('\n') ||
+    !help.stdout.includes('Usage: npx @genie-react/cli <command> [options]') ||
+    !help.stdout.includes('--version')
+  ) {
+    throw new Error('Installed genie-react --help output does not match its public contract')
+  }
+
+  const version = runCommand(installedBin, ['--version'], {
+    cwd: projectDirectory,
+    label: 'Installed genie-react --version',
+    timeout: 10_000,
+    maxBuffer: 64_000,
+  })
+  if (version.stderr !== '' || version.stdout !== `${cliManifest.version}\n`) {
+    throw new Error(
+      `Installed genie-react --version must print ${cliManifest.version}, got ${JSON.stringify(version.stdout)}`,
+    )
+  }
+}
+
+function smokeInstall(plan, peerInstallSpecs, temporaryRoot) {
   const projectDirectory = mkdtempSync(join(temporaryRoot, 'install-'))
   writeFileSync(
     join(projectDirectory, 'package.json'),
-    JSON.stringify({ name: 'release-smoke-test', private: true }),
+    `${JSON.stringify({ name: 'release-smoke-test', private: true, type: 'module' }, null, 2)}\n`,
   )
-  execFileSync(
+  runCommand(
     'npm',
-    ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false', ...tarballs],
-    { cwd: projectDirectory, stdio: 'inherit' },
+    [
+      'install',
+      '--ignore-scripts',
+      '--no-audit',
+      '--no-fund',
+      '--package-lock=false',
+      ...plan.map(({ tarball }) => tarball),
+      ...peerInstallSpecs,
+    ],
+    { cwd: projectDirectory, label: 'Install release tarballs', timeout: 120_000 },
   )
+
+  const installed = new Map(
+    plan.map((entry) => [entry.name, assertInstalledIdentity(projectDirectory, entry)]),
+  )
+  const runtime = installed.get('genie-react')
+  const cli = installed.get('@genie-react/cli')
+  if (!runtime || !cli) throw new Error('Release smoke test requires runtime and CLI packages')
+  if (runtime.manifest.exports?.['./package.json'] !== './package.json') {
+    throw new Error('genie-react/package.json must remain a public data export')
+  }
+  verifyImports(projectDirectory, runtime.manifest)
+  verifyCliBin(projectDirectory, cli.directory, cli.manifest)
 }
 
 const { outputDirectory, preserveOutput = false } = parseArguments(process.argv.slice(2))
@@ -140,17 +329,22 @@ try {
     assertPublishable(manifest)
     assertTrustedPublishingRepository(manifest)
     assertReadme(manifest.name, packageDirectory)
+    assertManifestTargets(manifest, packageDirectory)
     return {
       name: manifest.name,
       version: manifest.version,
       directory: relative(ROOT, entry.directory),
       tarball,
+      peerInstallSpecs: Object.keys(manifest.peerDependencies ?? {}).map((name) => {
+        const range = entry.manifest.devDependencies?.[name]
+        if (!range) throw new Error(`${manifest.name} needs a smoke-test version for peer ${name}`)
+        return `${name}@${range}`
+      }),
     }
   })
-  smokeInstall(
-    plan.map(({ tarball }) => tarball),
-    temporaryRoot,
-  )
+  // Peers make every entry point importable; the compatibility check owns version-range coverage.
+  const peerInstallSpecs = [...new Set(plan.flatMap(({ peerInstallSpecs }) => peerInstallSpecs))]
+  smokeInstall(plan, peerInstallSpecs, temporaryRoot)
   const planPath = join(outputDirectory, 'release-plan.tsv')
   writeFileSync(
     planPath,
@@ -160,7 +354,9 @@ try {
       )
       .join('\n')}\n`,
   )
-  process.stdout.write(`Verified ${plan.length} release tarballs with a clean npm install\n`)
+  process.stdout.write(
+    `Verified ${plan.length} release tarballs, entry points, and CLI bin with a clean npm install\n`,
+  )
   if (preserveOutput) process.stdout.write(`Release plan: ${planPath}\n`)
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true })
