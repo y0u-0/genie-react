@@ -39,3 +39,52 @@ jobs:
 
       - name: Documentation
         run: pnpm check:docs
+
+  vite-e2e:
+    name: Vite browser to CLI E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run Vite E2E
+        run: pnpm check:e2e
+
+  compatibility:
+    name: Compatibility · ${{ matrix.profile }} · Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: minimum
+            node: 22.12.0
+          - profile: current
+            node: 24
+          - profile: current
+            node: 26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Setup compatibility Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Verify dependency compatibility
+        run: node scripts/check-compatibility.mjs --profile ${{ matrix.profile }}

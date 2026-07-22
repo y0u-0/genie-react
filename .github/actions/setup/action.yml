@@ -6,7 +6,6 @@ inputs:
     description: npm registry to authenticate against (only needed for publishing).
     required: false
     default: ""
-
 runs:
   using: composite
   steps:
