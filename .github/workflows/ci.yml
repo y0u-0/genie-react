@@ -56,3 +56,30 @@ jobs:
 
       - name: Run Vite E2E
         run: pnpm check:e2e
+
+  compatibility:
+    name: Compatibility · ${{ matrix.profile }} · Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: minimum
+            node: 22.12.0
+          - profile: current
+            node: 24
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup
+        uses: ./.github/actions/setup
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Verify dependency compatibility
+        run: node scripts/check-compatibility.mjs --profile ${{ matrix.profile }}

@@ -24,6 +24,8 @@
     "check:docs": "pnpm --filter @genie-react/docs check",
     "test:e2e": "node scripts/check-vite-e2e.mjs",
     "check:e2e": "pnpm build && pnpm test:e2e",
+    "test:compatibility": "node scripts/check-compatibility.mjs",
+    "check:compatibility": "pnpm build && pnpm test:compatibility",
     "check:release": "node scripts/prepare-release.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm build && pnpm check:release && pnpm test && pnpm check:docs",
     "format": "biome format --write .",

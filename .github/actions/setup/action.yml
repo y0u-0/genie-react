@@ -6,6 +6,10 @@ inputs:
     description: npm registry to authenticate against (only needed for publishing).
     required: false
     default: ""
+  node-version:
+    description: Node version override for compatibility jobs; defaults to .nvmrc.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -13,10 +17,19 @@ runs:
     - name: Setup pnpm
       uses: pnpm/action-setup@v4
 
-    - name: Setup Node
+    - name: Setup Node from .nvmrc
+      if: inputs.node-version == ''
       uses: actions/setup-node@v4
       with:
         node-version-file: .nvmrc
+        cache: pnpm
+        registry-url: ${{ inputs.registry-url }}
+
+    - name: Setup requested Node version
+      if: inputs.node-version != ''
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
         cache: pnpm
         registry-url: ${{ inputs.registry-url }}
 
