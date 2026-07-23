@@ -3,6 +3,7 @@ import {
   type Fiber,
   type FiberRoot,
   getFiberId,
+  getRDTHook,
   getTimings,
   HostTextTag,
   hasMemoCache,
@@ -131,6 +132,7 @@ const recentCauseEvents: RetainedRenderCauseEvent[] = []
 let commits = 0
 let installed = false
 let instrumentation: Unsubscribe | null = null
+let instrumentedHook: ReturnType<typeof getRDTHook> | null = null
 // Stop is intentionally a soft flag: the commit handler stays wired so the client's liveness heartbeat continues while profiling is paused.
 let paused = false
 let skippedCommitFibers = 0
@@ -205,10 +207,18 @@ export function setCommitListener(listener: (() => void) | null): void {
   commitListener = listener
 }
 
-/** Installs commit-time instrumentation (idempotent) and (re)enables tracking; the DevTools hook must already be present before React loads, or no commits are delivered. */
+/** Installs commit-time instrumentation on the active DevTools hook and (re)enables tracking; the hook must already be present before React loads, or no commits are delivered. */
 export function startRenderTracking(): boolean {
   paused = false
-  if (installed) return true
+  let currentHook: ReturnType<typeof getRDTHook>
+  try {
+    currentHook = getRDTHook()
+  } catch {
+    disposeRenderTracking()
+    return false
+  }
+  if (installed && instrumentedHook === currentHook) return true
+  if (installed) disposeRenderTracking()
   try {
     instrumentation = instrument({
       name: 'genie-react',
@@ -312,9 +322,10 @@ export function startRenderTracking(): boolean {
         finalizeCommitAnalysisBudget(budget)
       }),
     })
+    instrumentedHook = currentHook
     installed = true
   } catch {
-    installed = false
+    disposeRenderTracking()
   }
   return installed
 }
@@ -336,6 +347,7 @@ export function disposeRenderTracking(): void {
   invalidateLiveInstancesForRefresh()
   instrumentation?.()
   instrumentation = null
+  instrumentedHook = null
   installed = false
   paused = false
   pendingUnmounts.length = 0

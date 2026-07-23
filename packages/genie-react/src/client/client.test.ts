@@ -50,6 +50,16 @@ function setup() {
   return { socket, client }
 }
 
+class DeferredCloseSocket extends FakeSocket {
+  override close(): void {
+    this.readyState = 3
+  }
+
+  emitClose(): void {
+    this.onclose?.(null)
+  }
+}
+
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('GenieClient', () => {
@@ -295,6 +305,57 @@ describe('GenieClient', () => {
     expect(response.error).toContain('Unknown argument "maxDepth"')
     expect(response.error).toContain('valid keys: message')
     expect(response.errorCode).toBe('invalid-args')
+  })
+
+  describe('reconnect lifecycle', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('remains reconnectable after stop cancels an in-flight retry and start resumes', () => {
+      vi.useFakeTimers()
+      const sockets: FakeSocket[] = []
+      const client = createGenieClient({
+        collectors: [],
+        reconnectDelayMs: 100,
+        socketFactory: () => {
+          const socket = new FakeSocket()
+          sockets.push(socket)
+          return socket
+        },
+      })
+
+      client.start()
+      sockets[0]?.close()
+      client.stop()
+      client.start()
+      sockets[1]?.close()
+      vi.advanceTimersByTime(100)
+
+      expect(sockets).toHaveLength(3)
+      client.stop()
+    })
+
+    it('ignores a delayed close from the socket stopped before a restart', () => {
+      const sockets: DeferredCloseSocket[] = []
+      const client = createGenieClient({
+        collectors: [],
+        socketFactory: () => {
+          const socket = new DeferredCloseSocket()
+          sockets.push(socket)
+          return socket
+        },
+      })
+
+      client.start()
+      client.stop()
+      client.start()
+      sockets[0]?.emitClose()
+      sockets[1]?.open()
+
+      expect(sockets[1]?.decoded().map((frame) => frame.kind)).toEqual(['app/hello', 'app/ready'])
+      client.stop()
+    })
   })
 
   describe('heartbeat', () => {

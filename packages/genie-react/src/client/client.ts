@@ -86,12 +86,19 @@ export class GenieClient {
 
   stop(): void {
     this.started = false
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     this.stopHeartbeat()
     for (const cleanup of this.cleanups.values()) cleanup()
     this.cleanups.clear()
-    this.socket?.close()
+    const socket = this.socket
     this.socket = null
+    if (socket) {
+      this.clearSocketHandlers(socket)
+      socket.close()
+    }
   }
 
   registerCollector(collector: GenieCollector): void {
@@ -116,9 +123,15 @@ export class GenieClient {
   private connect(): void {
     const socket = this.socketFactory(`${this.url}?role=app`)
     this.socket = socket
-    socket.onopen = () => this.onOpen()
-    socket.onmessage = (event) => this.onMessage(String(event.data))
+    socket.onopen = () => {
+      if (this.socket === socket) this.onOpen()
+    }
+    socket.onmessage = (event) => {
+      if (this.socket === socket) this.onMessage(String(event.data))
+    }
     socket.onclose = () => {
+      if (this.socket !== socket) return
+      this.clearSocketHandlers(socket)
       this.socket = null
       this.stopHeartbeat()
       if (this.started) this.scheduleReconnect()
@@ -126,8 +139,15 @@ export class GenieClient {
     socket.onerror = () => {}
   }
 
+  private clearSocketHandlers(socket: SocketLike): void {
+    socket.onopen = null
+    socket.onmessage = null
+    socket.onclose = null
+    socket.onerror = null
+  }
+
   private scheduleReconnect(): void {
-    if (this.reconnectTimer) return
+    if (this.reconnectTimer !== null) return
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (this.started) this.connect()
