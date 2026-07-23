@@ -374,3 +374,20 @@ describe('review regressions', () => {
     expect(appTools.length).toBeLessThanOrEqual(32)
   })
 })
+
+describe('overlapping registration ownership', () => {
+  it('keeps the latest handler when the OLDER registration unmounts first', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { socket } = startClient()
+    const unregisterA = registerGenieTools(seedCartTool(() => ({ added: 'A' })))
+    registerGenieTools(seedCartTool(() => ({ added: 'B' })))
+    unregisterA()
+    warn.mockRestore()
+    await flush()
+
+    expect(advertisedTool(socket, 'app_seed_cart').available).toBeUndefined()
+    socket.receive({ kind: 'bridge/request', id: 'o1', tool: 'app_seed_cart', args: {} })
+    await flush()
+    expect(lastResponse(socket, 'o1').result).toEqual({ added: 'B' })
+  })
+})
