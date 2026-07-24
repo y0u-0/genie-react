@@ -27,6 +27,6 @@
     "@genie-react/cli": "workspace:*",
     "@types/react": "~19.2.2",
     "genie-react": "workspace:*",
-    "typescript": "~6.0.3"
+    "typescript": "~7.0.2"
   }
 }
