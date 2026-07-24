@@ -538,6 +538,7 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactClearRendersContract,
         handler: ({ components, roots, budget, lifecycle }) => {
+          startRefreshTracking()
           startRenderTracking()
           const observation = clearRenders({ components, roots, budget, lifecycle })
           return {
@@ -552,6 +553,7 @@ export function reactCollector(): GenieCollector {
       defineCollectorTool({
         contract: reactProfileStartContract,
         handler: ({ components, roots, budget, lifecycle }) => {
+          startRefreshTracking()
           startRenderTracking()
           const observation = clearRenders({ components, roots, budget, lifecycle })
           return {

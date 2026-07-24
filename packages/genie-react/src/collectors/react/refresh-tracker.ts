@@ -78,6 +78,7 @@ let refreshTailActive = false
 let refreshTailGeneration = 0
 let excludedCommitsInCurrentRefresh = 0
 let instrumentation: Unsubscribe | null = null
+let instrumentedHook: ReturnType<typeof getRDTHook> | null = null
 let refreshTrackingActive = false
 let latestRefreshEvent: StoredRefreshEvent | null = null
 
@@ -189,36 +190,48 @@ function restoreRenderers(): void {
   wrappedRenderers.clear()
 }
 
-/** Install refresh observation once. Bippy's listener is installed first, then wrapped so commit suppression spans its synchronous refresh. */
+function resetRefreshTrackingState(): void {
+  refreshTrackingActive = false
+  restoreRenderers()
+  instrumentation = null
+  instrumentedHook = null
+  refreshDepth = 0
+  bundlerUpdateActive = false
+  refreshTailActive = false
+  refreshTailGeneration += 1
+  excludedCommitsInCurrentRefresh = 0
+  latestRefreshEvent = null
+}
+
+/** Install refresh observation once per active DevTools hook. Bippy's listener is installed first, then wrapped so commit suppression spans its synchronous refresh. */
 export function startRefreshTracking(): boolean {
-  if (instrumentation) return true
+  let currentHook: ReturnType<typeof getRDTHook>
+  try {
+    currentHook = getRDTHook()
+  } catch {
+    disposeRefreshTracking()
+    return false
+  }
+  if (instrumentation && instrumentedHook === currentHook) return true
+  if (instrumentation) disposeRefreshTracking()
+  let refresh: Unsubscribe | null = null
+  let rendererInject: Unsubscribe | null = null
   try {
     refreshTrackingActive = true
-    const refresh = instrumentRefresh()
-    for (const renderer of getRDTHook().renderers.values()) wrapRenderer(renderer)
-    const rendererInject = onRendererInject(wrapRenderer)
+    refresh = instrumentRefresh()
+    for (const renderer of currentHook.renderers.values()) wrapRenderer(renderer)
+    rendererInject = onRendererInject(wrapRenderer)
     instrumentation = toUnsubscribe(() => {
-      rendererInject()
-      refresh()
-      refreshTrackingActive = false
-      restoreRenderers()
-      instrumentation = null
-      refreshDepth = 0
-      bundlerUpdateActive = false
-      refreshTailActive = false
-      refreshTailGeneration += 1
-      excludedCommitsInCurrentRefresh = 0
-      latestRefreshEvent = null
+      rendererInject?.()
+      refresh?.()
+      resetRefreshTrackingState()
     })
+    instrumentedHook = currentHook
     return true
   } catch {
-    refreshTrackingActive = false
-    restoreRenderers()
-    instrumentation = null
-    bundlerUpdateActive = false
-    refreshTailActive = false
-    refreshTailGeneration += 1
-    latestRefreshEvent = null
+    rendererInject?.()
+    refresh?.()
+    resetRefreshTrackingState()
     return false
   }
 }

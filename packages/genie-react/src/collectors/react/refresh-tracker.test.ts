@@ -2,22 +2,31 @@ import type { Fiber, ReactRenderer, RendererRefreshUpdate } from 'bippy'
 import type { ReactRefreshHandler, ReactRefreshUpdate } from 'bippy/react-refresh'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({
-  renderers: new Map<number, ReactRenderer>(),
-  refreshHandler: null as ReactRefreshHandler | null,
-  injectedListener: null as ((renderer: ReactRenderer) => void) | null,
-  clearSourceCache: vi.fn(),
-  registerFiber: vi.fn((fiber: { id?: number }) => (fiber.id ?? 0) as never),
-  nameOf: vi.fn((fiber: { name?: string }) => fiber.name ?? 'Anonymous'),
-  probeViteClient: false,
-}))
+const mocks = vi.hoisted(() => {
+  const renderers = new Map<number, ReactRenderer>()
+  return {
+    renderers,
+    currentHook: { renderers },
+    hookLookupError: false,
+    refreshInstallations: 0,
+    refreshHandler: null as ReactRefreshHandler | null,
+    injectedListener: null as ((renderer: ReactRenderer) => void) | null,
+    clearSourceCache: vi.fn(),
+    registerFiber: vi.fn((fiber: { id?: number }) => (fiber.id ?? 0) as never),
+    nameOf: vi.fn((fiber: { name?: string }) => fiber.name ?? 'Anonymous'),
+    probeViteClient: false,
+  }
+})
 
 const unsubscribe = (dispose: () => void) => Object.assign(dispose, { [Symbol.dispose]: dispose })
 
 vi.mock('bippy', () => ({
   getDisplayName: (type: { displayName?: string; name?: string }) =>
     type?.displayName ?? type?.name ?? null,
-  getRDTHook: () => ({ renderers: mocks.renderers }),
+  getRDTHook: () => {
+    if (mocks.hookLookupError) throw new Error('hook lookup failed')
+    return mocks.currentHook
+  },
   onRendererInject: (listener: (renderer: ReactRenderer) => void) => {
     mocks.injectedListener = listener
     return unsubscribe(() => {
@@ -29,6 +38,7 @@ vi.mock('bippy', () => ({
 
 vi.mock('bippy/react-refresh', () => ({
   instrumentReactRefresh: ({ onRefresh }: { onRefresh?: ReactRefreshHandler }) => {
+    mocks.refreshInstallations += 1
     if (mocks.probeViteClient) void fetch('/@vite/client')
     mocks.refreshHandler = onRefresh ?? null
     return unsubscribe(() => {
@@ -76,6 +86,9 @@ beforeEach(() => {
   tracker.disposeRefreshTracking()
   tracker.clearRefreshEvents()
   mocks.renderers.clear()
+  mocks.currentHook = { renderers: mocks.renderers }
+  mocks.hookLookupError = false
+  mocks.refreshInstallations = 0
   mocks.refreshHandler = null
   mocks.injectedListener = null
   mocks.clearSourceCache.mockClear()
@@ -202,6 +215,28 @@ describe('refresh tracking', () => {
     expect(observed).toBe(false)
     expect(mocks.refreshHandler).toBeNull()
     expect(mocks.injectedListener).toBeNull()
+  })
+
+  it('reinstalls refresh instrumentation when the React DevTools hook is replaced', () => {
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    mocks.currentHook = { renderers: mocks.renderers }
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    expect(mocks.refreshInstallations).toBe(2)
+  })
+
+  it('disposes stale instrumentation and can recover after hook lookup fails', () => {
+    expect(tracker.startRefreshTracking()).toBe(true)
+
+    mocks.hookLookupError = true
+    expect(tracker.startRefreshTracking()).toBe(false)
+    expect(mocks.refreshHandler).toBeNull()
+    expect(mocks.injectedListener).toBeNull()
+
+    mocks.hookLookupError = false
+    expect(tracker.startRefreshTracking()).toBe(true)
+    expect(mocks.refreshInstallations).toBe(2)
   })
 
   it('supports incremental reads and omits source work when requested', async () => {
